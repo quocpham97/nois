@@ -1,0 +1,10 @@
+# Capacitor generates the native projects with `cap add ios/android`. They are
+# large and reproducible from capacitor.config.ts + the deep-link/push notes in
+# README.md, so they are not committed by default. If you customize native code
+# (Info.plist, AndroidManifest, entitlements) beyond what the README documents,
+# remove the relevant ignore line and commit that project.
+/ios
+/android
+
+node_modules
+package-lock.json

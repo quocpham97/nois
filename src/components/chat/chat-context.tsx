@@ -11,6 +11,7 @@ import {
 } from "react";
 import { usePathname } from "next/navigation";
 import * as msgdb from "@/lib/message-db";
+import { getShellBridge } from "@/lib/shell";
 import { toast } from "sonner";
 import {
   type Attachment,
@@ -1581,12 +1582,14 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         socket.emit("channel:read", { channelId });
         scheduleReceiptRef.current(channelId);
       }
-      // Desktop shell: native notification for messages arriving outside the
-      // focused channel (Web Push doesn't exist in Electron — src/lib/push.ts
-      // reports unsupported there). Copy mirrors public/sw.js and stays
+      // Native shell (Electron desktop or Capacitor mobile): OS notification
+      // for messages arriving outside the focused channel (Web Push doesn't
+      // apply in a native shell — src/lib/push.ts reports unsupported there;
+      // mobile uses local/native notifications). Copy mirrors public/sw.js and stays
       // generic: the payload may still be an undecrypted E2EE envelope here.
+      const shell = getShellBridge();
       if (
-        window.desktop &&
+        shell &&
         message.author.id !== userId &&
         (channelId !== currentChannelIdRef.current ||
           document.hidden ||
@@ -1594,7 +1597,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       ) {
         const ch = channelsRef.current[channelId];
         const isDm = ch?.type === "dm";
-        window.desktop.notify({
+        shell.notify({
           title: isDm
             ? `New message from ${message.author.name}`
             : `New message in #${ch?.name ?? "a channel"}`,
@@ -2550,7 +2553,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // click), and a cold open arrives as `?channel=<id>`. All route to
   // selectChannel.
   useEffect(() => {
-    const offDesktop = window.desktop?.onOpenChannel((id) => selectChannel(id));
+    const offDesktop = getShellBridge()?.onOpenChannel((id) => selectChannel(id));
     const sw =
       typeof navigator !== "undefined" ? navigator.serviceWorker : undefined;
     const onSwMessage = (e: MessageEvent) => {

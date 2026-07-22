@@ -6,6 +6,9 @@
 /* Electron shell only: <html>.desktop is set by DesktopMode when the preload
    bridge is present. The web build never gets this class. */
 @custom-variant desktop (&:is(.desktop *));
+/* Capacitor mobile shell only: <html>.mobile is set by MobileMode when the
+   Capacitor runtime is present. The web and desktop builds never get it. */
+@custom-variant mobile (&:is(.mobile *));
 
 /* Native-feel window chrome in the shell: elements marked app-drag act as the
    macOS title bar (the window frame is hidden), while their interactive
@@ -15,6 +18,17 @@
 }
 .desktop .app-drag :is(button, a, input, [role="button"], [role="menuitem"]) {
   -webkit-app-region: no-drag;
+}
+
+/* Mobile shell: keep content clear of the notch / home indicator / status bar.
+   env(safe-area-inset-*) is 0 everywhere except inside the native WebView, so
+   these are no-ops on web and desktop. `viewport-fit=cover` (set in the native
+   index shell) is required for the insets to report real values. */
+.mobile body {
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
 }
 
 @theme inline {

@@ -1,0 +1,33 @@
+{
+  "name": "messenger-mobile",
+  "productName": "Messenger",
+  "version": "0.1.0",
+  "private": true,
+  "description": "iOS & Android shell (Capacitor) for the Messenger chat app",
+  "scripts": {
+    "add:ios": "cap add ios",
+    "add:android": "cap add android",
+    "sync": "cap sync",
+    "sync:local": "APP_URL=http://localhost:4000 cap sync",
+    "open:ios": "cap open ios",
+    "open:android": "cap open android",
+    "run:ios": "cap run ios",
+    "run:android": "cap run android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/app": "^7.0.0",
+    "@capacitor/browser": "^7.0.0",
+    "@capacitor/core": "^7.0.0",
+    "@capacitor/ios": "^7.0.0",
+    "@capacitor/keyboard": "^7.0.0",
+    "@capacitor/local-notifications": "^7.0.0",
+    "@capacitor/network": "^7.0.0",
+    "@capacitor/push-notifications": "^7.0.0",
+    "@capacitor/status-bar": "^7.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.0.0",
+    "typescript": "^5.8.3"
+  }
+}

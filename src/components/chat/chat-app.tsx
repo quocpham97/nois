@@ -24,6 +24,8 @@ import {
   DeviceApprovalModal,
 } from "./key-backup";
 import { MentionsView, DraftsView } from "./nav-views";
+import { useMobileLayout } from "../mobile/use-mobile-layout";
+import { MobileApp } from "../mobile/mobile-app";
 
 function MainView() {
   const {
@@ -88,12 +90,20 @@ function Shell() {
   );
 }
 
+// Picks the phone-optimized screen set or the desktop shell. Lives INSIDE the
+// providers so both consume the same live Socket/Chat/Call state — switching
+// layout (e.g. rotating a tablet across the breakpoint) never remounts them.
+function RootShell() {
+  const mobile = useMobileLayout();
+  return mobile ? <MobileApp /> : <Shell />;
+}
+
 export function ChatApp({ meId, meName }: { meId: string; meName?: string }) {
   return (
     <SocketProvider meId={meId} meName={meName}>
       <ChatProvider>
         <CallProvider>
-          <Shell />
+          <RootShell />
         </CallProvider>
       </ChatProvider>
     </SocketProvider>

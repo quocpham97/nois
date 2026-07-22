@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- viewport-fit=cover is what makes env(safe-area-inset-*) report real
+         notch/home-indicator values to the remote app's CSS (globals.css). -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <title>Messenger</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0b0b0d;
+        color: #e4e6eb;
+        font-family:
+          -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+      }
+      .wrap {
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #bb4e75;
+        animation: pulse 1s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 0.3;
+          transform: scale(0.8);
+        }
+        50% {
+          opacity: 1;
+          transform: scale(1);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Splash/fallback only. The native WebView immediately navigates to
+         server.url (the deployed app); this shows during that first load and if
+         the device is offline on cold start. -->
+    <div class="wrap">
+      <div class="dot"></div>
+      <div>Connecting…</div>
+    </div>
+  </body>
+</html>
