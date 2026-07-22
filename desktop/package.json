@@ -1,0 +1,24 @@
+{
+  "name": "messenger-desktop",
+  "productName": "Messenger",
+  "version": "0.1.0",
+  "private": true,
+  "description": "macOS desktop shell for the Messenger chat app",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && electron .",
+    "start:local": "npm run build && APP_URL=http://localhost:4000 electron .",
+    "pack": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir -c.mac.notarize=false",
+    "dist": "npm run build && electron-builder --publish never",
+    "release": "npm run build && electron-builder --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.6.2"
+  },
+  "devDependencies": {
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12",
+    "typescript": "^5.8.3"
+  }
+}

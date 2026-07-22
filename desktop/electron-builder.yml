@@ -1,0 +1,40 @@
+# macOS build/sign/notarize/publish config.
+# Local unsigned test build works today: npm run pack
+#
+# Before the first REAL (signed, published) release, complete RELEASE.md:
+#   1. Create the GitHub repo and set publish.owner/repo below.
+#   2. Install a "Developer ID Application" cert in the keychain and export
+#      APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / APPLE_TEAM_ID in the env.
+#   3. Add build/icon.icns (1024x1024 source -> iconutil).
+# appId (ae.silvertiger.chat) must never change once shipped: auto-update and
+# the code-signing/keychain identity are both keyed to it.
+appId: ae.silvertiger.chat
+productName: Messenger
+directories:
+  buildResources: build
+  output: release # keep app bundles out of tsc's dist/
+files:
+  - dist/**
+mac:
+  category: public.app-category.social-networking
+  target:
+    - target: dmg
+      arch: [universal]
+    - target: zip # required by electron-updater on macOS
+      arch: [universal]
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  notarize: true
+  extendInfo:
+    NSMicrophoneUsageDescription: "Microphone access is used for voice notes and calls."
+    NSCameraUsageDescription: "Camera access is used for video calls."
+protocols:
+  - name: Messenger
+    schemes: [messenger]
+# Auto-update feed. `npm run release` fails until these point at a real repo
+# (leaving them as FILL_ME is the intended guard against a misconfigured push).
+publish:
+  provider: github
+  owner: FILL_ME_GITHUB_OWNER
+  repo: FILL_ME_GITHUB_REPO

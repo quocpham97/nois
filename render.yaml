@@ -1,0 +1,43 @@
+# Render Blueprint — single always-on-ish web service running the custom
+# Next.js + Socket.IO server (server.ts). WebSockets need a long-running
+# process, so this is a Node web service, NOT a static/serverless deploy.
+#
+# Single-node: REDIS_URL is intentionally unset (in-memory Socket.IO adapter +
+# presence). Add a Redis instance and set REDIS_URL only to scale horizontally.
+services:
+  - type: web
+    name: nois-chat
+    runtime: node
+    plan: free
+    branch: master
+    # Node version is pinned by .nvmrc (22.20.0).
+    # pnpm installs devDependencies (typescript, tailwind) needed for `next build`;
+    # tsx is a runtime dependency so `pnpm start` works in production.
+    buildCommand: pnpm install --frozen-lockfile && pnpm run build
+    startCommand: pnpm start
+    healthCheckPath: /login
+    envVars:
+      # Auth.js: with AUTH_TRUST_HOST the host is inferred from request headers,
+      # so AUTH_URL is optional. Set AUTH_URL explicitly if you hit callback issues.
+      - key: AUTH_TRUST_HOST
+        value: "true"
+      - key: AUTH_SECRET
+        generateValue: true # Render generates a strong secret on first deploy
+      - key: AUTH_URL
+        sync: false # e.g. https://nois-chat.onrender.com  (optional; see above)
+      # --- secrets: fill these in the Render dashboard (Environment tab) ---
+      - key: AUTH_GOOGLE_ID
+        sync: false
+      - key: AUTH_GOOGLE_SECRET
+        sync: false
+      - key: DATABASE_URL
+        sync: false # Neon pooled connection string (schema auto-creates on boot)
+      - key: UPLOADTHING_TOKEN
+        sync: false
+      # VAPID keys MUST match what push subscriptions were created with.
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_SUBJECT
+        sync: false

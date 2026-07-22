@@ -1,0 +1,45 @@
+# Multi-node deployment sketch: N app instances behind a load balancer, sharing
+# state via Redis (Socket.IO adapter + presence) and Postgres (persistence).
+#
+# WebSocket transport is forced app-side (see note) so no sticky sessions are
+# required. If you re-enable HTTP long-polling, the LB must use session affinity.
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: chat
+      POSTGRES_PASSWORD: chat
+      POSTGRES_DB: chat
+    ports: ["5432:5432"]
+    volumes:
+      - ./schema.postgres.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+
+  app:
+    build: ..
+    environment:
+      AUTH_SECRET: ${AUTH_SECRET}
+      AUTH_URL: http://localhost:8080
+      AUTH_TRUST_HOST: "true"
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgres://chat:chat@postgres:5432/chat
+      # Web Push (VAPID). MUST be identical across all replicas — a subscription
+      # is bound to the public key it was created with, so a mismatched replica
+      # can't send to it. Generate once: `npx web-push generate-vapid-keys`.
+      VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY}
+      VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY}
+      VAPID_SUBJECT: ${VAPID_SUBJECT}
+    depends_on: [redis, postgres]
+    deploy:
+      replicas: 3 # multiple nodes; the Redis adapter relays broadcasts between them
+
+  nginx:
+    image: nginx:alpine
+    ports: ["8080:80"]
+    # Proxy /socket.io and / to the app replicas. With WebSocket-only transport
+    # no ip_hash is needed; add `ip_hash;` to the upstream if long-polling is on.
+    depends_on: [app]
