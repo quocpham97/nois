@@ -5,6 +5,7 @@ import { ThemeProvider } from "@/components/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { DesktopMode } from "@/components/desktop-mode";
+import { MobileMode } from "@/components/mobile-mode";
 
 const inter = Inter({
   variable: "--font-app-sans",
@@ -19,9 +20,10 @@ const plexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Messenger",
-  description: "A Messenger-style chat built with Next.js",
+  title: "Nois",
+  description: "Say more. Fast, private, end-to-end encrypted messaging.",
   manifest: "/manifest.webmanifest",
+  icons: { icon: "/nois-mark.svg" },
 };
 
 export default function RootLayout({
@@ -43,6 +45,7 @@ export default function RootLayout({
           disableTransitionOnChange
         >
           <DesktopMode />
+          <MobileMode />
           <TooltipProvider>{children}</TooltipProvider>
           <Toaster />
         </ThemeProvider>

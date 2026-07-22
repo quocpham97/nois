@@ -322,7 +322,7 @@ function ConvIntro({ ch }: { ch: Channel }) {
       </div>
       <div className="mt-0.5 text-[13px] text-app-muted">
         {isDm
-          ? "You're connected on Messenger"
+          ? "You're connected on Nois"
           : `Group · ${members.length} ${members.length === 1 ? "member" : "members"}`}
       </div>
     </div>

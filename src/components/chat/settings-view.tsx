@@ -343,7 +343,7 @@ function AppearancePanel() {
     <div className="max-w-[640px]">
       <h1 className="m-0 text-[24px] font-bold">Appearance</h1>
       <p className="mb-6 mt-1 text-[14px] text-app-muted">
-        Customize how Messenger looks.
+        Customize how Nois looks.
       </p>
       <div className="grid grid-cols-3 gap-3">
         {(["light", "dark", "system"] as const).map((t) => {
@@ -436,7 +436,7 @@ function GeneralPanel() {
     <div className="max-w-[640px]">
       <h1 className="m-0 text-[24px] font-bold">General</h1>
       <p className="mb-6 mt-1 text-[14px] text-app-muted">
-        How Messenger behaves day to day.
+        How Nois behaves day to day.
       </p>
       <ToggleRow
         label="Active status"

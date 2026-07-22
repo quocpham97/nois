@@ -50,7 +50,7 @@ export function DesktopReturn({ challenge }: { challenge: string }) {
             href={appUrl}
             className="inline-block rounded-md border border-app-border px-4 py-2.5 text-[14px] font-medium hover:bg-panel-hover"
           >
-            Open Messenger
+            Open Nois
           </a>
         )}
       </div>

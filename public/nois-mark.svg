@@ -1,0 +1,11 @@
+<svg width="60" height="60" viewBox="0 0 60 60" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Nois">
+  <defs>
+    <linearGradient id="nois-grad" x1="8" y1="6" x2="52" y2="53" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#14A3FF"/>
+      <stop offset="0.55" stop-color="#2E7BFF"/>
+      <stop offset="1" stop-color="#6A5CFF"/>
+    </linearGradient>
+  </defs>
+  <path d="M19 8H41A11 11 0 0 1 52 19V31A11 11 0 0 1 41 42H25L12 53L19 42A11 11 0 0 1 8 31V19A11 11 0 0 1 19 8Z" fill="url(#nois-grad)"/>
+  <path d="M20 34V16L40 34V16" stroke="#fff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

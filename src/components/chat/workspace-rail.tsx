@@ -45,14 +45,39 @@ export function WorkspaceRail() {
     // overlay this corner in the Electron shell; app-drag makes the rail the
     // window's grab area.
     <aside className="app-drag flex w-[68px] shrink-0 flex-col items-center gap-2 border-r border-app-border bg-rail py-3.5 desktop:pt-12">
-      {/* Messenger-style app mark — click returns to Chats */}
+      {/* Nois "Bubble N" app mark — white bubble + gradient N on the gradient
+          tile (same mark as the login page); click returns to Chats */}
       <button
         title={workspaceName}
         onClick={closePanel}
         className="sent-grad mb-1 flex size-10 items-center justify-center rounded-full text-white"
       >
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-          <path d="M12 2C6.5 2 2 6.14 2 11.25c0 2.88 1.43 5.45 3.67 7.14V22l3.36-1.84c.95.26 1.95.4 2.97.4 5.5 0 10-4.14 10-9.25S17.5 2 12 2zm1.03 12.44l-2.55-2.72-4.98 2.72 5.48-5.82 2.61 2.72 4.92-2.72-5.48 5.82z" />
+        <svg width="24" height="24" viewBox="0 0 60 60" fill="none" aria-hidden>
+          <path
+            d="M19 8H41A11 11 0 0 1 52 19V31A11 11 0 0 1 41 42H25L12 53L19 42A11 11 0 0 1 8 31V19A11 11 0 0 1 19 8Z"
+            fill="#fff"
+          />
+          <path
+            d="M20 34V16L40 34V16"
+            stroke="url(#nois-rail-grad)"
+            strokeWidth="6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <defs>
+            <linearGradient
+              id="nois-rail-grad"
+              x1="20"
+              y1="16"
+              x2="40"
+              y2="34"
+              gradientUnits="userSpaceOnUse"
+            >
+              <stop stopColor="#14A3FF" />
+              <stop offset="0.55" stopColor="#2E7BFF" />
+              <stop offset="1" stopColor="#6A5CFF" />
+            </linearGradient>
+          </defs>
         </svg>
       </button>
 

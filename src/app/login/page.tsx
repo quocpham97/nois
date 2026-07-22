@@ -4,22 +4,51 @@ import { Suspense, useState, useSyncExternalStore } from "react";
 import { useSearchParams } from "next/navigation";
 import { signIn } from "next-auth/react";
 import { Lock } from "lucide-react";
+import { getShellBridge } from "@/lib/shell";
 
-// Whether we're inside the Electron shell (preload sets window.desktop, fixed
-// for the page's lifetime). useSyncExternalStore gives SSR "false" and the
-// real value on the client without a hydration mismatch.
+// Whether we're inside a native shell — the Electron desktop shell
+// (window.desktop) or the Capacitor mobile shell (window.mobile), both fixed
+// for the page's lifetime and sharing the startLogin handoff. useSyncExternal
+// Store gives SSR "false" and the real value on the client without a hydration
+// mismatch.
 const noopSubscribe = () => () => {};
-const useInDesktop = () =>
+const useInShell = () =>
   useSyncExternalStore(
     noopSubscribe,
-    () => !!window.desktop,
+    () => !!getShellBridge(),
     () => false,
   );
 
-/** The Loop chat-bubble mark (same path as the workspace rail logo). */
-const LoopMark = ({ size = 24 }: { size?: number }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill="#fff" aria-hidden>
-    <path d="M12 2C6.5 2 2 6.14 2 11.25c0 2.88 1.43 5.45 3.67 7.14V22l3.36-1.84c.95.26 1.95.4 2.97.4 5.5 0 10-4.14 10-9.25S17.5 2 12 2zm1.03 12.44l-2.55-2.72-4.98 2.72 5.48-5.82 2.61 2.72 4.92-2.72-5.48 5.82z" />
+/** The Nois "Bubble N" mark — a message bubble with the N carved out (same
+ *  path as the workspace rail logo). White bubble + gradient N, sits on the
+ *  gradient tile. */
+const NoisMark = ({ size = 24 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 60 60" fill="none" aria-hidden>
+    <path
+      d="M19 8H41A11 11 0 0 1 52 19V31A11 11 0 0 1 41 42H25L12 53L19 42A11 11 0 0 1 8 31V19A11 11 0 0 1 19 8Z"
+      fill="#fff"
+    />
+    <path
+      d="M20 34V16L40 34V16"
+      stroke="url(#nois-login-grad)"
+      strokeWidth="6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <defs>
+      <linearGradient
+        id="nois-login-grad"
+        x1="20"
+        y1="16"
+        x2="40"
+        y2="34"
+        gradientUnits="userSpaceOnUse"
+      >
+        <stop stopColor="#14A3FF" />
+        <stop offset="0.55" stopColor="#2E7BFF" />
+        <stop offset="1" stopColor="#6A5CFF" />
+      </linearGradient>
+    </defs>
   </svg>
 );
 
@@ -106,9 +135,9 @@ function BrandPanel() {
 
       <div className="relative flex items-center gap-3">
         <span className="flex size-10 items-center justify-center rounded-xl bg-white/20 backdrop-blur-sm dark:bg-[image:var(--sent-grad)]">
-          <LoopMark />
+          <NoisMark />
         </span>
-        <span className="text-[24px] font-extrabold tracking-[-0.02em] text-white">Loop</span>
+        <span className="text-[24px] font-extrabold tracking-[-0.02em] text-white">Nois</span>
       </div>
 
       <div className="relative mt-[52px] max-w-[520px]">
@@ -125,7 +154,7 @@ function BrandPanel() {
 
       <div className="relative mt-auto max-w-[480px] rounded-[18px] border border-white/25 bg-white/15 p-6 backdrop-blur-md dark:border-white/10 dark:bg-white/5">
         <p className="m-0 text-[16px] font-medium leading-normal text-white dark:text-[#E4E6EB]">
-          &ldquo;Loop replaced three group chats and an email thread. Our team
+          &ldquo;Nois replaced three group chats and an email thread. Our team
           actually keeps up now.&rdquo;
         </p>
         <div className="mt-4 flex items-center gap-[11px]">
@@ -159,12 +188,13 @@ function LoginCard() {
   const params = useSearchParams();
   const challenge =
     params.get("desktop") === "1" ? params.get("challenge") : null;
-  const inDesktop = useInDesktop();
+  const inShell = useInShell();
   const [desktopStarted, setDesktopStarted] = useState(false);
 
   const start = () => {
-    if (inDesktop && window.desktop) {
-      window.desktop.startLogin();
+    const shell = getShellBridge();
+    if (inShell && shell) {
+      shell.startLogin();
       setDesktopStarted(true);
       return;
     }
@@ -183,7 +213,7 @@ function LoginCard() {
         <div className="flex w-[380px] max-w-full flex-col">
           {/* On small screens the brand panel is hidden — show the mark here. */}
           <span className="sent-grad mb-8 flex size-10 items-center justify-center rounded-xl lg:hidden">
-            <LoopMark size={22} />
+            <NoisMark size={22} />
           </span>
 
           <h2 className="m-0 text-[32px] font-extrabold tracking-[-0.02em]">
@@ -192,9 +222,9 @@ function LoginCard() {
           <p className="mb-0 mt-2.5 text-[15.5px] text-app-muted">
             {desktopStarted
               ? "Finish signing in with Google in your browser — this window will continue automatically."
-              : inDesktop
+              : inShell
                 ? "Sign-in opens in your browser."
-                : "Sign in to continue to Loop."}
+                : "Sign in to continue to Nois."}
           </p>
 
           <button
@@ -213,7 +243,7 @@ function LoginCard() {
           </div>
 
           <p className="mb-0 mt-8 text-[13px] leading-[1.55] text-app-faint">
-            By continuing you agree to Loop&rsquo;s{" "}
+            By continuing you agree to Nois&rsquo;s{" "}
             <a href="#" className="text-app-accent hover:text-app-accent-hover">
               Terms
             </a>{" "}
@@ -224,7 +254,7 @@ function LoginCard() {
             .
           </p>
           <div className="mt-6 border-t border-app-border pt-[22px] text-[14.5px] text-app-muted">
-            New to Loop?{" "}
+            New to Nois?{" "}
             <button
               onClick={start}
               className="font-semibold text-app-accent hover:text-app-accent-hover"
