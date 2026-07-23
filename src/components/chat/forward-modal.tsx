@@ -12,18 +12,18 @@ export function ForwardModal() {
     forwardSource,
     closeForward,
     forwardMessage,
-    channels,
-    channelOrder,
+    groups,
+    groupOrder,
     dmOrder,
     myUser,
   } = useChat();
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
-  // Flattened destination list (channels then DMs), resolved to display rows.
+  // Flattened destination list (groups then DMs), resolved to display rows.
   const dests = useMemo(() => {
-    const rows = [...channelOrder, ...dmOrder]
-      .map((id) => channels[id])
+    const rows = [...groupOrder, ...dmOrder]
+      .map((id) => groups[id])
       .filter(Boolean)
       .map((ch) => ({
         ch,
@@ -33,12 +33,12 @@ export function ForwardModal() {
           ch.type === "dm"
             ? "Direct message"
             : ch.private
-              ? "Private channel"
-              : "Channel",
+              ? "Private group"
+              : "Group",
       }));
     const q = query.trim().toLowerCase();
     return q ? rows.filter((r) => r.title.toLowerCase().includes(q)) : rows;
-  }, [channels, channelOrder, dmOrder, query]);
+  }, [groups, groupOrder, dmOrder, query]);
 
   if (!forwardSource) return null;
 

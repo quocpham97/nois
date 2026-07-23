@@ -6,13 +6,13 @@ import { CallProvider } from "./call-context";
 import { CallUI } from "./call-view";
 import { WorkspaceRail } from "./workspace-rail";
 import { Sidebar } from "./sidebar";
-import { ChannelView } from "./channel-view";
-import { ChannelInfoPanel } from "./channel-info-panel";
+import { GroupView } from "./group-view";
+import { GroupInfoPanel } from "./group-info-panel";
 import { SearchView } from "./search-view";
 import { ComposeView } from "./compose-view";
 import { SettingsView } from "./settings-view";
 import { EmptyChatView } from "./empty-chat-view";
-import { CreateChannelView } from "./create-channel-view";
+import { CreateGroupView } from "./create-group-view";
 import { WorkspaceView } from "./workspace-view";
 import { ForwardModal } from "./forward-modal";
 import { StatusModal } from "./status-modal";
@@ -31,41 +31,41 @@ function MainView() {
   const {
     composeOpen,
     settingsOpen,
-    createChannelOpen,
+    createGroupOpen,
     activePanel,
-    channels,
-    currentChannelId,
+    groups,
+    currentGroupId,
   } = useChat();
 
   if (composeOpen) return <ComposeView />;
   if (settingsOpen) return <SettingsView />;
-  if (createChannelOpen) return <CreateChannelView />;
+  if (createGroupOpen) return <CreateGroupView />;
   if (activePanel === "mentions") return <MentionsView />;
   if (activePanel === "drafts") return <DraftsView />;
   // "people" / "archived" take over the sidebar column (see Sidebar), leaving
   // the main area to show the open conversation or the empty state.
-  const ch = channels[currentChannelId];
+  const ch = groups[currentGroupId];
   if (!ch) return <EmptyChatView />;
-  return <ChannelView ch={ch} />;
+  return <GroupView ch={ch} />;
 }
 
 function Shell() {
   const {
-    channelInfoOpen,
+    groupInfoOpen,
     searchOpen,
     composeOpen,
     settingsOpen,
-    createChannelOpen,
+    createGroupOpen,
     workspaceOpen,
     statusOpen,
     activePanel,
   } = useChat();
-  // The channel view is what's showing when no full-pane view has taken over
+  // The group view is what's showing when no full-pane view has taken over
   // (search is a modal overlay now, so it doesn't count).
-  const channelActive =
+  const groupActive =
     !composeOpen &&
     !settingsOpen &&
-    !createChannelOpen &&
+    !createGroupOpen &&
     !workspaceOpen &&
     !activePanel;
   return (
@@ -77,7 +77,7 @@ function Shell() {
         <RecoveryWaitingBanner />
         <MainView />
       </main>
-      {channelInfoOpen && channelActive && <ChannelInfoPanel />}
+      {groupInfoOpen && groupActive && <GroupInfoPanel />}
       {workspaceOpen && <WorkspaceView />}
       {searchOpen && <SearchView />}
       <ForwardModal />

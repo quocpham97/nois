@@ -15,8 +15,8 @@ import { getShellBridge } from "@/lib/shell";
 import { toast } from "sonner";
 import {
   type Attachment,
-  type Channel,
-  type ChannelMap,
+  type Group,
+  type GroupMap,
   type Message,
   type Pinned,
   type LinkPreview,
@@ -57,18 +57,18 @@ import type { ClientState as MlsClientState, KeyPackage as MlsKeyPackage } from 
 import type { MlsKeyPair, StoredMlsKeyPair } from "@/lib/crypto/mls";
 import type {
   MlsCommitAck,
-  MlsFetchChannelResult,
+  MlsFetchGroupResult,
   ReceiptRelayPayload,
 } from "@/lib/socket-events";
 
 // MLS (RFC 9420) is the LIVE group-encryption scheme: group sends go through
-// MLS whenever a channel's whole membership is MLS-capable (every member has
-// published a KeyPackage), with an automatic per-channel sender-keys fallback
+// MLS whenever a group's whole membership is MLS-capable (every member has
+// published a KeyPackage), with an automatic per-group sender-keys fallback
 // until then — see buildGroupEnc/ensureMlsGroup. Ordering comes from the
 // server-side delivery service (server/mls-ds.ts); membership drift is synced
 // on send (mlsSyncMembership). Typed `boolean` (not a literal) so the
 // sender-keys branch stays reachable to the compiler — it's still the decrypt
-// path for pre-cutover history and the fallback for not-yet-covered channels.
+// path for pre-cutover history and the fallback for not-yet-covered groups.
 const MLS_ENABLED: boolean = true;
 /** Lazy import so ts-mls is only fetched (as its own chunk) when MLS is used. */
 const loadMls = () => import("@/lib/crypto/mls");
@@ -104,11 +104,11 @@ function pathToPanel(pathname: string): NavPanel | null {
 const RESERVED_SEGMENTS = new Set<string>(["settings", ...NAV_PANELS]);
 
 // --- sidebar roster cache --------------------------------------------------
-// A compact, per-user snapshot of the conversation list (channel meta + a
+// A compact, per-user snapshot of the conversation list (group meta + a
 // one-line last-message preview) persisted to localStorage. Rendered instantly
 // on reload so the sidebar is populated before the socket connects, instead of
 // blank-then-populate. The server roster + local OPFS history reconcile it a
-// moment later. Only a single already-rendered preview line per channel is
+// moment later. Only a single already-rendered preview line per group is
 // stored (no ciphertext, no bodies beyond the visible snippet).
 const rosterCacheKey = (userId: string) => `chat:roster:${userId}`;
 
@@ -122,23 +122,23 @@ type PreviewCache = {
   body: string;
   deleted: boolean;
 };
-type ChannelCache = Omit<Channel, "messages" | "pinned"> & {
+type GroupCache = Omit<Group, "messages" | "pinned"> & {
   last?: PreviewCache;
 };
 type RosterCache = {
-  channels: ChannelCache[];
-  channelOrder: string[];
+  groups: GroupCache[];
+  groupOrder: string[];
   dmOrder: string[];
 };
 
 function snapshotRoster(
-  channels: ChannelMap,
-  channelOrder: string[],
+  groups: GroupMap,
+  groupOrder: string[],
   dmOrder: string[],
 ): RosterCache {
-  const out: ChannelCache[] = [];
-  for (const id of [...channelOrder, ...dmOrder]) {
-    const ch = channels[id];
+  const out: GroupCache[] = [];
+  for (const id of [...groupOrder, ...dmOrder]) {
+    const ch = groups[id];
     if (!ch) continue;
     const m = ch.messages[ch.messages.length - 1];
     let last: PreviewCache | undefined;
@@ -163,16 +163,16 @@ function snapshotRoster(
     void _pins;
     out.push({ ...meta, last });
   }
-  return { channels: out, channelOrder, dmOrder };
+  return { groups: out, groupOrder, dmOrder };
 }
 
 function restoreRoster(cache: RosterCache): {
-  channels: ChannelMap;
-  channelOrder: string[];
+  groups: GroupMap;
+  groupOrder: string[];
   dmOrder: string[];
 } {
-  const channels: ChannelMap = {};
-  for (const c of cache.channels) {
+  const groups: GroupMap = {};
+  for (const c of cache.groups) {
     const { last, ...meta } = c;
     // Rebuild a minimal message just so previewOf/lastTs render the cached
     // snippet + recency. No `enc` — the decrypt effect must never touch these
@@ -191,11 +191,11 @@ function restoreRoster(cache: RosterCache): {
           } as Message,
         ]
       : [];
-    channels[meta.id] = { ...meta, messages, pinned: [] } as Channel;
+    groups[meta.id] = { ...meta, messages, pinned: [] } as Group;
   }
   return {
-    channels,
-    channelOrder: cache.channelOrder,
+    groups,
+    groupOrder: cache.groupOrder,
     dmOrder: cache.dmOrder,
   };
 }
@@ -241,30 +241,30 @@ export type NavPanel =
 /** Conversation-list filter chips (Messenger: Inbox / Unread / Groups). */
 export type ChatFilter = "inbox" | "unread" | "groups";
 
-/** An unsent composer draft, kept per channel. */
+/** An unsent composer draft, kept per group. */
 export type Draft = { text: string; rich?: string };
 
 type ChatContextValue = {
-  channels: ChannelMap;
-  currentChannelId: string;
-  selectChannel: (id: string) => void;
+  groups: GroupMap;
+  currentGroupId: string;
+  selectGroup: (id: string) => void;
 
   threadFor: string | null;
   openThread: (msgId: string) => void;
   closeThread: () => void;
 
-  /** Channel-info right drawer (mutually exclusive with the thread panel). */
-  channelInfoOpen: boolean;
-  toggleChannelInfo: () => void;
-  closeChannelInfo: () => void;
+  /** Group-info right drawer (mutually exclusive with the thread panel). */
+  groupInfoOpen: boolean;
+  toggleGroupInfo: () => void;
+  closeGroupInfo: () => void;
 
-  /** Pagination cursor per channel (seq to fetch older, or null when done). */
+  /** Pagination cursor per group (seq to fetch older, or null when done). */
   historyCursor: Record<string, string | null>;
-  loadOlder: (channelId: string) => void;
+  loadOlder: (groupId: string) => void;
   /** Jump to a message (loads a window around it, scrolls + highlights). Pass
    *  parentId for a thread-reply target (opens the thread panel instead). */
   jumpToMessage: (
-    channelId: string,
+    groupId: string,
     msgId: string,
     parentId?: string | null,
   ) => void;
@@ -278,23 +278,23 @@ type ChatContextValue = {
   composerAttachment: Attachment | null;
   setComposerAttachment: (a: Attachment | null) => void;
   sendMessage: (text: string, rich?: string, preview?: LinkPreview) => void;
-  retrySend: (channelId: string, msgId: string) => void;
-  deleteMessage: (channelId: string, msgId: string) => void;
+  retrySend: (groupId: string, msgId: string) => void;
+  deleteMessage: (groupId: string, msgId: string) => void;
 
   /** Message-edit mode: the composer edits this message instead of sending. */
-  editing: { channelId: string; msgId: string; parentId: string | null } | null;
+  editing: { groupId: string; msgId: string; parentId: string | null } | null;
   editingMessage: Message | null;
-  startEdit: (channelId: string, msg: Message) => void;
+  startEdit: (groupId: string, msg: Message) => void;
   cancelEdit: () => void;
   submitEdit: (text: string, rich?: string) => void;
 
-  /** Forward a message to one or more channels/DMs via a destination picker. */
+  /** Forward a message to one or more groups/DMs via a destination picker. */
   forwardSource: Message | null;
   openForward: (msg: Message) => void;
   closeForward: () => void;
-  forwardMessage: (toChannelIds: string[]) => void;
+  forwardMessage: (toGroupIds: string[]) => void;
 
-  /** Quoted-reply compose mode (channel composer only): the message being
+  /** Quoted-reply compose mode (group composer only): the message being
    *  replied to, or null. Mutually exclusive with edit mode. */
   replyingTo: Message | null;
   startReply: (msg: Message) => void;
@@ -304,7 +304,7 @@ type ChatContextValue = {
   setThreadComposerText: (v: string) => void;
   sendThreadMessage: (text: string, rich?: string) => void;
 
-  /** Per-message "seen by" users for the current channel (E2EE read receipts). */
+  /** Per-message "seen by" users for the current group (E2EE read receipts). */
   seenByMsgId: Record<string, User[]>;
 
   hoverMsgId: string | null;
@@ -317,13 +317,13 @@ type ChatContextValue = {
   closeMore: () => void;
   toggleReaction: (msgId: string, emoji: string) => void;
 
-  /** Per-channel dismissal of the pinned bar (id → hidden). */
+  /** Per-group dismissal of the pinned bar (id → hidden). */
   pinnedBarHidden: Record<string, boolean>;
-  hidePinnedBar: (channelId: string) => void;
-  /** Which channel's pinned-list popover is open (header button). */
+  hidePinnedBar: (groupId: string) => void;
+  /** Which group's pinned-list popover is open (header button). */
   pinnedPanelFor: string | null;
-  togglePinnedPanel: (channelId: string) => void;
-  togglePin: (channelId: string, msgId: string) => void;
+  togglePinnedPanel: (groupId: string) => void;
+  togglePin: (groupId: string, msgId: string) => void;
 
   /** Mock viewer identity (handshake key, e.g. "alex"). */
   userId: string;
@@ -336,20 +336,20 @@ type ChatContextValue = {
   statusOpen: boolean;
   openStatus: () => void;
   closeStatus: () => void;
-  /** userIds currently typing, keyed by channel id. */
-  typingByChannel: Record<string, string[]>;
-  notifyTyping: (channelId: string) => void;
+  /** userIds currently typing, keyed by group id. */
+  typingByGroup: Record<string, string[]>;
+  notifyTyping: (groupId: string) => void;
 
-  /** Unread message counts per channel id (server-tracked, live). */
-  unreadByChannel: Record<string, number>;
+  /** Unread message counts per group id (server-tracked, live). */
+  unreadByGroup: Record<string, number>;
 
-  /** Authorized channel ids (from the server roster). */
-  channelOrder: string[];
+  /** Authorized group ids (from the server roster). */
+  groupOrder: string[];
   /** True once the server roster has been received at least once this session
    *  (distinguishes "still loading" from "genuinely no conversations"). */
   rosterLoaded: boolean;
-  channelsOpen: boolean;
-  toggleChannels: () => void;
+  groupsOpen: boolean;
+  toggleGroups: () => void;
   dmsOpen: boolean;
   toggleDms: () => void;
 
@@ -383,25 +383,25 @@ type ChatContextValue = {
   removeRecipient: (name: string) => void;
   sendCompose: () => void;
 
-  /** Create-channel dialog + submit. */
-  createChannelOpen: boolean;
-  openCreateChannel: () => void;
-  closeCreateChannel: () => void;
-  createChannel: (
+  /** Create-group dialog + submit. */
+  createGroupOpen: boolean;
+  openCreateGroup: () => void;
+  closeCreateGroup: () => void;
+  createGroup: (
     name: string,
     topic: string,
     isPrivate: boolean,
     onError?: (msg: string) => void,
   ) => void;
-  /** Channel management (edit meta, delete, membership). */
-  updateChannel: (
-    channelId: string,
+  /** Group management (edit meta, delete, membership). */
+  updateGroup: (
+    groupId: string,
     patch: { name?: string; topic?: string },
     onError?: (msg: string) => void,
   ) => void;
-  deleteChannel: (channelId: string, onError?: (msg: string) => void) => void;
-  addChannelMember: (channelId: string, memberId: string) => void;
-  removeChannelMember: (channelId: string, memberId: string) => void;
+  deleteGroup: (groupId: string, onError?: (msg: string) => void) => void;
+  addGroupMember: (groupId: string, memberId: string) => void;
+  removeGroupMember: (groupId: string, memberId: string) => void;
 
   /** Workspace identity + membership (shared, server-backed). */
   workspaceName: string;
@@ -436,13 +436,13 @@ type ChatContextValue = {
 
   /** Archived conversation ids (persisted in the profile). */
   archivedIds: string[];
-  isArchived: (channelId: string) => boolean;
-  toggleArchived: (channelId: string) => void;
+  isArchived: (groupId: string) => boolean;
+  toggleArchived: (groupId: string) => void;
 
-  /** Unsent composer drafts keyed by channel id, persisted per user. */
+  /** Unsent composer drafts keyed by group id, persisted per user. */
   drafts: Record<string, Draft>;
-  saveDraft: (channelId: string, draft: Draft) => void;
-  clearDraft: (channelId: string) => void;
+  saveDraft: (groupId: string, draft: Draft) => void;
+  clearDraft: (groupId: string) => void;
 
   scrollRef: React.RefObject<HTMLDivElement | null>;
 };
@@ -456,10 +456,10 @@ export function useChat(): ChatContextValue {
 }
 
 export function ChatProvider({ children }: { children: React.ReactNode }) {
-  const [channels, setChannels] = useState<ChannelMap>({});
-  const [currentChannelId, setCurrentChannelId] = useState("");
+  const [groups, setGroups] = useState<GroupMap>({});
+  const [currentGroupId, setCurrentGroupId] = useState("");
   const [threadFor, setThreadFor] = useState<string | null>(null);
-  const [channelInfoOpen, setChannelInfoOpen] = useState(false);
+  const [groupInfoOpen, setGroupInfoOpen] = useState(false);
   const [composerText, setComposerTextState] = useState("");
   const [composerActive, setComposerActive] = useState(false);
   const [composerAttachment, setComposerAttachment] = useState<Attachment | null>(
@@ -474,14 +474,14 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   >({});
   const [pinnedPanelFor, setPinnedPanelFor] = useState<string | null>(null);
   const [highlightMsgId, setHighlightMsgId] = useState<string | null>(null);
-  // When a jump-to-message is loading a window around a target, the channel-join
+  // When a jump-to-message is loading a window around a target, the group-join
   // effect must NOT also load the latest page (it would clobber the window).
-  // Holds the channelId being jumped into until the window is injected.
+  // Holds the groupId being jumped into until the window is injected.
   const jumpPendingRef = useRef<string | null>(null);
-  const [typingByChannel, setTypingByChannel] = useState<
+  const [typingByGroup, setTypingByGroup] = useState<
     Record<string, string[]>
   >({});
-  const [channelsOpen, setChannelsOpen] = useState(true);
+  const [groupsOpen, setGroupsOpen] = useState(true);
   const [dmsOpen, setDmsOpen] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
@@ -491,26 +491,26 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const [composeText, setComposeText] = useState("");
   const [composeRecipients, setComposeRecipients] = useState<string[]>([]);
   const [dmOrder, setDmOrder] = useState<string[]>([]);
-  const [channelOrder, setChannelOrder] = useState<string[]>([]);
+  const [groupOrder, setGroupOrder] = useState<string[]>([]);
   const [rosterLoaded, setRosterLoaded] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQ, setSearchQ] = useState("");
   const [historyCursor, setHistoryCursor] = useState<
     Record<string, string | null>
   >({});
-  const [createChannelOpen, setCreateChannelOpen] = useState(false);
+  const [createGroupOpen, setCreateGroupOpen] = useState(false);
   const [activePanel, setActivePanel] = useState<NavPanel | null>(null);
   const [workspaceName, setWorkspaceName] = useState("Northwind Studio");
   const [workspaceMembers, setWorkspaceMembers] = useState<User[]>([]);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
-  const [unreadByChannel, setUnreadByChannel] = useState<Record<string, number>>(
+  const [unreadByGroup, setUnreadByGroup] = useState<Record<string, number>>(
     {},
   );
   const [forwardSource, setForwardSource] = useState<Message | null>(null);
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
   /** Message-edit mode: the composer edits this message instead of sending. */
   const [editing, setEditing] = useState<{
-    channelId: string;
+    groupId: string;
     msgId: string;
     parentId: string | null;
   } | null>(null);
@@ -529,7 +529,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   } = useSocket();
   // Debounced re-backup after group key material changes (no-op unless a
   // session passphrase is held). Keeps the encrypted backup current so newly
-  // joined channels' seeds stay recoverable.
+  // joined groups' seeds stay recoverable.
   const backupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scheduleBackup = useCallback(() => {
     if (backupTimerRef.current) clearTimeout(backupTimerRef.current);
@@ -556,20 +556,20 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     [myUser.name],
   );
 
-  // Resolve pin ids → snippets from IndexedDB and merge into a channel's state.
+  // Resolve pin ids → snippets from IndexedDB and merge into a group's state.
   const applyResolvedPins = useCallback(
-    async (channelId: string, pinIds: string[]) => {
+    async (groupId: string, pinIds: string[]) => {
       const pinned = await resolvePins(pinIds);
-      setChannels((s) => {
-        const ch = s[channelId];
+      setGroups((s) => {
+        const ch = s[groupId];
         if (!ch) return s;
-        return { ...s, [channelId]: { ...ch, pinIds, pinned } };
+        return { ...s, [groupId]: { ...ch, pinIds, pinned } };
       });
     },
     [],
   );
 
-  // Load a channel's latest history page from IndexedDB into state, keeping any
+  // Load a group's latest history page from IndexedDB into state, keeping any
   // un-acked optimistic tail. Also resolves the thread replies for each loaded
   // message and refreshes the pinned bar. The server never sends history.
   // Conversations whose full history page is loaded in state. Preview-seeding
@@ -577,13 +577,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // with a single-message placeholder.
   const loadedFullRef = useRef<Set<string>>(new Set());
   const loadLocalHistory = useCallback(
-    async (channelId: string) => {
+    async (groupId: string) => {
       const { messages, nextCursor } = await msgdb.getTopPage(
-        channelId,
+        groupId,
         null,
         PAGE_SIZE,
       );
-      loadedFullRef.current.add(channelId);
+      loadedFullRef.current.add(groupId);
       const withReplies = await Promise.all(
         messages.map(async (m) =>
           m.threadCount
@@ -591,18 +591,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             : m,
         ),
       );
-      setChannels((s) => {
+      setGroups((s) => {
         const loaded = withReplies.map(withSelf);
         const loadedIds = new Set(loaded.map((m) => m.id));
-        // If the channel meta hasn't arrived from channels:list yet, seed a
-        // placeholder — onChannelsList preserves existing messages when it
+        // If the group meta hasn't arrived from groups:list yet, seed a
+        // placeholder — onGroupsList preserves existing messages when it
         // merges the real meta, so load order doesn't matter.
-        // Provisional meta for a channel whose real roster entry hasn't arrived
+        // Provisional meta for a group whose real roster entry hasn't arrived
         // yet. Type isn't knowable from the id alone anymore, so assume "group";
-        // onChannelsList overwrites it with the server's type (preserving these
+        // onGroupsList overwrites it with the server's type (preserving these
         // messages) before any send/receipt path needs the DM/group distinction.
-        const ch: Channel = s[channelId] ?? {
-          id: channelId,
+        const ch: Group = s[groupId] ?? {
+          id: groupId,
           type: "group",
           name: "",
           pinned: [],
@@ -614,10 +614,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         );
         return {
           ...s,
-          [channelId]: { ...ch, messages: [...loaded, ...pendingTail] },
+          [groupId]: { ...ch, messages: [...loaded, ...pendingTail] },
         };
       });
-      setHistoryCursor((c) => ({ ...c, [channelId]: nextCursor }));
+      setHistoryCursor((c) => ({ ...c, [groupId]: nextCursor }));
     },
     [withSelf],
   );
@@ -627,17 +627,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // not fully loaded, and only when the candidate is newer than what's shown —
   // so it upgrades a stale cached snippet without disturbing live/open state.
   const seedPreviews = useCallback(
-    (entries: { channelId: string; message: Message }[]) => {
+    (entries: { groupId: string; message: Message }[]) => {
       if (!entries.length) return;
-      setChannels((s) => {
+      setGroups((s) => {
         let changed = false;
         const next = { ...s };
-        for (const { channelId, message } of entries) {
-          const ch = next[channelId];
-          if (!ch || loadedFullRef.current.has(channelId)) continue;
+        for (const { groupId, message } of entries) {
+          const ch = next[groupId];
+          if (!ch || loadedFullRef.current.has(groupId)) continue;
           const cur = ch.messages[ch.messages.length - 1];
           if (cur && cur.id >= message.id) continue;
-          next[channelId] = { ...ch, messages: [withSelf(message)] };
+          next[groupId] = { ...ch, messages: [withSelf(message)] };
           changed = true;
         }
         return changed ? next : s;
@@ -652,26 +652,26 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   );
   const SEND_TIMEOUT_MS = 10_000;
 
-  // Keep a ref so socket listeners attached once can read the live channel id.
-  const currentChannelIdRef = useRef(currentChannelId);
+  // Keep a ref so socket listeners attached once can read the live group id.
+  const currentGroupIdRef = useRef(currentGroupId);
   useEffect(() => {
-    currentChannelIdRef.current = currentChannelId;
-  }, [currentChannelId]);
+    currentGroupIdRef.current = currentGroupId;
+  }, [currentGroupId]);
 
   // Last top-level message per conversation, from local (OPFS) history. It's
   // prefetched here on mount — in parallel with the socket connect, and warming
   // the DB worker early — so the sidebar can show the right preview + recency
   // order the moment the roster arrives, instead of seconds later when the
-  // worker would otherwise cold-start inside onChannelsList. The seed is applied
+  // worker would otherwise cold-start inside onGroupsList. The seed is applied
   // both here (if the roster is already present) and synchronously in
-  // onChannelsList from this ref; opening a conversation replaces it in full.
-  const latestByChannelRef = useRef<Map<string, Message>>(new Map());
+  // onGroupsList from this ref; opening a conversation replaces it in full.
+  const latestByGroupRef = useRef<Map<string, Message>>(new Map());
   useEffect(() => {
     let cancelled = false;
-    void msgdb.getLatestPerChannel().then((list) => {
+    void msgdb.getLatestPerGroup().then((list) => {
       if (cancelled) return;
-      latestByChannelRef.current = new Map(
-        list.map((x) => [x.channelId, x.message]),
+      latestByGroupRef.current = new Map(
+        list.map((x) => [x.groupId, x.message]),
       );
       seedPreviews(list);
     });
@@ -692,8 +692,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       if (!raw) return;
       const cache = JSON.parse(raw) as RosterCache;
       const restored = restoreRoster(cache);
-      setChannels((s) => (Object.keys(s).length ? s : restored.channels));
-      setChannelOrder((o) => (o.length ? o : restored.channelOrder));
+      setGroups((s) => (Object.keys(s).length ? s : restored.groups));
+      setGroupOrder((o) => (o.length ? o : restored.groupOrder));
       setDmOrder((o) => (o.length ? o : restored.dmOrder));
     } catch {}
   }, [userId]);
@@ -702,19 +702,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // change, so the next load can paint instantly from it.
   const rosterSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    if (!userId || (!channelOrder.length && !dmOrder.length)) return;
+    if (!userId || (!groupOrder.length && !dmOrder.length)) return;
     if (rosterSaveTimer.current) clearTimeout(rosterSaveTimer.current);
     rosterSaveTimer.current = setTimeout(() => {
       try {
         localStorage.setItem(
           rosterCacheKey(userId),
-          JSON.stringify(snapshotRoster(channels, channelOrder, dmOrder)),
+          JSON.stringify(snapshotRoster(groups, groupOrder, dmOrder)),
         );
       } catch {}
     }, 500);
-  }, [channels, channelOrder, dmOrder, userId]);
+  }, [groups, groupOrder, dmOrder, userId]);
 
-  // The URL is the source of truth for the main view — a channel/DM (/c, /dm)
+  // The URL is the source of truth for the main view — a group/DM (/c, /dm)
   // or a nav panel (/threads, /mentions, /drafts). This syncs state
   // from the path on first load, deep links, and browser back/forward (Next
   // reflects history.pushState in usePathname). In-app navigation pushes the
@@ -724,12 +724,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     const isSettings = pathname.replace(/^\/+|\/+$/g, "") === "settings";
     const panel = pathToPanel(pathname);
     if (isSettings || panel) {
-      // Settings and panel paths keep the underlying channel selection so
+      // Settings and panel paths keep the underlying group selection so
       // closing them returns to it; only the overlay layer changes.
       setActivePanel(panel);
     } else {
       const id = pathToId(pathname);
-      setCurrentChannelId((cur) => (cur === id ? cur : id));
+      setCurrentGroupId((cur) => (cur === id ? cur : id));
       setActivePanel(null);
     }
     // The path owns the main view: dismiss state-only full-screen overlays so
@@ -738,28 +738,28 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     setSearchOpen(false);
     setComposeOpen(false);
     setSettingsOpen(isSettings);
-    setCreateChannelOpen(false);
+    setCreateGroupOpen(false);
     setWorkspaceOpen(false);
     // A quoted reply is scoped to the conversation it was started in — drop it
-    // when the routed view changes so it can't carry into another channel.
+    // when the routed view changes so it can't carry into another group.
     setReplyingTo(null);
   }, [pathname]);
 
-  // Select a channel/DM by updating the URL (no remount — the socket and all
-  // providers persist). The pathname effect above then sets currentChannelId.
+  // Select a group/DM by updating the URL (no remount — the socket and all
+  // providers persist). The pathname effect above then sets currentGroupId.
   const navigateTo = useCallback((id: string) => {
-    setCurrentChannelId(id);
+    setCurrentGroupId(id);
     if (typeof window !== "undefined") {
       window.history.pushState(null, "", idToPath(id));
     }
   }, []);
 
-  // Mirror channels into a ref so the reconnect-resend effect can read the
+  // Mirror groups into a ref so the reconnect-resend effect can read the
   // latest state without re-running on every message.
-  const channelsRef = useRef(channels);
+  const groupsRef = useRef(groups);
   useEffect(() => {
-    channelsRef.current = channels;
-  }, [channels]);
+    groupsRef.current = groups;
+  }, [groups]);
 
   // Mark an optimistic message failed if it isn't acked within the timeout.
   // A late ack (e.g. a resend on reconnect) still reconciles it.
@@ -768,7 +768,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     if (existing) clearTimeout(existing);
     const t = setTimeout(() => {
       failTimers.current.delete(clientId);
-      setChannels((s) => {
+      setGroups((s) => {
         for (const id of Object.keys(s)) {
           const idx = s[id].messages.findIndex((m) => m.id === clientId);
           if (idx >= 0) {
@@ -794,7 +794,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       clearTimeout(t);
       failTimers.current.delete(clientId);
     }
-    setChannels((s) => {
+    setGroups((s) => {
       for (const id of Object.keys(s)) {
         const idx = s[id].messages.findIndex((m) => m.id === clientId);
         if (idx >= 0) {
@@ -807,17 +807,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  // Patch a message in place in channel state — top-level or (via parentId) a
+  // Patch a message in place in group state — top-level or (via parentId) a
   // thread reply. Shared by the edit flow's optimistic/echo/revert paths.
   const applyMessagePatch = useCallback(
     (
-      channelId: string,
+      groupId: string,
       msgId: string,
       parentId: string | null | undefined,
       patch: Partial<Message>,
     ) => {
-      setChannels((s) => {
-        const ch = s[channelId];
+      setGroups((s) => {
+        const ch = s[groupId];
         if (!ch) return s;
         const messages = ch.messages.map((m) => {
           if (!parentId && m.id === msgId) return { ...m, ...patch };
@@ -831,24 +831,24 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           }
           return m;
         });
-        return { ...s, [channelId]: { ...ch, messages } };
+        return { ...s, [groupId]: { ...ch, messages } };
       });
     },
     [],
   );
 
-  // --- E2EE for 1:1 DMs (Phase 1) + group channels (Phase 2) ---------------
+  // --- E2EE for 1:1 DMs (Phase 1) + group groups (Phase 2) ---------------
   // This device's private keys, loaded once and cached. Provisioned on connect
   // by SocketProvider; null until then or when WebCrypto is unavailable.
   const secretsRef = useRef<DeviceSecrets | null>(null);
-  // Received per-sender sender-key chains for group channels, keyed
-  // `channelId|senderDeviceId`. Backed by IndexedDB (crypto/identity groupGet).
+  // Received per-sender sender-key chains for group groups, keyed
+  // `groupId|senderDeviceId`. Backed by IndexedDB (crypto/identity groupGet).
   const recvChainsRef = useRef<Map<string, SenderKeyState>>(new Map());
-  // (channelId|senderDeviceId) we've already asked the sender to (re)distribute
+  // (groupId|senderDeviceId) we've already asked the sender to (re)distribute
   // its key for, so a flood of undecryptable messages triggers one request, not
   // one per message. Cleared once that sender's key successfully decrypts.
   const requestedKeysRef = useRef<Set<string>>(new Set());
-  // When we first requested each (channel|sender) key, so a request that goes
+  // When we first requested each (group|sender) key, so a request that goes
   // unanswered past KEY_WAIT_MS resolves to a 🔒 instead of a blank forever
   // (e.g. our OWN messages after a data wipe — the old sender key is gone).
   const requestedAtRef = useRef<Map<string, number>>(new Map());
@@ -880,7 +880,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // Bumped when a new sender-key chain is stored, to re-run the decryption
   // effect and retry group messages that arrived before their key.
   const [chainVersion, setChainVersion] = useState(0);
-  // DM self-heal ("reheal"): (channelId|msgId) we've already asked to have
+  // DM self-heal ("reheal"): (groupId|msgId) we've already asked to have
   // re-encrypted, so an undecryptable DM triggers one request (not one per
   // decrypt pass); `rehealAtRef` stamps when, so a request unanswered past
   // REHEAL_WAIT_MS resolves to 🔒 instead of pending forever. `rehealVersion`
@@ -888,15 +888,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const rehealRequestedRef = useRef<Set<string>>(new Set());
   const rehealAtRef = useRef<Map<string, number>>(new Map());
   const [rehealVersion, setRehealVersion] = useState(0);
-  // E2EE read receipts: per-channel read cursors, merged to the max readSeq per
+  // E2EE read receipts: per-group read cursors, merged to the max readSeq per
   // user across their devices. In-memory only — the server replays sealed
   // cursors on every (re)join, so nothing needs local persistence.
-  const [receiptsByChannel, setReceiptsByChannel] = useState<
+  const [receiptsByGroup, setReceiptsByGroup] = useState<
     Record<string, Record<string, { readSeq: number; ts: number }>>
   >({});
-  // Highest readSeq we've already sealed per channel (skip redundant reseals).
+  // Highest readSeq we've already sealed per group (skip redundant reseals).
   const lastSealedSeqRef = useRef<Map<string, number>>(new Map());
-  // Debounce timers for sealing our own read cursor (one per channel).
+  // Debounce timers for sealing our own read cursor (one per group).
   const receiptTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(
     new Map(),
   );
@@ -909,7 +909,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const processReceiptRef = useRef<(p: ReceiptRelayPayload) => Promise<boolean>>(
     async () => true,
   );
-  const scheduleReceiptRef = useRef<(channelId: string) => void>(() => {});
+  const scheduleReceiptRef = useRef<(groupId: string) => void>(() => {});
   // TOFU: peer devices whose identity key changed since we pinned it, keyed by
   // deviceId. Surfaced as a "safety number changed" warning until acknowledged.
   const [keyAlerts, setKeyAlerts] = useState<Record<string, Pin>>({});
@@ -973,7 +973,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // Build the E2EE envelope (JSON) for a DM message, or null to send plaintext.
   // Encrypts to every device of BOTH the peer and ourselves (so our own devices
   // can read it on reload). `peerId` is the recipient's key — supplied by the
-  // caller because the DM channel *id* is the creator's view (the recipient's
+  // caller because the DM group *id* is the creator's view (the recipient's
   // key) and is NOT viewer-symmetric, so the recipient must derive the peer from
   // the viewer-corrected partner, not from the id. Falls back to null when the peer
   // has published no keys (e.g. an offline seeded user) so DMs keep working.
@@ -1005,29 +1005,29 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // conversation is always in the roster by the time those run (it must be
   // selected/loaded first). Unknown id → treated as a group.
   const isDm = useCallback(
-    (channelId: string): boolean =>
-      channelsRef.current[channelId]?.type === "dm",
+    (groupId: string): boolean =>
+      groupsRef.current[groupId]?.type === "dm",
     [],
   );
 
-  // The DM peer's uid for a channel, from its viewer-corrected partner (works
-  // for both participants, unlike the non-symmetric channel id). The partner's
+  // The DM peer's uid for a group, from its viewer-corrected partner (works
+  // for both participants, unlike the non-symmetric group id). The partner's
   // `id` is the key their E2EE bundles are published under — derive it from
   // there, never from the display name (real users are keyed by email). The id
   // itself is the creator-side peer key, so it's the correct fallback.
-  const dmPeerId = useCallback((channelId: string): string => {
-    return channelsRef.current[channelId]?.user?.id ?? channelId;
+  const dmPeerId = useCallback((groupId: string): string => {
+    return groupsRef.current[groupId]?.user?.id ?? groupId;
   }, []);
 
-  // Fetch the prekey bundles of every device of every member of a channel
+  // Fetch the prekey bundles of every device of every member of a group
   // (for sender-key distribution). [] when no members have published keys.
-  const fetchChannelBundles = useCallback(
-    (channelId: string): Promise<PreKeyBundle[]> =>
+  const fetchGroupBundles = useCallback(
+    (groupId: string): Promise<PreKeyBundle[]> =>
       new Promise((resolve) => {
         if (!socket) return resolve([]);
         socket
           .timeout(5000)
-          .emit("keys:fetchChannel", { channelId }, (err, res) => {
+          .emit("keys:fetchGroup", { groupId }, (err, res) => {
             const bundles = err || !res ? [] : res.bundles;
             void pinBundles(bundles); // TOFU on every member device we may seal to
             resolve(bundles);
@@ -1036,20 +1036,20 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     [socket, pinBundles],
   );
 
-  // Distribute our stable sender-key SEED for a channel to the given member
+  // Distribute our stable sender-key SEED for a group to the given member
   // devices, wrapped in the Phase 1 pairwise envelope (so only those devices can
   // read it). Reused on first send, on membership change, and when a member
   // explicitly requests the key (pull-on-miss).
   const distributeSenderKey = useCallback(
     async (
-      channelId: string,
+      groupId: string,
       seed: SenderKeyWire,
       members: PreKeyBundle[],
       secrets: DeviceSecrets,
     ) => {
       const dist: SenderKeyDistribution = {
         skd: 1,
-        channelId,
+        groupId,
         sender: secrets.deviceId,
         ...seed,
       };
@@ -1060,7 +1060,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       );
       if (env)
         socket?.emit("group:senderKey", {
-          channelId,
+          groupId,
           sender: secrets.deviceId,
           env: JSON.stringify(env),
         });
@@ -1068,17 +1068,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     [socket],
   );
 
-  // Ensure our sender key is distributed to the channel's current member device
-  // set. We keep ONE stable seed (index 0) per channel and never rotate it
+  // Ensure our sender key is distributed to the group's current member device
+  // set. We keep ONE stable seed (index 0) per group and never rotate it
   // (chosen policy: reliable decryption for everyone over forward secrecy), and
   // re-distribute that same seed whenever the member-device set changes so a
   // newly-added device can read the whole stream. `send:` is the advancing send
   // pointer used to encrypt; `seed:` is the stable index-0 seed we hand out.
   const ensureSenderKeyDistributed = useCallback(
-    async (channelId: string, members: PreKeyBundle[], secrets: DeviceSecrets) => {
+    async (groupId: string, members: PreKeyBundle[], secrets: DeviceSecrets) => {
       const devices = members.map((m) => m.deviceId).sort();
-      let seed = await groupGet<SenderKeyWire>(userId, `seed:${channelId}`);
-      const lastDist = await groupGet<string[]>(userId, `dist:${channelId}`);
+      let seed = await groupGet<SenderKeyWire>(userId, `seed:${groupId}`);
+      const lastDist = await groupGet<string[]>(userId, `dist:${groupId}`);
       const sameSet =
         !!lastDist &&
         lastDist.length === devices.length &&
@@ -1087,32 +1087,32 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       if (!seed) {
         const fresh = generateSenderKey();
         seed = serializeState(fresh);
-        await groupPut(userId, `seed:${channelId}`, seed); // stable index-0 seed to hand out
-        await groupPut(userId, `send:${channelId}`, seed); // advancing send pointer starts at the seed
+        await groupPut(userId, `seed:${groupId}`, seed); // stable index-0 seed to hand out
+        await groupPut(userId, `send:${groupId}`, seed); // advancing send pointer starts at the seed
         // Also store ourselves as a recv chain so we can self-decrypt our OWN
         // group messages from ciphertext (on cache loss / after a key restore) —
         // not just from the live sentPlaintext cache.
-        await groupPut(userId, `recv:${channelId}:${secrets.deviceId}`, seed);
+        await groupPut(userId, `recv:${groupId}:${secrets.deviceId}`, seed);
         scheduleBackup(); // new key material → refresh the encrypted backup
       }
-      await distributeSenderKey(channelId, seed, members, secrets);
-      await groupPut(userId, `dist:${channelId}`, devices);
+      await distributeSenderKey(groupId, seed, members, secrets);
+      await groupPut(userId, `dist:${groupId}`, devices);
     },
     [distributeSenderKey, scheduleBackup, userId],
   );
 
-  // --- MLS group encryption (Phase 4 — LIVE for group channels) -------------
-  // In-memory per-channel MLS ClientState (persisted to the groups store under
-  // `mls:<channelId>`), plus this DEVICE's long-lived KeyPackage keypair
+  // --- MLS group encryption (Phase 4 — LIVE for group groups) -------------
+  // In-memory per-group MLS ClientState (persisted to the groups store under
+  // `mls:<groupId>`), plus this DEVICE's long-lived KeyPackage keypair
   // (persisted as `mlskp` so a Welcome sealed to it survives reconnects).
   const mlsStatesRef = useRef<Map<string, MlsClientState>>(new Map());
   const mlsKpRef = useRef<MlsKeyPair | null>(null);
-  // Last commit `seq` we've applied per channel (persisted as `mls2seq:<id>`), so
+  // Last commit `seq` we've applied per group (persisted as `mls2seq:<id>`), so
   // we apply the delivery service's ordered commits exactly once, in order.
   const mlsSeqRef = useRef<Map<string, number>>(new Map());
-  // Per-channel throttle for membership drift syncs (see mlsSyncMembership).
+  // Per-group throttle for membership drift syncs (see mlsSyncMembership).
   const mlsSyncedAtRef = useRef<Map<string, number>>(new Map());
-  // First time we saw an MLS message for a channel we hold no group state for —
+  // First time we saw an MLS message for a group we hold no group state for —
   // after a grace window those messages lock (they predate our membership).
   const mlsWaitRef = useRef<Map<string, number>>(new Map());
   // Session cache of successfully-decrypted MLS messages, by msgId. MLS decrypt
@@ -1124,7 +1124,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     Map<string, Partial<Message> & { att?: { key: string; iv: string } }>
   >(new Map());
 
-  // Per-channel mutex serializing EVERY ClientState mutation (encrypt advances
+  // Per-group mutex serializing EVERY ClientState mutation (encrypt advances
   // the sender ratchet, decrypt the receiver chain, commits the epoch) — two
   // interleaved awaits advancing from the same state would fork the ratchet.
   // Only the OUTERMOST entry points take the lock (buildMlsEnc, the decrypt
@@ -1133,11 +1133,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // with it already held.
   const mlsLocksRef = useRef<Map<string, Promise<unknown>>>(new Map());
   const withMlsLock = useCallback(
-    <T,>(channelId: string, fn: () => Promise<T>): Promise<T> => {
+    <T,>(groupId: string, fn: () => Promise<T>): Promise<T> => {
       const locks = mlsLocksRef.current;
-      const prev = locks.get(channelId) ?? Promise.resolve();
+      const prev = locks.get(groupId) ?? Promise.resolve();
       const next = prev.then(fn, fn);
-      locks.set(channelId, next.then(() => undefined, () => undefined));
+      locks.set(groupId, next.then(() => undefined, () => undefined));
       return next;
     },
     [],
@@ -1148,22 +1148,22 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // keypairs — unusable under the multi-device protocol — so they're simply
   // orphaned (same pattern as other storage migrations here).
   const mlsLoadState = useCallback(
-    async (channelId: string): Promise<MlsClientState | null> => {
-      const cached = mlsStatesRef.current.get(channelId);
+    async (groupId: string): Promise<MlsClientState | null> => {
+      const cached = mlsStatesRef.current.get(groupId);
       if (cached) return cached;
-      const b64 = await groupGet<string>(userId, `mls2:${channelId}`);
+      const b64 = await groupGet<string>(userId, `mls2:${groupId}`);
       if (!b64) return null;
       const state = (await loadMls()).mlsDeserializeState(b64);
-      mlsStatesRef.current.set(channelId, state);
+      mlsStatesRef.current.set(groupId, state);
       return state;
     },
     [userId],
   );
 
   const mlsSaveState = useCallback(
-    async (channelId: string, state: MlsClientState) => {
-      mlsStatesRef.current.set(channelId, state);
-      await groupPut(userId, `mls2:${channelId}`, (await loadMls()).mlsSerializeState(state));
+    async (groupId: string, state: MlsClientState) => {
+      mlsStatesRef.current.set(groupId, state);
+      await groupPut(userId, `mls2:${groupId}`, (await loadMls()).mlsSerializeState(state));
     },
     [userId],
   );
@@ -1192,13 +1192,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     return kp;
   }, [userId, getSecrets]);
 
-  const mlsFetchChannel = useCallback(
-    (channelId: string): Promise<MlsFetchChannelResult> =>
+  const mlsFetchGroup = useCallback(
+    (groupId: string): Promise<MlsFetchGroupResult> =>
       new Promise((resolve) => {
         if (!socket) return resolve({ packages: [], memberIds: [] });
         socket
           .timeout(5000)
-          .emit("mls:fetchChannel", { channelId }, (err, res) =>
+          .emit("mls:fetchGroup", { groupId }, (err, res) =>
             resolve(err || !res ? { packages: [], memberIds: [] } : res),
           );
       }),
@@ -1208,7 +1208,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   /** Submit one commit (+ welcomes) through the delivery service. */
   const mlsSubmitCommit = useCallback(
     (
-      channelId: string,
+      groupId: string,
       fromEpoch: number,
       commit: string,
       welcomes: { toUserId: string; toDeviceId: string; welcome: string }[],
@@ -1217,7 +1217,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         if (!socket) return resolve({ ok: false, reason: "error", currentEpoch: 0 });
         socket
           .timeout(8000)
-          .emit("mls:commit", { channelId, fromEpoch, commit, welcomes }, (err, r) =>
+          .emit("mls:commit", { groupId, fromEpoch, commit, welcomes }, (err, r) =>
             resolve(err || !r ? { ok: false, reason: "error", currentEpoch: 0 } : r),
           );
       }),
@@ -1225,19 +1225,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   );
 
   const mlsGetSeq = useCallback(
-    async (channelId: string): Promise<number> => {
-      const cached = mlsSeqRef.current.get(channelId);
+    async (groupId: string): Promise<number> => {
+      const cached = mlsSeqRef.current.get(groupId);
       if (cached != null) return cached;
-      const stored = (await groupGet<number>(userId, `mls2seq:${channelId}`)) ?? 0;
-      mlsSeqRef.current.set(channelId, stored);
+      const stored = (await groupGet<number>(userId, `mls2seq:${groupId}`)) ?? 0;
+      mlsSeqRef.current.set(groupId, stored);
       return stored;
     },
     [userId],
   );
   const mlsSetSeq = useCallback(
-    async (channelId: string, seq: number) => {
-      mlsSeqRef.current.set(channelId, seq);
-      await groupPut(userId, `mls2seq:${channelId}`, seq);
+    async (groupId: string, seq: number) => {
+      mlsSeqRef.current.set(groupId, seq);
+      await groupPut(userId, `mls2seq:${groupId}`, seq);
     },
     [userId],
   );
@@ -1246,15 +1246,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // Processing a commit built for a different epoch throws — we stop there (a
   // later fetch/relay retries once the missing pieces arrive).
   const mlsApplyCommitsSince = useCallback(
-    async (channelId: string) => {
+    async (groupId: string) => {
       if (!socket) return;
-      const state = await mlsLoadState(channelId);
+      const state = await mlsLoadState(groupId);
       if (!state) return;
-      const since = await mlsGetSeq(channelId);
+      const since = await mlsGetSeq(groupId);
       const res = await new Promise<{ seq: number; commit: string }[]>((resolve) => {
         socket
           .timeout(5000)
-          .emit("mls:fetchCommits", { channelId, sinceSeq: since }, (err, r) =>
+          .emit("mls:fetchCommits", { groupId, sinceSeq: since }, (err, r) =>
             resolve(err || !r ? [] : r.commits),
           );
       });
@@ -1266,33 +1266,33 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         } catch {
           break; // wrong epoch for us yet — stop; we'll retry on the next signal
         }
-        await mlsSaveState(channelId, cur);
-        await mlsSetSeq(channelId, seq);
+        await mlsSaveState(groupId, cur);
+        await mlsSetSeq(groupId, seq);
       }
     },
     [socket, mlsLoadState, mlsGetSeq, mlsSaveState, mlsSetSeq],
   );
 
-  // Sync the group's leaves to the channel's ACTUAL membership (call with the
-  // channel lock held, state already loaded). Diffs the ratchet-tree leaves
+  // Sync the group's leaves to the group's ACTUAL membership (call with the
+  // group lock held, state already loaded). Diffs the ratchet-tree leaves
   // against the server-authoritative roster + published per-device packages:
   //   * a member device with no leaf → ADD (this is how post-establishment
   //     joiners — and a member's brand-new device — get in)
-  //   * a leaf whose user left the channel → REMOVE
+  //   * a leaf whose user left the group → REMOVE
   //   * a leaf whose device republished a DIFFERENT signature key (device
   //     reset its e2ee store) → REMOVE + re-ADD with the new package
   // All folded into ONE commit through the delivery service; on `conflict`
   // someone else committed first — catch up and re-diff (once). Throttled per
-  // channel so ordinary sends don't pay a fetch round-trip each time.
+  // group so ordinary sends don't pay a fetch round-trip each time.
   const mlsSyncMembership = useCallback(
-    async (channelId: string, state: MlsClientState): Promise<MlsClientState> => {
+    async (groupId: string, state: MlsClientState): Promise<MlsClientState> => {
       const now = Date.now();
-      const last = mlsSyncedAtRef.current.get(channelId) ?? 0;
+      const last = mlsSyncedAtRef.current.get(groupId) ?? 0;
       if (now - last < 30_000) return state;
-      mlsSyncedAtRef.current.set(channelId, now);
+      mlsSyncedAtRef.current.set(groupId, now);
       const secrets = await getSecrets();
       if (!secrets) return state;
-      const { packages, memberIds } = await mlsFetchChannel(channelId);
+      const { packages, memberIds } = await mlsFetchGroup(groupId);
       if (!memberIds.length) return state;
       const mls = await loadMls();
       const me = mls.mlsIdentity(userId, secrets.deviceId);
@@ -1331,7 +1331,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         const res = await mls.mlsSyncCommit(cur, adds, removes);
         if (!res) return cur; // membership already in sync
         const ack = await mlsSubmitCommit(
-          channelId,
+          groupId,
           mls.mlsEpoch(cur),
           res.commit,
           res.welcome
@@ -1339,20 +1339,20 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             : [],
         );
         if (ack.ok) {
-          await mlsSaveState(channelId, res.state);
-          await mlsSetSeq(channelId, ack.seq);
+          await mlsSaveState(groupId, res.state);
+          await mlsSetSeq(groupId, ack.seq);
           return res.state;
         }
         if (ack.reason !== "conflict") return cur;
         // Someone else's commit won this epoch — apply it and re-diff.
-        await mlsApplyCommitsSince(channelId);
-        cur = (await mlsLoadState(channelId)) ?? cur;
+        await mlsApplyCommitsSince(groupId);
+        cur = (await mlsLoadState(groupId)) ?? cur;
       }
       return cur;
     },
     [
       getSecrets,
-      mlsFetchChannel,
+      mlsFetchGroup,
       userId,
       mlsSubmitCommit,
       mlsSaveState,
@@ -1362,7 +1362,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     ],
   );
 
-  // Ensure we hold an MLS group for a channel (call with the channel lock
+  // Ensure we hold an MLS group for a group (call with the group lock
   // held): load it (then drift-sync membership), else ESTABLISH it — one
   // commit adding every member device, submitted through the delivery service
   // so exactly one member's establishment wins. On `conflict`/`no_group`
@@ -1371,19 +1371,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   //
   // Establishment requires EVERY co-member user to have at least one published
   // KeyPackage — otherwise we return null and the send falls back to
-  // sender-keys (buildGroupEnc), so a channel keeps working until all its
+  // sender-keys (buildGroupEnc), so a group keeps working until all its
   // members have run MLS-capable clients once. Post-establishment stragglers
   // are handled by mlsSyncMembership instead.
   const ensureMlsGroup = useCallback(
-    async (channelId: string): Promise<MlsClientState | null> => {
-      const existing = await mlsLoadState(channelId);
-      if (existing) return mlsSyncMembership(channelId, existing);
+    async (groupId: string): Promise<MlsClientState | null> => {
+      const existing = await mlsLoadState(groupId);
+      if (existing) return mlsSyncMembership(groupId, existing);
       if (!socket) return null;
       const kp = await mlsKeyPair();
       const secrets = await getSecrets();
       if (!kp || !secrets) return null;
       const mls = await loadMls();
-      const { packages, memberIds } = await mlsFetchChannel(channelId);
+      const { packages, memberIds } = await mlsFetchGroup(groupId);
       const me = mls.mlsIdentity(userId, secrets.deviceId);
       const targets = packages
         .map((p) => ({
@@ -1400,10 +1400,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       if (!coMembers.length || !coMembers.every((id) => coveredUsers.has(id))) {
         return null; // not everyone is MLS-capable yet → sender-keys fallback
       }
-      const created = await mls.mlsCreateGroup(channelId, kp);
+      const created = await mls.mlsCreateGroup(groupId, kp);
       const added = await mls.mlsAddMembers(created, targets.map((m) => m.kp));
       const ack = await mlsSubmitCommit(
-        channelId,
+        groupId,
         0,
         added.commit,
         targets.map((m) => ({
@@ -1415,11 +1415,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       if (!ack.ok) {
         // Lost the establishment race (or transport error) — don't keep our fork;
         // we'll join via the winner's Welcome. Catch up any commits meanwhile.
-        await mlsApplyCommitsSince(channelId);
+        await mlsApplyCommitsSince(groupId);
         return null;
       }
-      await mlsSaveState(channelId, added.state);
-      await mlsSetSeq(channelId, ack.seq);
+      await mlsSaveState(groupId, added.state);
+      await mlsSetSeq(groupId, ack.seq);
       return added.state;
     },
     [
@@ -1428,7 +1428,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       mlsSyncMembership,
       mlsKeyPair,
       getSecrets,
-      mlsFetchChannel,
+      mlsFetchGroup,
       userId,
       mlsSubmitCommit,
       mlsSaveState,
@@ -1443,49 +1443,49 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // advances the sender ratchet, so two racing sends must not start from the
   // same state.
   const buildMlsEnc = useCallback(
-    (channelId: string, content: MessageContent): Promise<string | null> => {
-      if (isDm(channelId)) return Promise.resolve(null);
-      return withMlsLock(channelId, async () => {
-        const state = await ensureMlsGroup(channelId);
+    (groupId: string, content: MessageContent): Promise<string | null> => {
+      if (isDm(groupId)) return Promise.resolve(null);
+      return withMlsLock(groupId, async () => {
+        const state = await ensureMlsGroup(groupId);
         if (!state) return null;
         const { state: next, wire } = await (await loadMls()).mlsEncrypt(state, content);
-        await mlsSaveState(channelId, next);
+        await mlsSaveState(groupId, next);
         return JSON.stringify({ t: "mls", w: wire });
       });
     },
     [ensureMlsGroup, mlsSaveState, isDm, withMlsLock],
   );
 
-  // Build a group channel's envelope: MLS first (RFC 9420 — the live scheme),
-  // falling back to sender-keys while a channel's members aren't all
+  // Build a group group's envelope: MLS first (RFC 9420 — the live scheme),
+  // falling back to sender-keys while a group's members aren't all
   // MLS-capable yet (see ensureMlsGroup's coverage rule). Old sender-keys
   // history keeps decrypting regardless — decryptInbound routes by envelope
-  // tag, so the two schemes coexist per channel during the transition.
+  // tag, so the two schemes coexist per group during the transition.
   const buildGroupEnc = useCallback(
-    async (channelId: string, content: MessageContent): Promise<string | null> => {
-      if (isDm(channelId)) return null;
+    async (groupId: string, content: MessageContent): Promise<string | null> => {
+      if (isDm(groupId)) return null;
       if (MLS_ENABLED) {
-        const mlsEnc = await buildMlsEnc(channelId, content);
+        const mlsEnc = await buildMlsEnc(groupId, content);
         if (mlsEnc) return mlsEnc;
-        // No MLS group possible yet → sender-keys below keeps the channel E2EE.
+        // No MLS group possible yet → sender-keys below keeps the group E2EE.
       }
       const secrets = await getSecrets();
       if (!secrets || !socket) return null;
-      const members = await fetchChannelBundles(channelId);
+      const members = await fetchGroupBundles(groupId);
       const others = members.filter((b) => b.deviceId !== secrets.deviceId);
       if (!others.length) return null; // no real co-member devices → plaintext
-      await ensureSenderKeyDistributed(channelId, members, secrets);
-      const wire = await groupGet<SenderKeyWire>(userId, `send:${channelId}`);
+      await ensureSenderKeyDistributed(groupId, members, secrets);
+      const wire = await groupGet<SenderKeyWire>(userId, `send:${groupId}`);
       if (!wire) return null;
       const { env, next } = await encryptGroupMessage(
         deserializeState(wire),
         secrets.deviceId,
         content,
       );
-      await groupPut(userId, `send:${channelId}`, serializeState(next));
+      await groupPut(userId, `send:${groupId}`, serializeState(next));
       return JSON.stringify(env);
     },
-    [getSecrets, socket, fetchChannelBundles, ensureSenderKeyDistributed, userId, buildMlsEnc, isDm],
+    [getSecrets, socket, fetchGroupBundles, ensureSenderKeyDistributed, userId, buildMlsEnc, isDm],
   );
 
   const scrollToBottom = useCallback(() => {
@@ -1542,7 +1542,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                 : {}),
             }
           : message;
-      setChannels((s) => {
+      setGroups((s) => {
         for (const id of Object.keys(s)) {
           const idx = s[id].messages.findIndex((m) => m.id === clientId);
           if (idx >= 0) {
@@ -1560,30 +1560,30 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
     // Message from another socket: append, de-duping by id.
     const onNew = ({
-      channelId,
+      groupId,
       message,
     }: {
-      channelId: string;
+      groupId: string;
       message: Message;
     }) => {
-      void msgdb.putMessage(channelId, message);
-      setChannels((s) => {
-        const ch = s[channelId];
+      void msgdb.putMessage(groupId, message);
+      setGroups((s) => {
+        const ch = s[groupId];
         if (!ch || ch.messages.some((m) => m.id === message.id)) return s;
         return {
           ...s,
-          [channelId]: { ...ch, messages: [...ch.messages, withSelf(message)] },
+          [groupId]: { ...ch, messages: [...ch.messages, withSelf(message)] },
         };
       });
-      if (channelId === currentChannelIdRef.current) {
+      if (groupId === currentGroupIdRef.current) {
         requestAnimationFrame(scrollToBottom);
-        // We're viewing this channel — keep it read on the server + reseal our
+        // We're viewing this group — keep it read on the server + reseal our
         // E2EE read cursor so the sender sees the "seen" avatar advance.
-        socket.emit("channel:read", { channelId });
-        scheduleReceiptRef.current(channelId);
+        socket.emit("group:read", { groupId });
+        scheduleReceiptRef.current(groupId);
       }
       // Native shell (Electron desktop or Capacitor mobile): OS notification
-      // for messages arriving outside the focused channel (Web Push doesn't
+      // for messages arriving outside the focused group (Web Push doesn't
       // apply in a native shell — src/lib/push.ts reports unsupported there;
       // mobile uses local/native notifications). Copy mirrors public/sw.js and stays
       // generic: the payload may still be an undecrypted E2EE envelope here.
@@ -1591,40 +1591,41 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       if (
         shell &&
         message.author.id !== userId &&
-        (channelId !== currentChannelIdRef.current ||
+        (groupId !== currentGroupIdRef.current ||
           document.hidden ||
           !document.hasFocus())
       ) {
-        const ch = channelsRef.current[channelId];
+        const ch = groupsRef.current[groupId];
         const isDm = ch?.type === "dm";
         shell.notify({
           title: isDm
             ? `New message from ${message.author.name}`
-            : `New message in #${ch?.name ?? "a channel"}`,
+            : `New message in #${ch?.name ?? "a group"}`,
           body: isDm ? "Tap to read" : `${message.author.name} sent a message`,
-          channelId,
+          // Native bridge (desktop/src/preload.ts) reads n.channelId; keep the key.
+          channelId: groupId,
         });
       }
     };
 
     // Thread reply from anyone (incl. self): append to the parent, de-dupe.
     const onThreadNew = ({
-      channelId,
+      groupId,
       parentId,
       reply,
       threadCount,
       threadLastTime,
     }: {
-      channelId: string;
+      groupId: string;
       parentId: string;
       reply: Message;
       threadCount: number;
       threadLastTime: string;
     }) => {
-      void msgdb.putReply(channelId, parentId, reply);
+      void msgdb.putReply(groupId, parentId, reply);
       void msgdb.patchMessage(parentId, { threadCount, threadLastTime });
-      setChannels((s) => {
-        const ch = s[channelId];
+      setGroups((s) => {
+        const ch = s[groupId];
         if (!ch) return s;
         const msgs = ch.messages.map((m) => {
           if (m.id !== parentId) return m;
@@ -1637,18 +1638,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             threadLastTime,
           };
         });
-        return { ...s, [channelId]: { ...ch, messages: msgs } };
+        return { ...s, [groupId]: { ...ch, messages: msgs } };
       });
     };
 
     // Server broadcasts aggregated reactions (with reactor ids); derive our
     // own viewer-relative `mine`.
     const onReaction = ({
-      channelId,
+      groupId,
       msgId,
       reactions,
     }: {
-      channelId: string;
+      groupId: string;
       msgId: string;
       reactions: { e: string; n: number; by: string[] }[];
     }) => {
@@ -1658,12 +1659,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         mine: r.by.includes(userId),
       }));
       void msgdb.patchMessage(msgId, { reactions: mine });
-      setChannels((s) => {
-        const ch = s[channelId];
+      setGroups((s) => {
+        const ch = s[groupId];
         if (!ch) return s;
         return {
           ...s,
-          [channelId]: {
+          [groupId]: {
             ...ch,
             messages: ch.messages.map((m) =>
               m.id === msgId ? { ...m, reactions: mine } : m,
@@ -1674,17 +1675,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     };
 
     // Authorized roster from the server — drives the sidebar lists.
-    const onChannelsList = ({ channels: roster }: { channels: Channel[] }) => {
-      setChannels((s) => {
+    const onGroupsList = ({ groups: roster }: { groups: Group[] }) => {
+      setGroups((s) => {
         const next = { ...s };
         for (const c of roster) {
           // Apply server meta (incl. viewer-correct DM partner) but keep any
-          // messages already loaded for this channel. When none are loaded, seed
+          // messages already loaded for this group. When none are loaded, seed
           // the last message from the prefetched local map so the row shows its
           // correct preview + recency order on this very first render (not after
           // the async query below resolves).
           const loaded = next[c.id]?.messages;
-          const seed = latestByChannelRef.current.get(c.id);
+          const seed = latestByGroupRef.current.get(c.id);
           next[c.id] = {
             ...c,
             messages:
@@ -1693,10 +1694,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         }
         return next;
       });
-      setChannelOrder(roster.filter((c) => c.type === "group").map((c) => c.id));
+      setGroupOrder(roster.filter((c) => c.type === "group").map((c) => c.id));
       setDmOrder(roster.filter((c) => c.type === "dm").map((c) => c.id));
       setRosterLoaded(true);
-      // Resolve pin snippets from local IndexedDB for each channel.
+      // Resolve pin snippets from local IndexedDB for each group.
       for (const c of roster) {
         if (c.pinIds?.length) void applyResolvedPins(c.id, c.pinIds);
       }
@@ -1704,15 +1705,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       // whose preview is missing or stale (e.g. socket beat the cold DB worker,
       // or the persisted snapshot lagged). Opening a conversation later replaces
       // the seed with its full page; live arrivals keep it current via onNew.
-      void msgdb.getLatestPerChannel().then((latest) => {
-        latestByChannelRef.current = new Map(
-          latest.map((x) => [x.channelId, x.message]),
+      void msgdb.getLatestPerGroup().then((latest) => {
+        latestByGroupRef.current = new Map(
+          latest.map((x) => [x.groupId, x.message]),
         );
         seedPreviews(latest);
       });
     };
 
-    // Durable history replayed by the server on channel join. Backfill ONLY
+    // Durable history replayed by the server on group join. Backfill ONLY
     // messages we don't already have locally — never overwrite a message we
     // already hold (our own outgoing messages are stored decrypted; the server
     // copy is ciphertext we couldn't self-decrypt). Exception: converge
@@ -1749,11 +1750,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       return false;
     };
     const onHistoryReplay = async ({
-      channelId,
+      groupId,
       messages,
       replies,
     }: {
-      channelId: string;
+      groupId: string;
       messages: Message[];
       replies: { parentId: string; reply: Message }[];
     }) => {
@@ -1761,7 +1762,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       for (const m of messages) {
         const local = await msgdb.getMessage(m.id);
         if (!local) {
-          await msgdb.putMessage(channelId, m);
+          await msgdb.putMessage(groupId, m);
           added = true;
         } else if (await mergeStale(local, m)) {
           added = true;
@@ -1770,71 +1771,71 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       for (const { parentId, reply } of replies) {
         const local = await msgdb.getMessage(reply.id);
         if (!local) {
-          await msgdb.putReply(channelId, parentId, reply);
+          await msgdb.putReply(groupId, parentId, reply);
           added = true;
         } else if (await mergeStale(local, reply)) {
           added = true;
         }
       }
-      if (added && channelId === currentChannelIdRef.current) {
-        void loadLocalHistory(channelId);
+      if (added && groupId === currentGroupIdRef.current) {
+        void loadLocalHistory(groupId);
       }
     };
 
-    // A channel or DM someone created — surface it in the right sidebar list.
-    const onChannelCreated = ({ channel }: { channel: Channel }) => {
-      setChannels((s) =>
-        s[channel.id]
+    // A group or DM someone created — surface it in the right sidebar list.
+    const onGroupCreated = ({ group }: { group: Group }) => {
+      setGroups((s) =>
+        s[group.id]
           ? s
           : {
               ...s,
-              [channel.id]: { ...channel, messages: channel.messages.map(withSelf) },
+              [group.id]: { ...group, messages: group.messages.map(withSelf) },
             },
       );
-      const setOrder = channel.type === "dm" ? setDmOrder : setChannelOrder;
+      const setOrder = group.type === "dm" ? setDmOrder : setGroupOrder;
       setOrder((order) =>
-        order.includes(channel.id) ? order : [...order, channel.id],
+        order.includes(group.id) ? order : [...order, group.id],
       );
-      if (channel.pinIds?.length) void applyResolvedPins(channel.id, channel.pinIds);
+      if (group.pinIds?.length) void applyResolvedPins(group.id, group.pinIds);
     };
 
-    // A channel's meta/roster changed — merge it in, keeping loaded messages.
-    const onChannelUpdated = ({ channel }: { channel: Channel }) => {
-      setChannels((s) => {
-        const existing = s[channel.id];
+    // A group's meta/roster changed — merge it in, keeping loaded messages.
+    const onGroupUpdated = ({ group }: { group: Group }) => {
+      setGroups((s) => {
+        const existing = s[group.id];
         if (!existing) return s;
         return {
           ...s,
-          [channel.id]: { ...existing, ...channel, messages: existing.messages },
+          [group.id]: { ...existing, ...group, messages: existing.messages },
         };
       });
     };
 
-    // A channel was deleted — drop it everywhere; navigate off it if current.
-    const onChannelDeleted = ({ channelId }: { channelId: string }) => {
-      void msgdb.removeChannel(channelId);
-      setChannels((s) => {
-        if (!s[channelId]) return s;
-        const { [channelId]: _gone, ...rest } = s;
+    // A group was deleted — drop it everywhere; navigate off it if current.
+    const onGroupDeleted = ({ groupId }: { groupId: string }) => {
+      void msgdb.removeGroup(groupId);
+      setGroups((s) => {
+        if (!s[groupId]) return s;
+        const { [groupId]: _gone, ...rest } = s;
         void _gone;
         return rest;
       });
-      setChannelOrder((o) => o.filter((id) => id !== channelId));
-      setDmOrder((o) => o.filter((id) => id !== channelId));
-      if (currentChannelIdRef.current === channelId) {
-        const next = Object.keys(channelsRef.current).find(
-          (id) => id !== channelId && channelsRef.current[id].type === "group",
+      setGroupOrder((o) => o.filter((id) => id !== groupId));
+      setDmOrder((o) => o.filter((id) => id !== groupId));
+      if (currentGroupIdRef.current === groupId) {
+        const next = Object.keys(groupsRef.current).find(
+          (id) => id !== groupId && groupsRef.current[id].type === "group",
         );
-        setCurrentChannelId(next ?? "");
+        setCurrentGroupId(next ?? "");
         if (typeof window !== "undefined") {
           window.history.pushState(null, "", idToPath(next ?? ""));
         }
         setThreadFor(null);
-        setChannelInfoOpen(false);
+        setGroupInfoOpen(false);
       }
     };
 
-    // Presence: reflect a user's online state on every DM channel with them.
+    // Presence: reflect a user's online state on every DM group with them.
     const onPresence = ({
       userId: uid,
       status: presence,
@@ -1842,9 +1843,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       userId: string;
       status: "active" | "idle" | "offline";
     }) => {
-      setChannels((s) => {
+      setGroups((s) => {
         let changed = false;
-        const next: ChannelMap = { ...s };
+        const next: GroupMap = { ...s };
         for (const id of Object.keys(next)) {
           const ch = next[id];
           if (ch.type === "dm" && ch.user?.id === uid) {
@@ -1856,28 +1857,28 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       });
     };
 
-    // Typing: maintain the set of userIds typing per channel.
+    // Typing: maintain the set of userIds typing per group.
     const onTyping = ({
-      channelId,
+      groupId,
       userId: uid,
       isTyping,
     }: {
-      channelId: string;
+      groupId: string;
       userId: string;
       isTyping: boolean;
     }) => {
-      setTypingByChannel((s) => {
-        const cur = s[channelId] || [];
+      setTypingByGroup((s) => {
+        const cur = s[groupId] || [];
         const next = isTyping
           ? cur.includes(uid)
             ? cur
             : [...cur, uid]
           : cur.filter((u) => u !== uid);
-        return { ...s, [channelId]: next };
+        return { ...s, [groupId]: next };
       });
     };
 
-    socket.on("channels:list", onChannelsList);
+    socket.on("groups:list", onGroupsList);
     socket.on("history:replay", onHistoryReplay);
     socket.on("message:ack", onAck);
     socket.on("message:new", onNew);
@@ -1900,11 +1901,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     };
 
     const onMessageDeleted = ({
-      channelId,
+      groupId,
       msgId,
       parentId,
     }: {
-      channelId: string;
+      groupId: string;
       msgId: string;
       parentId: string | null;
     }) => {
@@ -1925,8 +1926,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         reactions: [],
         deleted: true,
       });
-      setChannels((s) => {
-        const ch = s[channelId];
+      setGroups((s) => {
+        const ch = s[groupId];
         if (!ch) return s;
         const messages = ch.messages.map((m) => {
           if (!parentId && m.id === msgId) return tombstone(m);
@@ -1940,7 +1941,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           }
           return m;
         });
-        return { ...s, [channelId]: { ...ch, messages } };
+        return { ...s, [groupId]: { ...ch, messages } };
       });
     };
 
@@ -1949,13 +1950,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     // setting `enc` re-triggers the decrypt effect, which decrypts the new
     // body and re-persists the plaintext locally.
     const onMessageEdited = ({
-      channelId,
+      groupId,
       msgId,
       parentId,
       enc,
       editedTs,
     }: {
-      channelId: string;
+      groupId: string;
       msgId: string;
       parentId: string | null;
       enc: string;
@@ -1971,7 +1972,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         }
         const patch: Partial<Message> = { edited: true, editedTs };
         void msgdb.patchMessage(msgId, patch);
-        applyMessagePatch(channelId, msgId, parentId, patch);
+        applyMessagePatch(groupId, msgId, parentId, patch);
         return;
       }
       const patch: Partial<Message> = {
@@ -1984,20 +1985,20 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         locked: undefined,
       };
       void msgdb.patchMessage(msgId, patch);
-      applyMessagePatch(channelId, msgId, parentId, patch);
+      applyMessagePatch(groupId, msgId, parentId, patch);
     };
 
     const onUnreadState = ({ counts }: { counts: Record<string, number> }) =>
-      setUnreadByChannel(counts);
-    const onUnreadBump = ({ channelId }: { channelId: string }) => {
-      // Ignore the channel we're actively viewing (it stays read).
-      if (channelId === currentChannelIdRef.current) return;
-      setUnreadByChannel((s) => ({ ...s, [channelId]: (s[channelId] ?? 0) + 1 }));
+      setUnreadByGroup(counts);
+    const onUnreadBump = ({ groupId }: { groupId: string }) => {
+      // Ignore the group we're actively viewing (it stays read).
+      if (groupId === currentGroupIdRef.current) return;
+      setUnreadByGroup((s) => ({ ...s, [groupId]: (s[groupId] ?? 0) + 1 }));
     };
 
-    socket.on("channel:created", onChannelCreated);
-    socket.on("channel:updated", onChannelUpdated);
-    socket.on("channel:deleted", onChannelDeleted);
+    socket.on("group:created", onGroupCreated);
+    socket.on("group:updated", onGroupUpdated);
+    socket.on("group:deleted", onGroupDeleted);
     socket.on("workspace:updated", onWorkspace);
     socket.on("profile:updated", onProfile);
     socket.on("unread:state", onUnreadState);
@@ -2005,28 +2006,28 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     socket.on("message:deleted", onMessageDeleted);
     socket.on("message:edited", onMessageEdited);
     const onPins = async ({
-      channelId,
+      groupId,
       pinIds,
     }: {
-      channelId: string;
+      groupId: string;
       pinIds: string[];
     }) => {
       const pinned = await resolvePins(pinIds);
-      setChannels((s) => {
-        const ch = s[channelId];
+      setGroups((s) => {
+        const ch = s[groupId];
         if (!ch) return s;
-        return { ...s, [channelId]: { ...ch, pinIds, pinned } };
+        return { ...s, [groupId]: { ...ch, pinIds, pinned } };
       });
     };
 
     // A peer distributed its group sender key to us: decrypt the pairwise
-    // envelope, store the chain for that (channel, sender), and bump
+    // envelope, store the chain for that (group, sender), and bump
     // chainVersion so the decrypt effect retries any messages awaiting it.
     const onGroupSenderKey = async ({
-      channelId,
+      groupId,
       env,
     }: {
-      channelId: string;
+      groupId: string;
       env: string;
     }) => {
       const secrets = await getSecrets();
@@ -2035,19 +2036,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         const res = await decryptEnvelope(JSON.parse(env) as Envelope, secrets);
         if (!res) return;
         const dist = JSON.parse(res.text) as SenderKeyDistribution;
-        if (dist.skd !== 1 || dist.channelId !== channelId) return;
+        if (dist.skd !== 1 || dist.groupId !== groupId) return;
         recvChainsRef.current.set(
-          `${channelId}|${dist.sender}`,
+          `${groupId}|${dist.sender}`,
           deserializeState({ chainKey: dist.chainKey, index: dist.index }),
         );
-        await groupPut(userId, `recv:${channelId}:${dist.sender}`, {
+        await groupPut(userId, `recv:${groupId}:${dist.sender}`, {
           chainKey: dist.chainKey,
           index: dist.index,
         });
         // We now hold a working key for this sender — allow future re-requests
         // and reset its wait clock.
-        requestedKeysRef.current.delete(`${channelId}|${dist.sender}`);
-        requestedAtRef.current.delete(`${channelId}|${dist.sender}`);
+        requestedKeysRef.current.delete(`${groupId}|${dist.sender}`);
+        requestedAtRef.current.delete(`${groupId}|${dist.sender}`);
         // Forward secrecy: consume the one-time prekey this envelope used (we've
         // persisted the recv chain, so we never need to re-decrypt the envelope).
         if (res.usedOpkId) {
@@ -2062,22 +2063,22 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     };
 
     // A member couldn't decrypt one of OUR messages and asked us to re-send our
-    // sender key. If we're the requested sender and hold a seed for the channel,
+    // sender key. If we're the requested sender and hold a seed for the group,
     // re-distribute it to the current member set (reaching the requester).
     const onGroupSenderKeyRequest = async ({
-      channelId,
+      groupId,
       sender,
     }: {
-      channelId: string;
+      groupId: string;
       sender: string;
       fromUserId?: string;
     }) => {
       const secrets = await getSecrets();
       if (!secrets || secrets.deviceId !== sender) return;
-      const seed = await groupGet<SenderKeyWire>(userId, `seed:${channelId}`);
+      const seed = await groupGet<SenderKeyWire>(userId, `seed:${groupId}`);
       if (!seed) return;
-      const members = await fetchChannelBundles(channelId);
-      if (members.length) await distributeSenderKey(channelId, seed, members, secrets);
+      const members = await fetchGroupBundles(groupId);
+      if (members.length) await distributeSenderKey(groupId, seed, members, secrets);
     };
 
     // DM self-heal responder: a peer (or our own other device) can't decrypt a
@@ -2086,21 +2087,21 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     // requester's CURRENT devices. The participant check is what stops a DM
     // being leaked to a third party that guessed a msgId.
     const onDmRehealRequest = async ({
-      channelId: reqChannelId,
+      groupId: reqGroupId,
       msgId,
       fromUserId,
     }: {
-      channelId: string;
+      groupId: string;
       msgId: string;
       fromUserId: string;
     }) => {
       const meta = await msgdb.getMessageMeta(msgId);
-      if (!meta || !isDm(meta.channelId)) return;
-      const { message, channelId } = meta;
+      if (!meta || !isDm(meta.groupId)) return;
+      const { message, groupId } = meta;
       // Only hand over a readable body (skip tombstones / still-encrypted here).
       if (message.deleted || message.enc || message.locked) return;
       if (!message.text && !message.attachment) return;
-      const peer = channelsRef.current[channelId]?.user?.id ?? dmPeerId(channelId);
+      const peer = groupsRef.current[groupId]?.user?.id ?? dmPeerId(groupId);
       if (fromUserId !== userId && fromUserId !== peer) return; // not a DM party
       const secrets = await getSecrets();
       if (!secrets) return;
@@ -2126,7 +2127,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       );
       if (!env) return;
       socket.emit("dm:reheal:offer", {
-        channelId: reqChannelId,
+        groupId: reqGroupId,
         msgId,
         toUserId: fromUserId,
         enc: JSON.stringify(env),
@@ -2136,17 +2137,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     // DM self-heal requester side: an envelope re-sealed to us arrived — swap it
     // in and re-run decryption (it now opens with a key we hold).
     const onDmRehealOffer = ({
-      channelId,
+      groupId,
       msgId,
       enc,
     }: {
-      channelId: string;
+      groupId: string;
       msgId: string;
       enc: string;
     }) => {
       void msgdb.patchMessage(msgId, { enc, locked: undefined });
-      setChannels((s) => {
-        const ch = s[channelId];
+      setGroups((s) => {
+        const ch = s[groupId];
         if (!ch) return s;
         let found = false;
         const messages = ch.messages.map((m) => {
@@ -2154,7 +2155,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           found = true;
           return { ...m, enc, locked: undefined };
         });
-        return found ? { ...s, [channelId]: { ...ch, messages } } : s;
+        return found ? { ...s, [groupId]: { ...ch, messages } } : s;
       });
       setRehealVersion((v) => v + 1);
     };
@@ -2165,38 +2166,38 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     // (we missed one) → fetch and apply the ordered range; already-applied →
     // ignore. This is what keeps every member's ratchet tree in lockstep.
     const onMlsCommit = ({
-      channelId,
+      groupId,
       seq,
       commit,
     }: {
-      channelId: string;
+      groupId: string;
       seq: number;
       commit: string;
     }) =>
-      withMlsLock(channelId, async () => {
-        const state = await mlsLoadState(channelId);
+      withMlsLock(groupId, async () => {
+        const state = await mlsLoadState(groupId);
         if (!state) return;
-        const last = await mlsGetSeq(channelId);
+        const last = await mlsGetSeq(groupId);
         if (seq <= last) return; // already applied
         if (seq === last + 1) {
           try {
-            await mlsSaveState(channelId, await (await loadMls()).mlsProcessCommit(state, commit));
-            await mlsSetSeq(channelId, seq);
+            await mlsSaveState(groupId, await (await loadMls()).mlsProcessCommit(state, commit));
+            await mlsSetSeq(groupId, seq);
           } catch {
             return; // not our epoch yet — a catch-up will retry
           }
         } else {
-          await mlsApplyCommitsSince(channelId); // gap → fetch + apply in order
+          await mlsApplyCommitsSince(groupId); // gap → fetch + apply in order
         }
         setChainVersion((v) => v + 1);
       });
     const onMlsWelcome = async ({
-      channelId,
+      groupId,
       welcome,
       seq,
       toDeviceId,
     }: {
-      channelId: string;
+      groupId: string;
       welcome: string;
       seq: number;
       toDeviceId: string;
@@ -2204,21 +2205,21 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       // Welcomes are sealed per DEVICE — this one is a sibling device's.
       const secrets = await getSecrets();
       if (!secrets || (toDeviceId && toDeviceId !== secrets.deviceId)) return;
-      await withMlsLock(channelId, async () => {
-        if (await mlsLoadState(channelId)) return; // already a member
+      await withMlsLock(groupId, async () => {
+        if (await mlsLoadState(groupId)) return; // already a member
         const kp = await mlsKeyPair();
         if (!kp) return; // no device KeyPackage → can't join
         try {
-          await mlsSaveState(channelId, await (await loadMls()).mlsJoinFromWelcome(welcome, kp));
-          await mlsSetSeq(channelId, seq); // resume catch-up after the commit that added us
-          mlsWaitRef.current.delete(channelId);
+          await mlsSaveState(groupId, await (await loadMls()).mlsJoinFromWelcome(welcome, kp));
+          await mlsSetSeq(groupId, seq); // resume catch-up after the commit that added us
+          mlsWaitRef.current.delete(groupId);
           setChainVersion((v) => v + 1);
-          await mlsApplyCommitsSince(channelId); // apply any commits after our add
+          await mlsApplyCommitsSince(groupId); // apply any commits after our add
         } catch (err) {
           // Welcome for a stale KeyPackage of this device / malformed. Surfaced
-          // in the console because an unjoinable welcome means this channel
+          // in the console because an unjoinable welcome means this group
           // stays locked until a membership sync re-adds us.
-          console.warn("[mls] welcome join failed", channelId, err);
+          console.warn("[mls] welcome join failed", groupId, err);
         }
       });
     };
@@ -2230,7 +2231,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       void processReceiptRef.current(p).then((handled) => {
         if (!handled) {
           pendingReceiptsRef.current = pendingReceiptsRef.current.filter(
-            (q) => !(q.channelId === p.channelId && q.deviceId === p.deviceId),
+            (q) => !(q.groupId === p.groupId && q.deviceId === p.deviceId),
           );
           pendingReceiptsRef.current.push(p);
         }
@@ -2248,15 +2249,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     socket.on("dm:reheal:request", onDmRehealRequest);
     socket.on("dm:reheal:offer", onDmRehealOffer);
     return () => {
-      socket.off("channels:list", onChannelsList);
+      socket.off("groups:list", onGroupsList);
       socket.off("history:replay", onHistoryReplay);
       socket.off("message:ack", onAck);
       socket.off("message:new", onNew);
       socket.off("thread:new", onThreadNew);
       socket.off("reaction:updated", onReaction);
-      socket.off("channel:created", onChannelCreated);
-      socket.off("channel:updated", onChannelUpdated);
-      socket.off("channel:deleted", onChannelDeleted);
+      socket.off("group:created", onGroupCreated);
+      socket.off("group:updated", onGroupUpdated);
+      socket.off("group:deleted", onGroupDeleted);
       socket.off("workspace:updated", onWorkspace);
       socket.off("profile:updated", onProfile);
       socket.off("unread:state", onUnreadState);
@@ -2284,7 +2285,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     applyResolvedPins,
     fetchBundles,
     dmPeerId,
-    fetchChannelBundles,
+    fetchGroupBundles,
     distributeSenderKey,
     loadLocalHistory,
     scheduleBackup,
@@ -2318,7 +2319,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         keyPackage: mls.mlsEncodeKeyPackage(kp.publicPackage),
       });
       const { welcomes } = await new Promise<{
-        welcomes: { channelId: string; welcome: string; seq: number }[];
+        welcomes: { groupId: string; welcome: string; seq: number }[];
       }>((resolve) => {
         s.timeout(5000).emit("mls:drainWelcomes", { deviceId: sessionDeviceId }, (err, r) =>
           resolve(err || !r ? { welcomes: [] } : r),
@@ -2326,13 +2327,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       });
       for (const w of welcomes) {
         if (cancelled) return;
-        await withMlsLock(w.channelId, async () => {
-          if (await mlsLoadState(w.channelId)) return; // already joined
+        await withMlsLock(w.groupId, async () => {
+          if (await mlsLoadState(w.groupId)) return; // already joined
           try {
-            await mlsSaveState(w.channelId, await mls.mlsJoinFromWelcome(w.welcome, kp));
-            await mlsSetSeq(w.channelId, w.seq);
-            mlsWaitRef.current.delete(w.channelId);
-            await mlsApplyCommitsSince(w.channelId);
+            await mlsSaveState(w.groupId, await mls.mlsJoinFromWelcome(w.welcome, kp));
+            await mlsSetSeq(w.groupId, w.seq);
+            mlsWaitRef.current.delete(w.groupId);
+            await mlsApplyCommitsSince(w.groupId);
           } catch {
             // welcome for a stale KeyPackage of this device — skip
           }
@@ -2345,47 +2346,47 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     };
   }, [socket, sessionDeviceId, mlsKeyPair, mlsLoadState, mlsSaveState, mlsSetSeq, mlsApplyCommitsSince, withMlsLock]);
 
-  // Join the active channel's room (and re-join on reconnect); leave on switch.
-  // Opening a channel marks it read: clear its badge locally + tell the server.
+  // Join the active group's room (and re-join on reconnect); leave on switch.
+  // Opening a group marks it read: clear its badge locally + tell the server.
   useEffect(() => {
     if (!socket || status !== "connected") return;
-    const channelId = currentChannelId;
-    if (!channelId) return;
-    socket.emit("channel:join", { channelId });
-    socket.emit("channel:read", { channelId });
-    scheduleReceiptRef.current(channelId);
-    setUnreadByChannel((s) => (s[channelId] ? { ...s, [channelId]: 0 } : s));
+    const groupId = currentGroupId;
+    if (!groupId) return;
+    socket.emit("group:join", { groupId });
+    socket.emit("group:read", { groupId });
+    scheduleReceiptRef.current(groupId);
+    setUnreadByGroup((s) => (s[groupId] ? { ...s, [groupId]: 0 } : s));
     // History lives locally (OPFS SQLite), not on the server — load it. Skip the
     // default latest-page load when a jump-to-message is loading a window around
-    // a specific target for this channel (jumpToMessage owns the load instead).
-    if (jumpPendingRef.current !== channelId) {
-      void loadLocalHistory(channelId).then(() =>
+    // a specific target for this group (jumpToMessage owns the load instead).
+    if (jumpPendingRef.current !== groupId) {
+      void loadLocalHistory(groupId).then(() =>
         requestAnimationFrame(scrollToBottom),
       );
     }
     return () => {
-      socket.emit("channel:leave", { channelId });
+      socket.emit("group:leave", { groupId });
     };
-  }, [socket, status, currentChannelId, loadLocalHistory, scrollToBottom]);
+  }, [socket, status, currentGroupId, loadLocalHistory, scrollToBottom]);
 
   // On (re)connect, resend any optimistic messages that were never acked.
   // Server idempotency (by clientId) makes this safe from duplicates, so this
   // is the reliable delivery path rather than socket.io's offline buffer.
   useEffect(() => {
     if (!socket || status !== "connected") return;
-    const all = channelsRef.current;
+    const all = groupsRef.current;
     const resend: {
-      channelId: string;
+      groupId: string;
       id: string;
       text: string;
       attachment?: Message["attachment"];
       rich?: string;
     }[] = [];
-    for (const channelId of Object.keys(all)) {
-      for (const m of all[channelId].messages) {
+    for (const groupId of Object.keys(all)) {
+      for (const m of all[groupId].messages) {
         if (m.pending || m.failed) {
           resend.push({
-            channelId,
+            groupId,
             id: m.id,
             text: m.text,
             attachment: m.attachment,
@@ -2395,18 +2396,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       }
     }
     if (resend.length === 0) return;
-    resend.forEach(({ channelId, id, text, attachment, rich }) => {
-      socket.emit("message:send", { channelId, text, clientId: id, attachment, rich });
+    resend.forEach(({ groupId, id, text, attachment, rich }) => {
+      socket.emit("message:send", { groupId, text, clientId: id, attachment, rich });
       armFailTimer(id);
     });
-    setChannels((s) => {
+    setGroups((s) => {
       let next = s;
-      for (const { channelId, id } of resend) {
-        const ch = next[channelId];
+      for (const { groupId, id } of resend) {
+        const ch = next[groupId];
         if (!ch) continue;
         next = {
           ...next,
-          [channelId]: {
+          [groupId]: {
             ...ch,
             messages: ch.messages.map((m) =>
               m.id === id ? { ...m, pending: true, failed: false } : m,
@@ -2424,30 +2425,30 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const typingSentRef = useRef(false);
 
   const stopTyping = useCallback(
-    (channelId: string) => {
+    (groupId: string) => {
       if (typingTimerRef.current) {
         clearTimeout(typingTimerRef.current);
         typingTimerRef.current = null;
       }
       if (typingSentRef.current) {
         typingSentRef.current = false;
-        socket?.emit("typing:stop", { channelId });
+        socket?.emit("typing:stop", { groupId });
       }
     },
     [socket],
   );
 
   const notifyTyping = useCallback(
-    (channelId: string) => {
+    (groupId: string) => {
       if (!typingSentRef.current) {
         typingSentRef.current = true;
-        socket?.emit("typing:start", { channelId });
+        socket?.emit("typing:start", { groupId });
       }
       if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
       typingTimerRef.current = setTimeout(() => {
         typingTimerRef.current = null;
         typingSentRef.current = false;
-        socket?.emit("typing:stop", { channelId });
+        socket?.emit("typing:stop", { groupId });
       }, 2500);
     },
     [socket],
@@ -2466,8 +2467,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         setThreadFor(null);
         setPickerOpenFor(null);
         setActivePanel(null);
-        setCreateChannelOpen(false);
-        setChannelInfoOpen(false);
+        setCreateGroupOpen(false);
+        setGroupInfoOpen(false);
         setWorkspaceOpen(false);
       }
     };
@@ -2502,48 +2503,48 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     setSettingsOpen(false);
     setComposeOpen(false);
     setSearchOpen(false);
-    setCreateChannelOpen(false);
+    setCreateGroupOpen(false);
     setWorkspaceOpen(false);
   }, []);
-  // Closing a panel returns to the channel/DM that was open underneath it.
+  // Closing a panel returns to the group/DM that was open underneath it.
   const closePanel = useCallback(() => {
     setActivePanel(null);
     if (typeof window !== "undefined") {
-      window.history.pushState(null, "", idToPath(currentChannelIdRef.current));
+      window.history.pushState(null, "", idToPath(currentGroupIdRef.current));
     }
   }, []);
 
-  const saveDraft = useCallback((channelId: string, draft: Draft) => {
+  const saveDraft = useCallback((groupId: string, draft: Draft) => {
     setDrafts((d) => {
       // Empty draft → drop the entry so the badge/list stay accurate.
       if (!draft.text.trim()) {
-        if (!(channelId in d)) return d;
-        const { [channelId]: _gone, ...rest } = d;
+        if (!(groupId in d)) return d;
+        const { [groupId]: _gone, ...rest } = d;
         void _gone;
         return rest;
       }
-      const cur = d[channelId];
+      const cur = d[groupId];
       if (cur && cur.text === draft.text && cur.rich === draft.rich) return d;
-      return { ...d, [channelId]: draft };
+      return { ...d, [groupId]: draft };
     });
   }, []);
-  const clearDraft = useCallback((channelId: string) => {
+  const clearDraft = useCallback((groupId: string) => {
     setDrafts((d) => {
-      if (!(channelId in d)) return d;
-      const { [channelId]: _gone, ...rest } = d;
+      if (!(groupId in d)) return d;
+      const { [groupId]: _gone, ...rest } = d;
       void _gone;
       return rest;
     });
   }, []);
 
-  const selectChannel = useCallback((id: string) => {
+  const selectGroup = useCallback((id: string) => {
     navigateTo(id);
     setThreadFor(null);
     setSettingsOpen(false);
     setComposeOpen(false);
     setSearchOpen(false);
     setActivePanel(null);
-    setCreateChannelOpen(false);
+    setCreateGroupOpen(false);
     setWorkspaceOpen(false);
   }, [navigateTo]);
 
@@ -2551,19 +2552,20 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // `open-channel` when its notification is clicked (browser), the Electron
   // main process sends the same via the desktop bridge (native notification
   // click), and a cold open arrives as `?channel=<id>`. All route to
-  // selectChannel.
+  // selectGroup. (The deep-link vocabulary stays "channel"/channelId to match
+  // public/sw.js and the installed desktop binary, which aren't renamed here.)
   useEffect(() => {
-    const offDesktop = getShellBridge()?.onOpenChannel((id) => selectChannel(id));
+    const offDesktop = getShellBridge()?.onOpenChannel((id) => selectGroup(id));
     const sw =
       typeof navigator !== "undefined" ? navigator.serviceWorker : undefined;
     const onSwMessage = (e: MessageEvent) => {
       const d = e.data as { type?: string; channelId?: string } | undefined;
-      if (d?.type === "open-channel" && d.channelId) selectChannel(d.channelId);
+      if (d?.type === "open-channel" && d.channelId) selectGroup(d.channelId);
     };
     sw?.addEventListener("message", onSwMessage);
     const param = new URLSearchParams(window.location.search).get("channel");
     if (param) {
-      selectChannel(param);
+      selectGroup(param);
       // Strip the param so a refresh doesn't re-trigger the jump.
       window.history.replaceState(null, "", window.location.pathname);
     }
@@ -2571,7 +2573,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       offDesktop?.();
       sw?.removeEventListener("message", onSwMessage);
     };
-  }, [selectChannel]);
+  }, [selectGroup]);
 
   const setComposerText = useCallback((v: string) => setComposerTextState(v), []);
   const setThreadComposerText = useCallback(
@@ -2580,16 +2582,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   );
 
   // Ask a sender to (re)distribute its group key (pull-on-miss), throttled to
-  // one request per (channel, sender) until we hold a working key. Because the
+  // one request per (group, sender) until we hold a working key. Because the
   // distributed seed is the stable index-0 seed, getting it recovers the
   // sender's whole history, not just messages from here on.
   const requestSenderKey = useCallback(
-    (channelId: string, sender: string) => {
-      const k = `${channelId}|${sender}`;
+    (groupId: string, sender: string) => {
+      const k = `${groupId}|${sender}`;
       if (!socket || requestedKeysRef.current.has(k)) return;
       requestedKeysRef.current.add(k);
       requestedAtRef.current.set(k, Date.now());
-      socket.emit("group:senderKey:request", { channelId, sender });
+      socket.emit("group:senderKey:request", { groupId, sender });
       // Re-run the decrypt pass after the grace window so an unanswered request
       // can resolve to 🔒 (the key may never come — e.g. our own pre-wipe keys).
       setTimeout(() => setChainVersion((v) => v + 1), KEY_WAIT_MS + 200);
@@ -2603,18 +2605,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // sender-key distribution. A definitive failure returns a 🔒 patch.
   // DM self-heal: ask the DM peer (and our own other devices) to re-encrypt a
   // message we can't open to our current keys. Throttled to one request per
-  // (channel|msg); schedules a rehealVersion bump so the decrypt effect re-runs
+  // (group|msg); schedules a rehealVersion bump so the decrypt effect re-runs
   // after the grace window (to lock it if no offer arrived).
   const requestReheal = useCallback(
-    (channelId: string, msgId: string) => {
-      const k = `${channelId}|${msgId}`;
+    (groupId: string, msgId: string) => {
+      const k = `${groupId}|${msgId}`;
       if (rehealRequestedRef.current.has(k)) return;
       rehealRequestedRef.current.add(k);
       rehealAtRef.current.set(k, Date.now());
       socket?.emit("dm:reheal:request", {
-        channelId,
+        groupId,
         msgId,
-        peerId: dmPeerId(channelId),
+        peerId: dmPeerId(groupId),
       });
       setTimeout(() => setRehealVersion((v) => v + 1), REHEAL_WAIT_MS);
     },
@@ -2623,7 +2625,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
   const decryptInbound = useCallback(
     async (
-      channelId: string,
+      groupId: string,
       enc: string,
       secrets: DeviceSecrets,
       /** Message id — enables DM self-heal on an undecryptable copy (omitted for
@@ -2645,25 +2647,25 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       // membership (or our leaf is unreachable) and locks. Lock-serialized
       // against sends/commits: decryption advances the receiver chains.
       if (parsed && (parsed as { t?: string }).t === "mls") {
-        return withMlsLock(channelId, async () => {
+        return withMlsLock(groupId, async () => {
           // Already decrypted this session (overlapping effect runs) → replay
           // the cached plaintext instead of re-ratcheting (which would throw).
           const cached = msgId && mlsPlainRef.current.get(msgId);
           if (cached) return cached;
-          const state = await mlsLoadState(channelId);
+          const state = await mlsLoadState(groupId);
           if (!state) {
-            const since = mlsWaitRef.current.get(channelId);
+            const since = mlsWaitRef.current.get(groupId);
             if (since === undefined) {
-              mlsWaitRef.current.set(channelId, Date.now());
+              mlsWaitRef.current.set(groupId, Date.now());
               return null;
             }
             return Date.now() - since > KEY_WAIT_MS ? locked : null;
           }
-          mlsWaitRef.current.delete(channelId);
+          mlsWaitRef.current.delete(groupId);
           try {
             const res = await (await loadMls()).mlsDecrypt(state, (parsed as { w: string }).w);
             if (!res) return locked;
-            await mlsSaveState(channelId, res.state);
+            await mlsSaveState(groupId, res.state);
             if (res.kind !== "application") return null; // control msg — state advanced
             const patch = {
               text: res.text,
@@ -2679,7 +2681,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           } catch (err) {
             // ts-mls throws on a message we can't process (wrong epoch, our own
             // message, foreign/stale group) — lock it rather than crash decrypt.
-            console.warn("[mls] decrypt failed", channelId, msgId, err);
+            console.warn("[mls] decrypt failed", groupId, msgId, err);
             return locked;
           }
         });
@@ -2687,10 +2689,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       // Group (sender-keys) message.
       if (parsed && (parsed as GroupEnvelope).t === "grp") {
         const env = parsed as GroupEnvelope;
-        const k = `${channelId}|${env.s}`;
+        const k = `${groupId}|${env.s}`;
         let chain = recvChainsRef.current.get(k);
         if (!chain) {
-          const wire = await groupGet<SenderKeyWire>(userId, `recv:${channelId}:${env.s}`);
+          const wire = await groupGet<SenderKeyWire>(userId, `recv:${groupId}:${env.s}`);
           if (wire) {
             chain = deserializeState(wire);
             recvChainsRef.current.set(k, chain);
@@ -2705,7 +2707,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           if (since !== undefined && Date.now() - since > KEY_WAIT_MS) {
             return locked;
           }
-          requestSenderKey(channelId, env.s);
+          requestSenderKey(groupId, env.s);
           return null;
         }
         const res = await decryptGroupMessage(chain, env);
@@ -2713,11 +2715,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           // Key present but it didn't decrypt (e.g. a stale seed from before a
           // re-key). Ask once for the current seed; if it still fails, lock it.
           if (requestedKeysRef.current.has(k)) return locked;
-          requestSenderKey(channelId, env.s);
+          requestSenderKey(groupId, env.s);
           return null;
         }
         recvChainsRef.current.set(k, res.next);
-        await groupPut(userId, `recv:${channelId}:${env.s}`, serializeState(res.next));
+        await groupPut(userId, `recv:${groupId}:${env.s}`, serializeState(res.next));
         requestedKeysRef.current.delete(k);
         requestedAtRef.current.delete(k);
         return {
@@ -2738,10 +2740,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // to self-heal: ask the peer / our own other devices to re-encrypt it to
         // our current keys. Stay pending (null → retry) until the grace window
         // elapses, then lock. Skipped for receipts (no msgId).
-        if (msgId && isDm(channelId)) {
-          const since = rehealAtRef.current.get(`${channelId}|${msgId}`);
+        if (msgId && isDm(groupId)) {
+          const since = rehealAtRef.current.get(`${groupId}|${msgId}`);
           if (since === undefined || Date.now() - since <= REHEAL_WAIT_MS) {
-            requestReheal(channelId, msgId);
+            requestReheal(groupId, msgId);
             return null;
           }
         }
@@ -2768,12 +2770,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // Merge an incoming read cursor, taking the max readSeq per user across their
   // devices — cursors never regress (out-of-order device replay is harmless).
   const mergeReceipt = useCallback(
-    (channelId: string, fromUserId: string, readSeq: number, ts: number) => {
-      setReceiptsByChannel((s) => {
-        const ch = s[channelId] ?? {};
+    (groupId: string, fromUserId: string, readSeq: number, ts: number) => {
+      setReceiptsByGroup((s) => {
+        const ch = s[groupId] ?? {};
         const cur = ch[fromUserId];
         if (cur && cur.readSeq >= readSeq) return s;
-        return { ...s, [channelId]: { ...ch, [fromUserId]: { readSeq, ts } } };
+        return { ...s, [groupId]: { ...ch, [fromUserId]: { readSeq, ts } } };
       });
     },
     [],
@@ -2782,23 +2784,23 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // Decrypt + apply one sealed receipt. Returns false when its sender key hasn't
   // arrived yet (caller parks it for a chainVersion retry); true once handled or
   // definitively undecryptable (dropped). Reuses decryptInbound so a receipt
-  // rides the exact same group/DM/MLS path as a message of the same channel.
+  // rides the exact same group/DM/MLS path as a message of the same group.
   const processReceipt = useCallback(
     async (p: ReceiptRelayPayload): Promise<boolean> => {
       const secrets = await getSecrets();
       if (!secrets) return false;
-      const patch = await decryptInbound(p.channelId, p.env, secrets);
+      const patch = await decryptInbound(p.groupId, p.env, secrets);
       if (patch === null) return false; // no key yet → park + retry
       if (patch.locked) return true; // undecryptable → drop
       try {
         const c = JSON.parse(patch.text ?? "") as {
           rcpt?: number;
-          channelId?: string;
+          groupId?: string;
           readSeq?: number;
           ts?: number;
         };
-        if (c.rcpt === 1 && c.channelId === p.channelId && typeof c.readSeq === "number") {
-          mergeReceipt(p.channelId, p.fromUserId, c.readSeq, c.ts ?? 0);
+        if (c.rcpt === 1 && c.groupId === p.groupId && typeof c.readSeq === "number") {
+          mergeReceipt(p.groupId, p.fromUserId, c.readSeq, c.ts ?? 0);
         }
       } catch {
         // Not a receipt payload (shouldn't happen on this event) — ignore.
@@ -2808,46 +2810,46 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     [getSecrets, decryptInbound, mergeReceipt],
   );
 
-  // Seal THIS device's read cursor for a channel and relay it, debounced. Skips
+  // Seal THIS device's read cursor for a group and relay it, debounced. Skips
   // when the cursor hasn't advanced past what we last sealed, and when the
-  // channel isn't E2EE (buildEnvelope/buildGroupEnc return null → no plaintext).
+  // group isn't E2EE (buildEnvelope/buildGroupEnc return null → no plaintext).
   const sealReceipt = useCallback(
-    async (channelId: string) => {
+    async (groupId: string) => {
       if (!socket) return;
-      const ch = channelsRef.current[channelId];
+      const ch = groupsRef.current[groupId];
       if (!ch) return;
       let readSeq = 0;
       for (const m of ch.messages) {
         if (typeof m.seq === "number" && m.seq > readSeq) readSeq = m.seq;
       }
       if (readSeq <= 0) return;
-      if ((lastSealedSeqRef.current.get(channelId) ?? 0) >= readSeq) return;
+      if ((lastSealedSeqRef.current.get(groupId) ?? 0) >= readSeq) return;
       const secrets = await getSecrets();
       if (!secrets) return;
       const payload = {
-        text: JSON.stringify({ rcpt: 1, channelId, readSeq, ts: Date.now() }),
+        text: JSON.stringify({ rcpt: 1, groupId, readSeq, ts: Date.now() }),
       };
-      const enc = isDm(channelId)
-        ? await buildEnvelope(dmPeerId(channelId), payload, { skipOneTimePreKey: true })
-        : await buildGroupEnc(channelId, payload);
+      const enc = isDm(groupId)
+        ? await buildEnvelope(dmPeerId(groupId), payload, { skipOneTimePreKey: true })
+        : await buildGroupEnc(groupId, payload);
       if (!enc) return;
-      lastSealedSeqRef.current.set(channelId, readSeq);
-      socket.emit("receipt:update", { channelId, deviceId: secrets.deviceId, env: enc });
+      lastSealedSeqRef.current.set(groupId, readSeq);
+      socket.emit("receipt:update", { groupId, deviceId: secrets.deviceId, env: enc });
     },
     [socket, getSecrets, buildEnvelope, buildGroupEnc, dmPeerId, isDm],
   );
 
-  // Debounce receipt sealing (2s) — piggybacks the channel:read emit sites, so
+  // Debounce receipt sealing (2s) — piggybacks the group:read emit sites, so
   // rapidly reading many messages seals once, not once per message.
   const scheduleReceipt = useCallback(
-    (channelId: string) => {
-      const t = receiptTimersRef.current.get(channelId);
+    (groupId: string) => {
+      const t = receiptTimersRef.current.get(groupId);
       if (t) clearTimeout(t);
       receiptTimersRef.current.set(
-        channelId,
+        groupId,
         setTimeout(() => {
-          receiptTimersRef.current.delete(channelId);
-          void sealReceipt(channelId);
+          receiptTimersRef.current.delete(groupId);
+          void sealReceipt(groupId);
         }, 2000),
       );
     },
@@ -2877,7 +2879,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     (uid: string): User => {
       const m = workspaceMembers.find((u) => u.id === uid);
       if (m) return m;
-      const dm = channelsRef.current[currentChannelIdRef.current]?.user;
+      const dm = groupsRef.current[currentGroupIdRef.current]?.user;
       if (dm?.id === uid) return dm;
       const at = uid.indexOf("@");
       const label = at > 0 ? uid.slice(0, at) : uid;
@@ -2891,13 +2893,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     [workspaceMembers],
   );
 
-  // For the CURRENT channel, place each other user's "seen by" avatar on the
+  // For the CURRENT group, place each other user's "seen by" avatar on the
   // newest top-level message their cursor covers (Messenger-style). Keyed by
   // msgId for O(1) lookup in the message row.
   const seenByMsgId = useMemo((): Record<string, User[]> => {
-    const cid = currentChannelId;
-    const ch = channels[cid];
-    const cursors = receiptsByChannel[cid];
+    const cid = currentGroupId;
+    const ch = groups[cid];
+    const cursors = receiptsByGroup[cid];
     if (!ch || !cursors) return {};
     const tops = ch.messages.filter(
       (m) => typeof m.seq === "number" && !m.deleted,
@@ -2915,7 +2917,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       (out[best.id] ||= []).push(resolveReceiptUser(uid));
     }
     return out;
-  }, [currentChannelId, channels, receiptsByChannel, userId, resolveReceiptUser]);
+  }, [currentGroupId, groups, receiptsByGroup, userId, resolveReceiptUser]);
 
   // Decrypt inbound E2EE messages on this device, patching the plaintext into
   // place. Runs whenever messages change and quickly no-ops once nothing is
@@ -2924,18 +2926,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!cryptoAvailable()) return;
     const pending: {
-      channelId: string;
+      groupId: string;
       id: string;
       enc: string;
       /** Set when the encrypted message is a thread reply under this parent. */
       parentId?: string;
     }[] = [];
-    for (const [cid, ch] of Object.entries(channels)) {
+    for (const [cid, ch] of Object.entries(groups)) {
       for (const m of ch.messages) {
-        if (m.enc) pending.push({ channelId: cid, id: m.id, enc: m.enc });
+        if (m.enc) pending.push({ groupId: cid, id: m.id, enc: m.enc });
         for (const r of m.threadReplies || []) {
           if (r.enc)
-            pending.push({ channelId: cid, id: r.id, enc: r.enc, parentId: m.id });
+            pending.push({ groupId: cid, id: r.id, enc: r.enc, parentId: m.id });
         }
       }
     }
@@ -2943,7 +2945,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
     void (async () => {
       const secrets = await getSecrets();
-      for (const { channelId, id, enc, parentId } of pending) {
+      for (const { groupId, id, enc, parentId } of pending) {
         if (cancelled) return;
         let result:
           | (Partial<Message> & { att?: { key: string; iv: string } })
@@ -2951,7 +2953,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         if (!secrets) {
           result = { text: "🔒 Encrypted message", enc: undefined, locked: true };
         } else {
-          result = await decryptInbound(channelId, enc, secrets, id);
+          result = await decryptInbound(groupId, enc, secrets, id);
         }
         // null → not decryptable yet (group key not received); leave `enc` so a
         // later chainVersion bump retries. Skip the state write.
@@ -2961,10 +2963,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // fetched + decrypted on display.
         const { att, ...msgPatch } = result;
         const existing = parentId
-          ? channels[channelId]?.messages
+          ? groups[groupId]?.messages
               .find((m) => m.id === parentId)
               ?.threadReplies?.find((r) => r.id === id)
-          : channels[channelId]?.messages.find((m) => m.id === id);
+          : groups[groupId]?.messages.find((m) => m.id === id);
         const patch: Partial<Message> =
           att && existing?.attachment
             ? {
@@ -2977,7 +2979,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               }
             : msgPatch;
         // Persist the decrypted plaintext (+ attachment key) so revisiting this
-        // channel reloads cleartext from IndexedDB instead of re-decrypting the
+        // group reloads cleartext from IndexedDB instead of re-decrypting the
         // ciphertext — a group message's sender-key ratchet only moves forward
         // (no skipped-key cache), so a second decrypt against the now-advanced
         // chain fails and would flip every prior message back to "🔒 Unable to
@@ -2988,8 +2990,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           scheduleBackup(); // decrypted plaintext cached → refresh the backup so
           // this message survives device loss even if its one-time prekey is spent
         }
-        setChannels((s) => {
-          const ch = s[channelId];
+        setGroups((s) => {
+          const ch = s[groupId];
           if (!ch) return s;
           let found = false;
           const messages = ch.messages.map((m) => {
@@ -3006,20 +3008,20 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             });
             return found ? { ...m, threadReplies } : m;
           });
-          return found ? { ...s, [channelId]: { ...ch, messages } } : s;
+          return found ? { ...s, [groupId]: { ...ch, messages } } : s;
         });
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [channels, getSecrets, decryptInbound, chainVersion, rehealVersion, scheduleBackup]);
+  }, [groups, getSecrets, decryptInbound, chainVersion, rehealVersion, scheduleBackup]);
 
   // socket.io buffers emits while disconnected and flushes on reconnect.
   // Shared by first-send and retry so the wire shape + fail timer stay in sync.
   const emitSend = useCallback(
     (
-      channelId: string,
+      groupId: string,
       clientId: string,
       text: string,
       attachment?: Attachment | null,
@@ -3046,7 +3048,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         : undefined;
       const sendEnc = (enc: string) =>
         socket?.emit("message:send", {
-          channelId,
+          groupId,
           text: "",
           clientId,
           attachment: strippedAttachment,
@@ -3059,9 +3061,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         "Not sent — end-to-end encryption isn’t available here yet (the other side hasn’t set up their keys).";
       if (cryptoAvailable() && socket) {
         // The preview travels ONLY inside the envelope — never a wire field.
-        const build = isDm(channelId)
-          ? buildEnvelope(dmPeerId(channelId), { text, rich, att, preview, replyTo, forwarded })
-          : buildGroupEnc(channelId, { text, rich, att, preview, replyTo, forwarded });
+        const build = isDm(groupId)
+          ? buildEnvelope(dmPeerId(groupId), { text, rich, att, preview, replyTo, forwarded })
+          : buildGroupEnc(groupId, { text, rich, att, preview, replyTo, forwarded });
         build
           .then((enc) => (enc ? sendEnc(enc) : markFailed(clientId, NO_KEYS)))
           .catch(() => markFailed(clientId, NO_KEYS));
@@ -3104,13 +3106,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         ...(preview ? { preview } : {}),
         ...(replyTo ? { replyTo } : {}),
       };
-      setChannels((s) => {
-        const ch = { ...s[currentChannelId] };
+      setGroups((s) => {
+        const ch = { ...s[currentGroupId] };
         ch.messages = [...ch.messages, optimistic];
-        return { ...s, [currentChannelId]: ch };
+        return { ...s, [currentGroupId]: ch };
       });
       setComposerAttachment(null);
-      stopTyping(currentChannelId);
+      stopTyping(currentGroupId);
       requestAnimationFrame(scrollToBottom);
       // Remember our own plaintext (and the attachment key, which rides the
       // envelope and is stripped from the acked attachment) so the ack renders
@@ -3125,11 +3127,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           : {}),
       });
       setReplyingTo(null);
-      emitSend(currentChannelId, clientId, trimmed, attachment, rich, preview, replyTo);
+      emitSend(currentGroupId, clientId, trimmed, attachment, rich, preview, replyTo);
     },
     [
       composerAttachment,
-      currentChannelId,
+      currentGroupId,
       replyingTo,
       scrollToBottom,
       myUser,
@@ -3139,19 +3141,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   );
 
   const retrySend = useCallback(
-    (channelId: string, msgId: string) => {
-      const msg = channels[channelId]?.messages.find((m) => m.id === msgId);
+    (groupId: string, msgId: string) => {
+      const msg = groups[groupId]?.messages.find((m) => m.id === msgId);
       if (!msg) return;
-      setChannels((s) => {
-        const ch = s[channelId];
+      setGroups((s) => {
+        const ch = s[groupId];
         if (!ch) return s;
         const msgs = ch.messages.map((m) =>
           m.id === msgId ? { ...m, pending: true, failed: false } : m,
         );
-        return { ...s, [channelId]: { ...ch, messages: msgs } };
+        return { ...s, [groupId]: { ...ch, messages: msgs } };
       });
       emitSend(
-        channelId,
+        groupId,
         msgId,
         msg.text,
         msg.attachment,
@@ -3161,19 +3163,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         msg.forwarded,
       );
     },
-    [channels, emitSend],
+    [groups, emitSend],
   );
 
   const deleteMessage = useCallback(
-    (channelId: string, msgId: string) => {
+    (groupId: string, msgId: string) => {
       // The server keeps no message copy, so tell it whether this is a thread
       // reply (and under which parent) by inspecting the loaded tree.
-      const ch = channelsRef.current[channelId];
+      const ch = groupsRef.current[groupId];
       const parent = ch?.messages.find((m) =>
         (m.threadReplies || []).some((r) => r.id === msgId),
       );
       socket?.emit("message:delete", {
-        channelId,
+        groupId,
         msgId,
         parentId: parent?.id ?? null,
       });
@@ -3186,12 +3188,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // attachment's key/iv, preview) is re-sealed and the server REPLACES the
   // stored envelope — so the attachment key must ride along, or a device
   // replaying history later could never decrypt the (kept) attachment.
-  const startEdit = useCallback((channelId: string, msg: Message) => {
-    const ch = channelsRef.current[channelId];
+  const startEdit = useCallback((groupId: string, msg: Message) => {
+    const ch = groupsRef.current[groupId];
     const parent = ch?.messages.find((m) =>
       (m.threadReplies || []).some((r) => r.id === msg.id),
     );
-    setEditing({ channelId, msgId: msg.id, parentId: parent?.id ?? null });
+    setEditing({ groupId, msgId: msg.id, parentId: parent?.id ?? null });
   }, []);
   const cancelEdit = useCallback(() => setEditing(null), []);
 
@@ -3200,8 +3202,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       const ed = editing;
       if (!ed || !socket) return;
       setEditing(null);
-      const { channelId, msgId, parentId } = ed;
-      const ch = channelsRef.current[channelId];
+      const { groupId, msgId, parentId } = ed;
+      const ch = groupsRef.current[groupId];
       const msg = parentId
         ? ch?.messages
             .find((m) => m.id === parentId)
@@ -3227,13 +3229,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       // Optimistic apply; the echoed message:edited short-circuits via this
       // cache (no ciphertext round-trip for the editing device).
       sentEditRef.current.set(msgId, { patch, prev });
-      applyMessagePatch(channelId, msgId, parentId, patch);
+      applyMessagePatch(groupId, msgId, parentId, patch);
       void msgdb.patchMessage(msgId, patch);
 
       const revert = () => {
         sentEditRef.current.delete(msgId);
         editTimersRef.current.delete(msgId);
-        applyMessagePatch(channelId, msgId, parentId, prev);
+        applyMessagePatch(groupId, msgId, parentId, prev);
         void msgdb.patchMessage(msgId, prev);
       };
       // Default-E2EE, same as sends: an edit that can't be encrypted is
@@ -3249,14 +3251,14 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         att,
         preview: msg.preview,
       };
-      const build = isDm(channelId)
-        ? buildEnvelope(dmPeerId(channelId), content)
-        : buildGroupEnc(channelId, content);
+      const build = isDm(groupId)
+        ? buildEnvelope(dmPeerId(groupId), content)
+        : buildGroupEnc(groupId, content);
       build
         .then((enc) => {
           if (!enc) return revert();
           editTimersRef.current.set(msgId, setTimeout(revert, SEND_TIMEOUT_MS));
-          socket.emit("message:edit", { channelId, msgId, parentId, enc });
+          socket.emit("message:edit", { groupId, msgId, parentId, enc });
         })
         .catch(revert);
     },
@@ -3276,7 +3278,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // composer seeds from the freshest body).
   const editingMessage = useMemo((): Message | null => {
     if (!editing) return null;
-    const ch = channels[editing.channelId];
+    const ch = groups[editing.groupId];
     if (!ch) return null;
     return (
       (editing.parentId
@@ -3285,7 +3287,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             ?.threadReplies?.find((r) => r.id === editing.msgId)
         : ch.messages.find((m) => m.id === editing.msgId)) ?? null
     );
-  }, [editing, channels]);
+  }, [editing, groups]);
 
   const openForward = useCallback((msg: Message) => setForwardSource(msg), []);
   const closeForward = useCallback(() => setForwardSource(null), []);
@@ -3294,10 +3296,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // send, so a forward is never relayed as plaintext. Marked `forwarded` so the
   // recipient renders the "Forwarded" label.
   const forwardMessage = useCallback(
-    (toChannelIds: string[]) => {
+    (toGroupIds: string[]) => {
       const src = forwardSource;
-      if (!src || toChannelIds.length === 0) return;
-      toChannelIds.forEach((toId, i) => {
+      if (!src || toGroupIds.length === 0) return;
+      toGroupIds.forEach((toId, i) => {
         const clientId = `tmp-${Date.now()}-${i}`;
         const optimistic: Message = {
           id: clientId,
@@ -3312,7 +3314,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           ...(src.attachment ? { attachment: src.attachment } : {}),
           ...(src.rich ? { rich: src.rich } : {}),
         };
-        setChannels((s) => {
+        setGroups((s) => {
           const ch = s[toId];
           if (!ch) return s;
           return { ...s, [toId]: { ...ch, messages: [...ch.messages, optimistic] } };
@@ -3328,13 +3330,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         emitSend(toId, clientId, src.text, src.attachment, src.rich, undefined, undefined, true);
       });
       setForwardSource(null);
-      if (toChannelIds.length === 1) {
-        selectChannel(toChannelIds[0]);
+      if (toGroupIds.length === 1) {
+        selectGroup(toGroupIds[0]);
       } else {
-        toast.success(`Forwarded to ${toChannelIds.length} chats`);
+        toast.success(`Forwarded to ${toGroupIds.length} chats`);
       }
     },
-    [forwardSource, myUser, emitSend, selectChannel],
+    [forwardSource, myUser, emitSend, selectGroup],
   );
 
   const startReply = useCallback((msg: Message) => {
@@ -3348,27 +3350,27 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     (text: string, rich?: string) => {
       const trimmed = text.trim();
       if (!trimmed || !threadFor) return;
-      stopTyping(currentChannelId);
+      stopTyping(currentGroupId);
       // The server broadcasts thread:new back to the whole room (incl. us), so
       // we don't render optimistically — one broadcast keeps everyone in sync.
       socket?.emit("thread:reply", {
-        channelId: currentChannelId,
+        groupId: currentGroupId,
         parentId: threadFor,
         text: trimmed,
         clientId: "tmp-" + Date.now(),
         rich,
       });
     },
-    [threadFor, currentChannelId, socket, stopTyping],
+    [threadFor, currentGroupId, socket, stopTyping],
   );
 
   const toggleReaction = useCallback(
     (msgId: string, emoji: string) => {
       // Server owns the count; it broadcasts reaction:updated back to the room.
-      socket?.emit("reaction:toggle", { channelId: currentChannelId, msgId, emoji });
+      socket?.emit("reaction:toggle", { groupId: currentGroupId, msgId, emoji });
       setPickerOpenFor(null);
     },
-    [currentChannelId, socket],
+    [currentGroupId, socket],
   );
 
   const togglePicker = useCallback((msgId: string) => {
@@ -3383,53 +3385,53 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
   const openThread = useCallback((msgId: string) => {
     setThreadFor(msgId);
-    setChannelInfoOpen(false);
+    setGroupInfoOpen(false);
   }, []);
   const closeThread = useCallback(() => setThreadFor(null), []);
-  const toggleChannelInfo = useCallback(() => {
-    setChannelInfoOpen((v) => {
+  const toggleGroupInfo = useCallback(() => {
+    setGroupInfoOpen((v) => {
       if (!v) setThreadFor(null); // only one right drawer at a time
       return !v;
     });
   }, []);
-  const closeChannelInfo = useCallback(() => setChannelInfoOpen(false), []);
+  const closeGroupInfo = useCallback(() => setGroupInfoOpen(false), []);
 
   const hidePinnedBar = useCallback(
-    (channelId: string) =>
-      setPinnedBarHidden((s) => ({ ...s, [channelId]: true })),
+    (groupId: string) =>
+      setPinnedBarHidden((s) => ({ ...s, [groupId]: true })),
     [],
   );
   const togglePinnedPanel = useCallback(
-    (channelId: string) =>
-      setPinnedPanelFor((cur) => (cur === channelId ? null : channelId)),
+    (groupId: string) =>
+      setPinnedPanelFor((cur) => (cur === groupId ? null : groupId)),
     [],
   );
   const togglePin = useCallback(
-    (channelId: string, msgId: string) => {
-      socket?.emit("pin:toggle", { channelId, msgId });
+    (groupId: string, msgId: string) => {
+      socket?.emit("pin:toggle", { groupId, msgId });
     },
     [socket],
   );
 
   // Page older messages from IndexedDB (prepend, de-dupe, advance the cursor).
   const loadOlder = useCallback(
-    async (channelId: string) => {
-      const cursor = historyCursor[channelId];
+    async (groupId: string) => {
+      const cursor = historyCursor[groupId];
       if (cursor == null) return;
       const { messages, nextCursor } = await msgdb.getTopPage(
-        channelId,
+        groupId,
         cursor,
         PAGE_SIZE,
       );
-      setChannels((s) => {
-        const ch = s[channelId];
+      setGroups((s) => {
+        const ch = s[groupId];
         if (!ch) return s;
         const have = new Set(ch.messages.map((m) => m.id));
         const older = messages.filter((m) => !have.has(m.id)).map(withSelf);
         if (older.length === 0) return s;
-        return { ...s, [channelId]: { ...ch, messages: [...older, ...ch.messages] } };
+        return { ...s, [groupId]: { ...ch, messages: [...older, ...ch.messages] } };
       });
-      setHistoryCursor((c) => ({ ...c, [channelId]: nextCursor }));
+      setHistoryCursor((c) => ({ ...c, [groupId]: nextCursor }));
     },
     [historyCursor, withSelf],
   );
@@ -3437,12 +3439,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // Jump to a message (e.g. a pinned one). History lives locally, so just
   // highlight it if it's loaded; otherwise the latest page is already shown.
   const jumpToMessage = useCallback(
-    async (channelId: string, msgId: string, parentId?: string | null) => {
+    async (groupId: string, msgId: string, parentId?: string | null) => {
       setPinnedPanelFor(null);
       // Thread-reply hit: open its parent's thread panel (replies live there,
-      // not in the channel scroll) and highlight it within the thread.
+      // not in the group scroll) and highlight it within the thread.
       if (parentId) {
-        if (channelId !== currentChannelIdRef.current) navigateTo(channelId);
+        if (groupId !== currentGroupIdRef.current) navigateTo(groupId);
         setThreadFor(parentId);
         setHighlightMsgId(msgId);
         return;
@@ -3450,18 +3452,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       // Top-level hit: if it's already loaded, just highlight; otherwise load a
       // window around it (guarding the join effect from clobbering with the
       // latest page), then highlight once it's in state.
-      const loaded = channelsRef.current[channelId]?.messages.some(
+      const loaded = groupsRef.current[groupId]?.messages.some(
         (m) => m.id === msgId,
       );
-      if (channelId === currentChannelIdRef.current && loaded) {
+      if (groupId === currentGroupIdRef.current && loaded) {
         setHighlightMsgId(msgId);
         return;
       }
-      jumpPendingRef.current = channelId;
-      if (channelId !== currentChannelIdRef.current) navigateTo(channelId);
+      jumpPendingRef.current = groupId;
+      if (groupId !== currentGroupIdRef.current) navigateTo(groupId);
       try {
         const { messages, nextCursor } = await msgdb.getPageAround(
-          channelId,
+          groupId,
           msgId,
           PAGE_SIZE,
         );
@@ -3472,8 +3474,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               : m,
           ),
         );
-        setChannels((s) => {
-          const ch = s[channelId];
+        setGroups((s) => {
+          const ch = s[groupId];
           if (!ch) return s;
           const loadedMsgs = withReplies.map(withSelf);
           const ids = new Set(loadedMsgs.map((m) => m.id));
@@ -3482,10 +3484,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           );
           return {
             ...s,
-            [channelId]: { ...ch, messages: [...loadedMsgs, ...pendingTail] },
+            [groupId]: { ...ch, messages: [...loadedMsgs, ...pendingTail] },
           };
         });
-        setHistoryCursor((c) => ({ ...c, [channelId]: nextCursor }));
+        setHistoryCursor((c) => ({ ...c, [groupId]: nextCursor }));
       } finally {
         jumpPendingRef.current = null;
       }
@@ -3501,13 +3503,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     }
     setSettingsOpen(true);
     setActivePanel(null);
-    setCreateChannelOpen(false);
+    setCreateGroupOpen(false);
     setWorkspaceOpen(false);
   }, []);
-  // Closing settings returns to the channel/DM that was open underneath it.
+  // Closing settings returns to the group/DM that was open underneath it.
   const closeSettings = useCallback(() => {
     if (typeof window !== "undefined") {
-      window.history.pushState(null, "", idToPath(currentChannelIdRef.current));
+      window.history.pushState(null, "", idToPath(currentGroupIdRef.current));
     }
     setSettingsOpen(false);
   }, []);
@@ -3522,8 +3524,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   }, []);
   const closeCompose = useCallback(() => setComposeOpen(false), []);
 
-  const openCreateChannel = useCallback(() => {
-    setCreateChannelOpen(true);
+  const openCreateGroup = useCallback(() => {
+    setCreateGroupOpen(true);
     setSettingsOpen(false);
     setComposeOpen(false);
     setSearchOpen(false);
@@ -3536,7 +3538,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     setSettingsOpen(false);
     setComposeOpen(false);
     setSearchOpen(false);
-    setCreateChannelOpen(false);
+    setCreateGroupOpen(false);
     setActivePanel(null);
   }, []);
   const closeWorkspace = useCallback(() => setWorkspaceOpen(false), []);
@@ -3608,8 +3610,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
   const openStatus = useCallback(() => setStatusOpen(true), []);
   const closeStatus = useCallback(() => setStatusOpen(false), []);
-  const closeCreateChannel = useCallback(() => setCreateChannelOpen(false), []);
-  const createChannel = useCallback(
+  const closeCreateGroup = useCallback(() => setCreateGroupOpen(false), []);
+  const createGroup = useCallback(
     (
       name: string,
       topic: string,
@@ -3618,56 +3620,56 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     ) => {
       const trimmed = name.trim();
       if (!trimmed) {
-        onError?.("Enter a channel name.");
+        onError?.("Enter a group name.");
         return;
       }
       socket?.emit(
-        "channel:create",
+        "group:create",
         { name: trimmed, topic: topic.trim() || undefined, private: isPrivate },
         (res) => {
           if (res.ok) {
-            setCreateChannelOpen(false);
-            selectChannel(res.channelId);
+            setCreateGroupOpen(false);
+            selectGroup(res.groupId);
           } else {
             onError?.(res.error);
           }
         },
       );
     },
-    [socket, selectChannel],
+    [socket, selectGroup],
   );
 
-  const updateChannel = useCallback(
+  const updateGroup = useCallback(
     (
-      channelId: string,
+      groupId: string,
       patch: { name?: string; topic?: string },
       onError?: (msg: string) => void,
     ) => {
-      socket?.emit("channel:update", { channelId, ...patch }, (res) => {
+      socket?.emit("group:update", { groupId, ...patch }, (res) => {
         if (!res.ok) onError?.(res.error);
       });
     },
     [socket],
   );
-  const deleteChannel = useCallback(
-    (channelId: string, onError?: (msg: string) => void) => {
-      socket?.emit("channel:delete", { channelId }, (res) => {
+  const deleteGroup = useCallback(
+    (groupId: string, onError?: (msg: string) => void) => {
+      socket?.emit("group:delete", { groupId }, (res) => {
         if (!res.ok) onError?.(res.error);
       });
     },
     [socket],
   );
-  const addChannelMember = useCallback(
-    (channelId: string, memberId: string) => {
-      socket?.emit("channel:addMember", { channelId, userId: memberId }, () => {});
+  const addGroupMember = useCallback(
+    (groupId: string, memberId: string) => {
+      socket?.emit("group:addMember", { groupId, userId: memberId }, () => {});
     },
     [socket],
   );
-  const removeChannelMember = useCallback(
-    (channelId: string, memberId: string) => {
+  const removeGroupMember = useCallback(
+    (groupId: string, memberId: string) => {
       socket?.emit(
-        "channel:removeMember",
-        { channelId, userId: memberId },
+        "group:removeMember",
+        { groupId, userId: memberId },
         () => {},
       );
     },
@@ -3701,7 +3703,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       pending: true,
     };
 
-    setChannels((s) => {
+    setGroups((s) => {
       const existing = s[dmId];
       if (existing) {
         return {
@@ -3709,7 +3711,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           [dmId]: { ...existing, messages: [...existing.messages, optimistic] },
         };
       }
-      const newDm: Channel = {
+      const newDm: Group = {
         id: dmId,
         type: "dm",
         name: user.name,
@@ -3731,7 +3733,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     armFailTimer(clientId);
     sentPlaintextRef.current.set(clientId, { text });
     // Server creates/joins the DM, acks our optimistic message, and announces
-    // brand-new DMs to other clients via channel:created. Default-E2EE: only
+    // brand-new DMs to other clients via group:created. Default-E2EE: only
     // send once encrypted; if the recipient has no keys yet, fail (no plaintext).
     const NO_KEYS =
       "Not sent — end-to-end encryption isn’t available yet (they haven’t set up their keys).";
@@ -3751,7 +3753,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const openSearch = useCallback(() => {
     setSearchOpen(true);
     setActivePanel(null);
-    setCreateChannelOpen(false);
+    setCreateGroupOpen(false);
     setWorkspaceOpen(false);
   }, []);
   const closeSearch = useCallback(() => setSearchOpen(false), []);
@@ -3766,15 +3768,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
   const value = useMemo<ChatContextValue>(
     () => ({
-      channels,
-      currentChannelId,
-      selectChannel,
+      groups,
+      currentGroupId,
+      selectGroup,
       threadFor,
       openThread,
       closeThread,
-      channelInfoOpen,
-      toggleChannelInfo,
-      closeChannelInfo,
+      groupInfoOpen,
+      toggleGroupInfo,
+      closeGroupInfo,
       historyCursor,
       loadOlder,
       jumpToMessage,
@@ -3825,12 +3827,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       statusOpen,
       openStatus,
       closeStatus,
-      typingByChannel,
+      typingByGroup,
       notifyTyping,
-      channelOrder,
+      groupOrder,
       rosterLoaded,
-      channelsOpen,
-      toggleChannels: () => setChannelsOpen((s) => !s),
+      groupsOpen,
+      toggleGroups: () => setGroupsOpen((s) => !s),
       dmsOpen,
       toggleDms: () => setDmsOpen((s) => !s),
       settingsOpen,
@@ -3862,15 +3864,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       activePanel,
       openPanel,
       closePanel,
-      createChannelOpen,
-      openCreateChannel,
-      closeCreateChannel,
-      createChannel,
-      updateChannel,
-      deleteChannel,
-      addChannelMember,
-      removeChannelMember,
-      unreadByChannel,
+      createGroupOpen,
+      openCreateGroup,
+      closeCreateGroup,
+      createGroup,
+      updateGroup,
+      deleteGroup,
+      addGroupMember,
+      removeGroupMember,
+      unreadByGroup,
       workspaceName,
       workspaceMembers,
       workspaceOpen,
@@ -3894,15 +3896,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       scrollRef,
     }),
     [
-      channels,
-      currentChannelId,
-      selectChannel,
+      groups,
+      currentGroupId,
+      selectGroup,
       threadFor,
       openThread,
       closeThread,
-      channelInfoOpen,
-      toggleChannelInfo,
-      closeChannelInfo,
+      groupInfoOpen,
+      toggleGroupInfo,
+      closeGroupInfo,
       historyCursor,
       loadOlder,
       jumpToMessage,
@@ -3950,11 +3952,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       statusOpen,
       openStatus,
       closeStatus,
-      typingByChannel,
+      typingByGroup,
       notifyTyping,
-      channelOrder,
+      groupOrder,
       rosterLoaded,
-      channelsOpen,
+      groupsOpen,
       dmsOpen,
       settingsOpen,
       openSettings,
@@ -3980,15 +3982,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       activePanel,
       openPanel,
       closePanel,
-      createChannelOpen,
-      openCreateChannel,
-      closeCreateChannel,
-      createChannel,
-      updateChannel,
-      deleteChannel,
-      addChannelMember,
-      removeChannelMember,
-      unreadByChannel,
+      createGroupOpen,
+      openCreateGroup,
+      closeCreateGroup,
+      createGroup,
+      updateGroup,
+      deleteGroup,
+      addGroupMember,
+      removeGroupMember,
+      unreadByGroup,
       workspaceName,
       workspaceMembers,
       workspaceOpen,

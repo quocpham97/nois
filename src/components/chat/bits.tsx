@@ -1,18 +1,18 @@
 "use client";
 
 import { Lock, Megaphone } from "lucide-react";
-import type { Channel, User } from "@/lib/chat-data";
+import type { Group, User } from "@/lib/chat-data";
 
-export function ChannelIcon({
-  channel,
+export function GroupIcon({
+  group,
   color = "currentColor",
   size = 13,
 }: {
-  channel: Channel;
+  group: Group;
   color?: string;
   size?: number;
 }) {
-  if (channel.icon === "lock") {
+  if (group.icon === "lock") {
     return (
       <span
         className="flex w-[18px] items-center justify-center"
@@ -22,7 +22,7 @@ export function ChannelIcon({
       </span>
     );
   }
-  if (channel.icon === "megaphone") {
+  if (group.icon === "megaphone") {
     return (
       <span
         className="flex w-[18px] items-center justify-center"

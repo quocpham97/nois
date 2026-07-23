@@ -24,28 +24,28 @@ import { TabBar, type MobileTab } from "./tab-bar";
 // by ChatApp/RootShell when the layout is mobile. It reuses the same providers,
 // so every screen reads live state. Navigation model:
 //   - full-screen takeovers (compose, settings, mentions/drafts deep-links) win
-//   - an open conversation (currentChannelId) shows full-screen, tab bar hidden
+//   - an open conversation (currentGroupId) shows full-screen, tab bar hidden
 //   - otherwise the active bottom-tab screen shows with the tab bar
 // Global overlays (calls, forward, status, E2EE key modals) mount once at the
 // root so incoming calls and key prompts surface regardless of the tab.
 export function MobileApp() {
   const {
-    channels,
-    currentChannelId,
+    groups,
+    currentGroupId,
     composeOpen,
     settingsOpen,
     activePanel,
     statusOpen,
-    unreadByChannel,
+    unreadByGroup,
   } = useChat();
   const [tab, setTab] = useState<MobileTab>("chats");
 
   const unreadCount = useMemo(
-    () => Object.values(unreadByChannel).filter((n) => n > 0).length,
-    [unreadByChannel],
+    () => Object.values(unreadByGroup).filter((n) => n > 0).length,
+    [unreadByGroup],
   );
 
-  const openChannel = channels[currentChannelId];
+  const openGroup = groups[currentGroupId];
 
   const overlays = (
     <>
@@ -73,8 +73,8 @@ export function MobileApp() {
   } else if (activePanel === "drafts") {
     body = <DraftsView />;
     showTabbar = false;
-  } else if (openChannel) {
-    body = <ConversationScreen ch={openChannel} />;
+  } else if (openGroup) {
+    body = <ConversationScreen ch={openGroup} />;
     showTabbar = false;
   } else if (tab === "people") {
     body = <PeopleScreen />;

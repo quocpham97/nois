@@ -11,7 +11,7 @@ import {
 import { useChat } from "../chat/chat-context";
 import { Avatar } from "../chat/bits";
 
-// People tab. Same model as the desktop sidebar's People panel: fold DM-channel
+// People tab. Same model as the desktop sidebar's People panel: fold DM-group
 // presence into a by-user lookup, list the workspace roster alphabetically, and
 // open (or start) a DM on tap.
 function PresenceAvatar({
@@ -47,9 +47,9 @@ export function PeopleScreen() {
   const {
     workspaceMembers,
     myUser,
-    channels,
+    groups,
     dmOrder,
-    selectChannel,
+    selectGroup,
     openCompose,
     addRecipient,
   } = useChat();
@@ -57,23 +57,23 @@ export function PeopleScreen() {
 
   const presenceOf = useMemo(() => {
     const map: Record<string, Presence> = {};
-    Object.values(channels).forEach((ch) => {
+    Object.values(groups).forEach((ch) => {
       if (ch.type === "dm" && ch.user?.id && ch.presence) {
         map[ch.user.id] = ch.presence;
       }
     });
     return (u: User) => (u.id ? map[u.id] : undefined);
-  }, [channels]);
+  }, [groups]);
 
   const dmFor = (name: string, id?: string) =>
     dmOrder.find((chId) => {
-      const u = channels[chId]?.user;
+      const u = groups[chId]?.user;
       return u && (u.id ? u.id === id : u.name === name);
     });
 
   const openPerson = (p: User) => {
     const dmId = dmFor(p.name, p.id);
-    if (dmId) selectChannel(dmId);
+    if (dmId) selectGroup(dmId);
     else {
       openCompose();
       addRecipient(p.name);

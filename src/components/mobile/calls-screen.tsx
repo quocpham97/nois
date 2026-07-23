@@ -14,13 +14,13 @@ import { presenceColor } from "@/lib/chat-data";
 // same useCall().startCall the conversation header uses. A persisted call log
 // would be a separate feature (needs server storage).
 export function CallsScreen() {
-  const { channels, dmOrder } = useChat();
+  const { groups, dmOrder } = useChat();
   const { startCall, call } = useCall();
   const inCall = call != null;
 
   const dms = useMemo(
-    () => dmOrder.map((id) => channels[id]).filter((ch) => ch?.user),
-    [channels, dmOrder],
+    () => dmOrder.map((id) => groups[id]).filter((ch) => ch?.user),
+    [groups, dmOrder],
   );
 
   return (

@@ -1,9 +1,9 @@
 // Relay state for the WebSocket server, backed by Postgres (src/lib/db.ts).
 //
-// Channels, membership, and messages are now DURABLE: the in-memory Maps below
+// Groups, membership, and messages are now DURABLE: the in-memory Maps below
 // act as a write-through read cache (hydrated from Postgres in init(), updated
 // + persisted on every mutation), and messages are persisted on send and
-// replayed from the DB on channel join. E2EE is preserved — for encrypted
+// replayed from the DB on group join. E2EE is preserved — for encrypted
 // messages the stored `data` holds only the `enc` ciphertext (text/rich are
 // empty), and private/sender keys never reach the server.
 //
@@ -17,7 +17,7 @@
 import { randomBytes } from "node:crypto";
 import {
   type Attachment,
-  type Channel,
+  type Group,
   type Message,
   type User,
   type UserProfile,
@@ -42,22 +42,22 @@ export type ReactionAgg = { e: string; n: number; by: string[] };
 
 // --- in-memory state -------------------------------------------------------
 
-type ChannelMeta = Omit<Channel, "messages" | "pinned" | "pinIds">;
+type GroupMeta = Omit<Group, "messages" | "pinned" | "pinIds">;
 
-const channels = new Map<string, ChannelMeta>();
-const members = new Map<string, Set<string>>(); // channelId -> userIds
-const seqOf = new Map<string, number>(); // channelId -> last top-level seq
-const reads = new Map<string, Map<string, number>>(); // channelId -> userId -> lastReadSeq
-const pins = new Map<string, string[]>(); // channelId -> ordered msg ids
+const groups = new Map<string, GroupMeta>();
+const members = new Map<string, Set<string>>(); // groupId -> userIds
+const seqOf = new Map<string, number>(); // groupId -> last top-level seq
+const reads = new Map<string, Map<string, number>>(); // groupId -> userId -> lastReadSeq
+const pins = new Map<string, string[]>(); // groupId -> ordered msg ids
 const reactions = new Map<string, Map<string, Set<string>>>(); // msgId -> emoji -> userIds
 const threadCounts = new Map<string, number>(); // parentId -> reply count
-// channelId -> senderDevice -> { fromUserId, env }. Latest opaque sender-key
+// groupId -> senderDevice -> { fromUserId, env }. Latest opaque sender-key
 // distribution envelope per sender device, for offline replay on (re)join.
 const senderKeys = new Map<
   string,
   Map<string, { fromUserId: string; env: string }>
 >();
-// channelId -> "userId|deviceId" -> { fromUserId, deviceId, env }. Latest opaque
+// groupId -> "userId|deviceId" -> { fromUserId, deviceId, env }. Latest opaque
 // sealed read-cursor per user device (E2EE read receipts), for replay on join.
 const receipts = new Map<
   string,
@@ -69,16 +69,16 @@ const workspace: { name: string; members: Set<string> } = {
   members: new Set(),
 };
 
-// Default public channels every signed-in user is auto-joined to, so a brand
-// new user always lands in shared, populated channels (rather than an empty
+// Default public groups every signed-in user is auto-joined to, so a brand
+// new user always lands in shared, populated groups (rather than an empty
 // workspace) and — because membership is explicit — E2EE sender keys are
 // distributed to them. Stable ids (not opaque hashes) so they're consistent
-// across restarts; the non-hex slugs can't collide with newChannelId() output.
-export const DEFAULT_CHANNELS: { id: string; name: string; topic: string }[] = [
+// across restarts; the non-hex slugs can't collide with newGroupId() output.
+export const DEFAULT_GROUPS: { id: string; name: string; topic: string }[] = [
   { id: "general", name: "general", topic: "Company-wide announcements and general chatter" },
   { id: "random", name: "random", topic: "Non-work banter and watercooler talk" },
 ];
-export const DEFAULT_CHANNEL_IDS = DEFAULT_CHANNELS.map((c) => c.id);
+export const DEFAULT_GROUP_IDS = DEFAULT_GROUPS.map((c) => c.id);
 
 // Time-sortable message id: a zero-padded millisecond timestamp (so plain
 // lexicographic ordering == chronological ordering), a per-process counter to
@@ -93,19 +93,19 @@ const newId = () =>
     .toString(36)
     .padStart(4, "0")}-${randomBytes(3).toString("hex")}`;
 
-// Opaque channel id: a random hex hash so the id (and thus the /<id> URL)
-// never leaks the channel name. DMs share this flat id space but are keyed by
+// Opaque group id: a random hex hash so the id (and thus the /<id> URL)
+// never leaks the group name. DMs share this flat id space but are keyed by
 // the peer's (non-hex) user key, so the two effectively never collide.
-const newChannelId = () => randomBytes(8).toString("hex");
+const newGroupId = () => randomBytes(8).toString("hex");
 
-/** Next per-channel sequence for a top-level message. */
-function nextSeq(channelId: string): number {
-  const n = (seqOf.get(channelId) ?? 0) + 1;
-  seqOf.set(channelId, n);
+/** Next per-group sequence for a top-level message. */
+function nextSeq(groupId: string): number {
+  const n = (seqOf.get(groupId) ?? 0) + 1;
+  seqOf.set(groupId, n);
   return n;
 }
 
-// --- Postgres persistence (durable channels/membership/messages) -----------
+// --- Postgres persistence (durable groups/membership/messages) -----------
 // The Maps above are a write-through cache; these helpers persist mutations and
 // hydrate on boot. Mutations fire-and-forget the DB write (memory is the
 // authority for the live request; the DB catches up + survives restart).
@@ -115,8 +115,8 @@ function bg(p: Promise<unknown>): void {
   void p.catch((e) => console.error("[store] db write failed:", (e as Error).message));
 }
 
-/** Upsert a channel's metadata row. */
-function persistChannel(m: ChannelMeta): void {
+/** Upsert a group's metadata row. */
+function persistGroup(m: GroupMeta): void {
   bg(
     getPool().query(
       `INSERT INTO "group" (id, type, name, icon, topic, private, dm_user)
@@ -139,7 +139,7 @@ function persistChannel(m: ChannelMeta): void {
 
 /** Persist a message row (`data` is the wire Message; enc-only for E2EE). */
 function persistMessage(
-  channelId: string,
+  groupId: string,
   message: Message,
   parentId: string | null,
 ): void {
@@ -150,7 +150,7 @@ function persistMessage(
        ON CONFLICT (id) DO NOTHING`,
       [
         message.id,
-        channelId,
+        groupId,
         message.seq ?? null,
         parentId,
         message.ts ?? null,
@@ -160,14 +160,14 @@ function persistMessage(
   );
 }
 
-/** Hydrate the in-memory caches from Postgres (channels, members, seq). */
+/** Hydrate the in-memory caches from Postgres (groups, members, seq). */
 async function loadFromDb(): Promise<void> {
   const pool = getPool();
   const ch = await pool.query(
     `SELECT id, type, name, icon, topic, private, dm_user FROM "group"`,
   );
   for (const r of ch.rows) {
-    channels.set(r.id, {
+    groups.set(r.id, {
       id: r.id,
       type: r.type,
       name: r.name,
@@ -175,7 +175,7 @@ async function loadFromDb(): Promise<void> {
       ...(r.topic ? { topic: r.topic } : {}),
       ...(r.private ? { private: true } : {}),
       ...(r.dm_user ? { user: r.dm_user as User, presence: "active" } : {}),
-    } as ChannelMeta);
+    } as GroupMeta);
   }
   const mem = await pool.query("SELECT group_id, user_id FROM group_member");
   for (const r of mem.rows) {
@@ -207,7 +207,7 @@ async function loadFromDb(): Promise<void> {
     }
     by.add(r.user_id);
   }
-  // Pins: channelId → ordered msg ids (insertion order).
+  // Pins: groupId → ordered msg ids (insertion order).
   const pn = await pool.query(
     "SELECT group_id, msg_id FROM pin ORDER BY created_at",
   );
@@ -216,7 +216,7 @@ async function loadFromDb(): Promise<void> {
     list.push(r.msg_id);
     pins.set(r.group_id, list);
   }
-  // Read cursors: channelId → userId → seq.
+  // Read cursors: groupId → userId → seq.
   const rc = await pool.query("SELECT group_id, user_id, seq FROM read_cursor");
   for (const r of rc.rows) {
     let m = reads.get(r.group_id);
@@ -226,7 +226,7 @@ async function loadFromDb(): Promise<void> {
     }
     m.set(r.user_id, Number(r.seq));
   }
-  // Sender-key envelopes: channelId → senderDevice → { fromUserId, env }.
+  // Sender-key envelopes: groupId → senderDevice → { fromUserId, env }.
   const sk = await pool.query(
     "SELECT group_id, sender_device, sender_user, env FROM sender_key",
   );
@@ -238,7 +238,7 @@ async function loadFromDb(): Promise<void> {
     }
     m.set(r.sender_device, { fromUserId: r.sender_user, env: r.env });
   }
-  // Read-receipt cursors: channelId → "userId|deviceId" → { …, env }.
+  // Read-receipt cursors: groupId → "userId|deviceId" → { …, env }.
   const rcpt = await pool.query(
     "SELECT group_id, user_id, device_id, env FROM message_receipt",
   );
@@ -261,11 +261,11 @@ async function loadFromDb(): Promise<void> {
   }
 }
 
-/** Boot: ensure schema, durably seed default channels, hydrate caches. */
+/** Boot: ensure schema, durably seed default groups, hydrate caches. */
 export async function init(): Promise<void> {
   await ensureSchema();
   const pool = getPool();
-  for (const c of DEFAULT_CHANNELS) {
+  for (const c of DEFAULT_GROUPS) {
     await pool.query(
       `INSERT INTO "group" (id, type, name, icon, topic, private)
        VALUES ($1,'group',$2,'hash',$3,false) ON CONFLICT (id) DO NOTHING`,
@@ -285,18 +285,18 @@ function reactionsForViewer(msgId: string, viewerId: string) {
 }
 
 /**
- * A channel's recent top-level messages (chronological), with `threadCount` and
+ * A group's recent top-level messages (chronological), with `threadCount` and
  * the viewer's `reactions` populated — for replay to a joining client. (Pins ride
- * channels:list and read cursors ride unread:state, so they need no replay.)
+ * groups:list and read cursors ride unread:state, so they need no replay.)
  */
 export async function fetchHistory(
-  channelId: string,
+  groupId: string,
   viewerId: string,
   limit = 200,
 ): Promise<Message[]> {
   const pool = getPool();
-  const since = readCursor(channelId, viewerId);
-  const max = channelMaxSeq(channelId);
+  const since = readCursor(groupId, viewerId);
+  const max = groupMaxSeq(groupId);
   const CAP = 1000; // hard bound on one replay payload
   const CONTEXT = 25; // a little history before the cursor, for screen context
   let rows: { data: Message }[];
@@ -309,7 +309,7 @@ export async function fetchHistory(
     const want = max - fromSeq;
     if (want > CAP) {
       console.warn(
-        `[store] history replay ${channelId} for ${viewerId}: ${want} msgs since cursor, capped at ${CAP}`,
+        `[store] history replay ${groupId} for ${viewerId}: ${want} msgs since cursor, capped at ${CAP}`,
       );
     }
     ({ rows } = await pool.query(
@@ -318,7 +318,7 @@ export async function fetchHistory(
          WHERE group_id=$1 AND parent_id IS NULL AND seq > $2
          ORDER BY seq DESC LIMIT $3
        ) t ORDER BY seq ASC`,
-      [channelId, fromSeq, CAP],
+      [groupId, fromSeq, CAP],
     ));
   } else {
     // Caught up (or never opened) — last `limit` for on-screen context.
@@ -326,7 +326,7 @@ export async function fetchHistory(
       `SELECT data FROM message
        WHERE group_id=$1 AND parent_id IS NULL
        ORDER BY seq DESC LIMIT $2`,
-      [channelId, limit],
+      [groupId, limit],
     );
     res.rows.reverse();
     rows = res.rows;
@@ -334,7 +334,7 @@ export async function fetchHistory(
   const counts = await pool.query(
     `SELECT parent_id, count(*)::int AS n FROM message
      WHERE group_id=$1 AND parent_id IS NOT NULL GROUP BY parent_id`,
-    [channelId],
+    [groupId],
   );
   const byParent = new Map<string, number>(
     counts.rows.map((r) => [r.parent_id as string, r.n as number]),
@@ -348,15 +348,15 @@ export async function fetchHistory(
   });
 }
 
-/** A channel's thread replies (with parent ids + viewer reactions), for replay. */
+/** A group's thread replies (with parent ids + viewer reactions), for replay. */
 export async function fetchReplies(
-  channelId: string,
+  groupId: string,
   viewerId: string,
 ): Promise<{ parentId: string; reply: Message }[]> {
   const { rows } = await getPool().query(
     `SELECT parent_id, data FROM message
      WHERE group_id=$1 AND parent_id IS NOT NULL ORDER BY created_at`,
-    [channelId],
+    [groupId],
   );
   return rows.map((r) => {
     const reply = r.data as Message;
@@ -372,15 +372,15 @@ export async function fetchReplies(
 
 /** Store/replace a sender device's latest distribution envelope (opaque). */
 export function persistSenderKey(
-  channelId: string,
+  groupId: string,
   senderDevice: string,
   fromUserId: string,
   env: string,
 ): void {
-  let m = senderKeys.get(channelId);
+  let m = senderKeys.get(groupId);
   if (!m) {
     m = new Map();
-    senderKeys.set(channelId, m);
+    senderKeys.set(groupId, m);
   }
   m.set(senderDevice, { fromUserId, env });
   bg(
@@ -389,16 +389,16 @@ export function persistSenderKey(
        VALUES ($1,$2,$3,$4,now())
        ON CONFLICT (group_id, sender_device)
          DO UPDATE SET sender_user=EXCLUDED.sender_user, env=EXCLUDED.env, updated_at=now()`,
-      [channelId, senderDevice, fromUserId, env],
+      [groupId, senderDevice, fromUserId, env],
     ),
   );
 }
 
-/** All stored sender-key envelopes for a channel, for replay on (re)join. */
+/** All stored sender-key envelopes for a group, for replay on (re)join. */
 export function fetchSenderKeys(
-  channelId: string,
+  groupId: string,
 ): { fromUserId: string; env: string }[] {
-  const m = senderKeys.get(channelId);
+  const m = senderKeys.get(groupId);
   return m ? [...m.values()] : [];
 }
 
@@ -406,15 +406,15 @@ export function fetchSenderKeys(
 
 /** Store/replace a user device's latest sealed read-cursor (opaque). */
 export function persistReceipt(
-  channelId: string,
+  groupId: string,
   userId: string,
   deviceId: string,
   env: string,
 ): void {
-  let m = receipts.get(channelId);
+  let m = receipts.get(groupId);
   if (!m) {
     m = new Map();
-    receipts.set(channelId, m);
+    receipts.set(groupId, m);
   }
   m.set(`${userId}|${deviceId}`, { fromUserId: userId, deviceId, env });
   bg(
@@ -423,23 +423,23 @@ export function persistReceipt(
        VALUES ($1,$2,$3,$4,now())
        ON CONFLICT (group_id, user_id, device_id)
          DO UPDATE SET env=EXCLUDED.env, updated_at=now()`,
-      [channelId, userId, deviceId, env],
+      [groupId, userId, deviceId, env],
     ),
   );
 }
 
-/** All stored read-cursor envelopes for a channel, for replay on (re)join. */
+/** All stored read-cursor envelopes for a group, for replay on (re)join. */
 export function fetchReceipts(
-  channelId: string,
+  groupId: string,
 ): { fromUserId: string; deviceId: string; env: string }[] {
-  const m = receipts.get(channelId);
+  const m = receipts.get(groupId);
   return m ? [...m.values()] : [];
 }
 
 // --- helpers ---------------------------------------------------------------
 
-function isMember(channelId: string, userId: string): boolean {
-  return members.get(channelId)?.has(userId) ?? false;
+function isMember(groupId: string, userId: string): boolean {
+  return members.get(groupId)?.has(userId) ?? false;
 }
 
 /** Resolve a member's stored id to a display User, with any saved profile. */
@@ -451,7 +451,7 @@ function resolveMember(id: string): User {
  * A DM's display partner is the *other* member relative to the viewer — so each
  * participant sees the person they're talking to.
  */
-function dmForViewer(meta: ChannelMeta, viewerId: string): ChannelMeta {
+function dmForViewer(meta: GroupMeta, viewerId: string): GroupMeta {
   if (meta.type !== "dm") return meta;
   const others = [...(members.get(meta.id) ?? [])].filter((m) => m !== viewerId);
   const other = others.length ? resolveMember(others[0]) : undefined;
@@ -469,37 +469,37 @@ function reactionAgg(msgId: string): ReactionAgg[] {
 
 // --- public API ------------------------------------------------------------
 
-export function channelExists(channelId: string): boolean {
-  return channels.has(channelId);
+export function groupExists(groupId: string): boolean {
+  return groups.has(groupId);
 }
 
-/** Whether a channel is a 1:1 DM (vs a group). `type` is the sole
+/** Whether a group is a 1:1 DM (vs a group). `type` is the sole
  *  discriminator — ids no longer carry a "dm-" prefix. */
-export function isDm(channelId: string): boolean {
-  return channels.get(channelId)?.type === "dm";
+export function isDm(groupId: string): boolean {
+  return groups.get(groupId)?.type === "dm";
 }
 
-/** A channel's display name (for push routing metadata; undefined for DMs and
- *  unknown channels — a DM's "name" is viewer-specific, so it's left out). */
-export function getChannelName(channelId: string): string | undefined {
-  const meta = channels.get(channelId);
+/** A group's display name (for push routing metadata; undefined for DMs and
+ *  unknown groups — a DM's "name" is viewer-specific, so it's left out). */
+export function getGroupName(groupId: string): string | undefined {
+  const meta = groups.get(groupId);
   return meta && meta.type === "group" ? meta.name : undefined;
 }
 
-/** Authorization: may this user see/act in this channel? */
-export function canAccess(channelId: string, userId: string): boolean {
-  const meta = channels.get(channelId);
+/** Authorization: may this user see/act in this group? */
+export function canAccess(groupId: string, userId: string): boolean {
+  const meta = groups.get(groupId);
   if (!meta) return false;
-  if (meta.type === "group" && !meta.private) return true; // public channel
-  return isMember(channelId, userId);
+  if (meta.type === "group" && !meta.private) return true; // public group
+  return isMember(groupId, userId);
 }
 
-/** Add a user to a channel's roster. Returns true only if newly added. */
-export function addMember(channelId: string, userId: string): boolean {
-  let set = members.get(channelId);
+/** Add a user to a group's roster. Returns true only if newly added. */
+export function addMember(groupId: string, userId: string): boolean {
+  let set = members.get(groupId);
   if (!set) {
     set = new Set();
-    members.set(channelId, set);
+    members.set(groupId, set);
   }
   if (set.has(userId)) return false;
   set.add(userId);
@@ -507,39 +507,39 @@ export function addMember(channelId: string, userId: string): boolean {
     getPool().query(
       `INSERT INTO group_member (group_id, user_id) VALUES ($1,$2)
        ON CONFLICT DO NOTHING`,
-      [channelId, userId],
+      [groupId, userId],
     ),
   );
   return true;
 }
 
-export function removeMember(channelId: string, userId: string): void {
-  members.get(channelId)?.delete(userId);
+export function removeMember(groupId: string, userId: string): void {
+  members.get(groupId)?.delete(userId);
   bg(
     getPool().query(
       "DELETE FROM group_member WHERE group_id=$1 AND user_id=$2",
-      [channelId, userId],
+      [groupId, userId],
     ),
   );
 }
 
-/** The explicit member roster of a channel, as resolved Users. */
-export function listMembers(channelId: string): User[] {
-  return [...(members.get(channelId) ?? [])].map(resolveMember);
+/** The explicit member roster of a group, as resolved Users. */
+export function listMembers(groupId: string): User[] {
+  return [...(members.get(groupId) ?? [])].map(resolveMember);
 }
 
-/** Raw member ids of a channel (for targeting unread bumps to private rooms). */
-export function listMemberIds(channelId: string): string[] {
-  return [...(members.get(channelId) ?? [])];
+/** Raw member ids of a group (for targeting unread bumps to private rooms). */
+export function listMemberIds(groupId: string): string[] {
+  return [...(members.get(groupId) ?? [])];
 }
 
-/** Pinned message ids for a channel (client resolves snippets locally). */
-export function listPins(channelId: string): string[] {
-  return [...(pins.get(channelId) ?? [])];
+/** Pinned message ids for a group (client resolves snippets locally). */
+export function listPins(groupId: string): string[] {
+  return [...(pins.get(groupId) ?? [])];
 }
 
-/** Assemble the wire Channel for a viewer (no message bodies; pins as ids). */
-function toChannel(meta: ChannelMeta, viewerId: string): Channel {
+/** Assemble the wire Group for a viewer (no message bodies; pins as ids). */
+function toGroup(meta: GroupMeta, viewerId: string): Group {
   return {
     ...dmForViewer(meta, viewerId),
     pinIds: listPins(meta.id),
@@ -549,58 +549,58 @@ function toChannel(meta: ChannelMeta, viewerId: string): Channel {
   };
 }
 
-/** Channels this user may see: all public channels + private/DMs they're in. */
-export function listChannelsForUser(userId: string): Channel[] {
-  const out: Channel[] = [];
-  for (const meta of channels.values()) {
+/** Groups this user may see: all public groups + private/DMs they're in. */
+export function listGroupsForUser(userId: string): Group[] {
+  const out: Group[] = [];
+  for (const meta of groups.values()) {
     const isPublic = meta.type === "group" && !meta.private;
-    if (isPublic || isMember(meta.id, userId)) out.push(toChannel(meta, userId));
+    if (isPublic || isMember(meta.id, userId)) out.push(toGroup(meta, userId));
   }
   return out;
 }
 
-/** Full channel metadata (no messages) — used to announce a new channel/DM. */
-export function getChannel(
-  channelId: string,
+/** Full group metadata (no messages) — used to announce a new group/DM. */
+export function getGroup(
+  groupId: string,
   viewerId: string,
-): Channel | undefined {
-  const meta = channels.get(channelId);
-  return meta ? toChannel(meta, viewerId) : undefined;
+): Group | undefined {
+  const meta = groups.get(groupId);
+  return meta ? toGroup(meta, viewerId) : undefined;
 }
 
-/** Toggle a message's pinned state in a channel; returns the new pin id list. */
+/** Toggle a message's pinned state in a group; returns the new pin id list. */
 export function togglePin(
-  channelId: string,
+  groupId: string,
   msgId: string,
   _userId: string,
 ): string[] | null {
   void _userId;
-  if (!channelExists(channelId)) return null;
-  const list = pins.get(channelId) ?? [];
+  if (!groupExists(groupId)) return null;
+  const list = pins.get(groupId) ?? [];
   const idx = list.indexOf(msgId);
   if (idx >= 0) {
     list.splice(idx, 1);
-    bg(getPool().query("DELETE FROM pin WHERE group_id=$1 AND msg_id=$2", [channelId, msgId]));
+    bg(getPool().query("DELETE FROM pin WHERE group_id=$1 AND msg_id=$2", [groupId, msgId]));
   } else {
     list.push(msgId);
     bg(
       getPool().query(
         "INSERT INTO pin (group_id, msg_id) VALUES ($1,$2) ON CONFLICT DO NOTHING",
-        [channelId, msgId],
+        [groupId, msgId],
       ),
     );
   }
-  pins.set(channelId, list);
+  pins.set(groupId, list);
   return [...list];
 }
 
 /**
  * Construct (but do NOT store) a new top-level message: stamps id/seq/time and
  * derives mentions. The body is returned for relay only — the server keeps no
- * copy. Returns null if the channel doesn't exist.
+ * copy. Returns null if the group doesn't exist.
  */
 export function addMessage(
-  channelId: string,
+  groupId: string,
   author: User,
   text: string,
   clientId?: string,
@@ -609,11 +609,11 @@ export function addMessage(
   enc?: string,
 ): Message | null {
   void clientId;
-  if (!channelExists(channelId)) return null;
+  if (!groupExists(groupId)) return null;
   const mentions = deriveMentions(text);
   const message: Message = {
     id: newId(),
-    seq: nextSeq(channelId),
+    seq: nextSeq(groupId),
     author,
     time: nowTime(),
     ts: Date.now(),
@@ -624,7 +624,7 @@ export function addMessage(
     ...(rich ? { rich } : {}),
     ...(enc ? { enc } : {}),
   };
-  persistMessage(channelId, message, null);
+  persistMessage(groupId, message, null);
   return message;
 }
 
@@ -633,13 +633,13 @@ export function addMessage(
  * reply count so threadCount stays consistent across clients.
  */
 export function addThreadReply(
-  channelId: string,
+  groupId: string,
   parentId: string,
   author: User,
   text: string,
   rich?: string,
 ): { reply: Message; threadCount: number; threadLastTime: string } | null {
-  if (!channelExists(channelId)) return null;
+  if (!groupExists(groupId)) return null;
   const reply: Message = {
     id: newId(),
     author,
@@ -651,18 +651,18 @@ export function addThreadReply(
   };
   const threadCount = (threadCounts.get(parentId) ?? 0) + 1;
   threadCounts.set(parentId, threadCount);
-  persistMessage(channelId, reply, parentId);
+  persistMessage(groupId, reply, parentId);
   return { reply, threadCount, threadLastTime: "just now" };
 }
 
 /** Toggle one user's reaction; returns the aggregated reactions for broadcast. */
 export function toggleReaction(
-  channelId: string,
+  groupId: string,
   msgId: string,
   emoji: string,
   userId: string,
 ): ReactionAgg[] | null {
-  if (!channelExists(channelId)) return null;
+  if (!groupExists(groupId)) return null;
   let byEmoji = reactions.get(msgId);
   if (!byEmoji) {
     byEmoji = new Map();
@@ -687,7 +687,7 @@ export function toggleReaction(
       getPool().query(
         `INSERT INTO reaction (group_id, msg_id, emoji, user_id) VALUES ($1,$2,$3,$4)
          ON CONFLICT DO NOTHING`,
-        [channelId, msgId, emoji, userId],
+        [groupId, msgId, emoji, userId],
       ),
     );
   }
@@ -695,13 +695,13 @@ export function toggleReaction(
 }
 
 /**
- * Create a new channel. The id is an opaque hash; the slug is the display name.
- * Private channels record the creator as their first member.
+ * Create a new group. The id is an opaque hash; the slug is the display name.
+ * Private groups record the creator as their first member.
  */
-export function createChannel(
+export function createGroup(
   name: string,
   opts: { topic?: string; private?: boolean; creatorId?: string } = {},
-): Channel | null {
+): Group | null {
   const slug = name
     .trim()
     .toLowerCase()
@@ -709,10 +709,10 @@ export function createChannel(
     .replace(/^-+|-+$/g, "");
   if (!slug) return null;
 
-  let id = newChannelId();
-  while (channelExists(id)) id = newChannelId();
+  let id = newGroupId();
+  while (groupExists(id)) id = newGroupId();
 
-  const meta: ChannelMeta = {
+  const meta: GroupMeta = {
     id,
     type: "group",
     name: slug,
@@ -720,20 +720,20 @@ export function createChannel(
     ...(opts.topic?.trim() ? { topic: opts.topic.trim() } : {}),
     ...(opts.private ? { private: true } : {}),
   };
-  channels.set(id, meta);
-  persistChannel(meta);
+  groups.set(id, meta);
+  persistGroup(meta);
   if (opts.creatorId) addMember(id, opts.creatorId);
-  return getChannel(id, opts.creatorId ?? "") ?? null;
+  return getGroup(id, opts.creatorId ?? "") ?? null;
 }
 
-/** Update a channel's display name and/or topic. Returns the updated Channel. */
-export function updateChannel(
-  channelId: string,
+/** Update a group's display name and/or topic. Returns the updated Group. */
+export function updateGroup(
+  groupId: string,
   patch: { name?: string; topic?: string },
-): Channel | null {
-  const meta = channels.get(channelId);
+): Group | null {
+  const meta = groups.get(groupId);
   if (!meta || meta.type === "dm") return null; // DMs aren't editable
-  const next: ChannelMeta = { ...meta };
+  const next: GroupMeta = { ...meta };
   if (patch.name !== undefined) {
     const name = patch.name.trim();
     if (name) next.name = name;
@@ -743,44 +743,44 @@ export function updateChannel(
     if (topic) next.topic = topic;
     else delete next.topic;
   }
-  channels.set(channelId, next);
-  persistChannel(next);
-  return getChannel(channelId, "") ?? null;
+  groups.set(groupId, next);
+  persistGroup(next);
+  return getGroup(groupId, "") ?? null;
 }
 
-/** Delete a channel and its attached metadata (members, pins, seq, reads). */
-export function deleteChannel(channelId: string): boolean {
-  if (!channelExists(channelId)) return false;
-  channels.delete(channelId);
-  members.delete(channelId);
-  pins.delete(channelId);
-  seqOf.delete(channelId);
-  reads.delete(channelId);
+/** Delete a group and its attached metadata (members, pins, seq, reads). */
+export function deleteGroup(groupId: string): boolean {
+  if (!groupExists(groupId)) return false;
+  groups.delete(groupId);
+  members.delete(groupId);
+  pins.delete(groupId);
+  seqOf.delete(groupId);
+  reads.delete(groupId);
   bg(
     (async () => {
       const pool = getPool();
-      await pool.query("DELETE FROM reaction WHERE group_id=$1", [channelId]);
-      await pool.query("DELETE FROM pin WHERE group_id=$1", [channelId]);
-      await pool.query("DELETE FROM read_cursor WHERE group_id=$1", [channelId]);
-      await pool.query("DELETE FROM message WHERE group_id=$1", [channelId]);
-      await pool.query("DELETE FROM group_member WHERE group_id=$1", [channelId]);
-      await pool.query(`DELETE FROM "group" WHERE id=$1`, [channelId]);
+      await pool.query("DELETE FROM reaction WHERE group_id=$1", [groupId]);
+      await pool.query("DELETE FROM pin WHERE group_id=$1", [groupId]);
+      await pool.query("DELETE FROM read_cursor WHERE group_id=$1", [groupId]);
+      await pool.query("DELETE FROM message WHERE group_id=$1", [groupId]);
+      await pool.query("DELETE FROM group_member WHERE group_id=$1", [groupId]);
+      await pool.query(`DELETE FROM "group" WHERE id=$1`, [groupId]);
     })(),
   );
   return true;
 }
 
 export function ensureDm(dmId: string, recipient: User): void {
-  if (channelExists(dmId)) return;
-  const meta: ChannelMeta = {
+  if (groupExists(dmId)) return;
+  const meta: GroupMeta = {
     id: dmId,
     type: "dm",
     name: recipient.name,
     user: recipient,
     presence: "active",
   };
-  channels.set(dmId, meta);
-  persistChannel(meta);
+  groups.set(dmId, meta);
+  persistGroup(meta);
 }
 
 /** Resolve a recipient key to a User, or null for an empty key. */
@@ -806,13 +806,13 @@ export function setWorkspaceName(name: string): boolean {
 }
 
 /**
- * Join a user to every seeded default channel. Returns the ids they were newly
+ * Join a user to every seeded default group. Returns the ids they were newly
  * added to (so the caller can announce the roster change for E2EE re-keying).
  */
-export function joinDefaultChannels(userId: string): string[] {
+export function joinDefaultGroups(userId: string): string[] {
   const joined: string[] = [];
-  for (const id of DEFAULT_CHANNEL_IDS) {
-    if (channels.has(id) && addMember(id, userId)) joined.push(id);
+  for (const id of DEFAULT_GROUP_IDS) {
+    if (groups.has(id) && addMember(id, userId)) joined.push(id);
   }
   return joined;
 }
@@ -831,61 +831,61 @@ export function removeWorkspaceMember(memberId: string): void {
 
 // --- unread / read tracking ------------------------------------------------
 // Unread = top-level messages newer than the user's read cursor. Both are
-// integer per-channel seqs, so this needs no message content.
+// integer per-group seqs, so this needs no message content.
 
-const channelMaxSeq = (channelId: string): number => seqOf.get(channelId) ?? 0;
+const groupMaxSeq = (groupId: string): number => seqOf.get(groupId) ?? 0;
 
-function readCursor(channelId: string, userId: string): number | undefined {
-  return reads.get(channelId)?.get(userId);
+function readCursor(groupId: string, userId: string): number | undefined {
+  return reads.get(groupId)?.get(userId);
 }
 
-function setReadCursor(channelId: string, userId: string, seq: number): void {
-  let m = reads.get(channelId);
+function setReadCursor(groupId: string, userId: string, seq: number): void {
+  let m = reads.get(groupId);
   if (!m) {
     m = new Map();
-    reads.set(channelId, m);
+    reads.set(groupId, m);
   }
   m.set(userId, seq);
   bg(
     getPool().query(
       `INSERT INTO read_cursor (group_id, user_id, seq) VALUES ($1,$2,$3)
        ON CONFLICT (group_id, user_id) DO UPDATE SET seq=EXCLUDED.seq`,
-      [channelId, userId, seq],
+      [groupId, userId, seq],
     ),
   );
 }
 
-/** Baseline a user's read cursor for every channel they can see (caught up). */
+/** Baseline a user's read cursor for every group they can see (caught up). */
 export function initUserReads(userId: string): void {
-  for (const ch of listChannelsForUser(userId)) {
+  for (const ch of listGroupsForUser(userId)) {
     if (readCursor(ch.id, userId) === undefined) {
-      setReadCursor(ch.id, userId, channelMaxSeq(ch.id));
+      setReadCursor(ch.id, userId, groupMaxSeq(ch.id));
     }
   }
 }
 
-/** Mark a channel fully read for a user (cursor jumps to the latest message). */
-export function markRead(channelId: string, userId: string): void {
-  setReadCursor(channelId, userId, channelMaxSeq(channelId));
+/** Mark a group fully read for a user (cursor jumps to the latest message). */
+export function markRead(groupId: string, userId: string): void {
+  setReadCursor(groupId, userId, groupMaxSeq(groupId));
 }
 
-export function getUnread(channelId: string, userId: string): number {
-  const last = readCursor(channelId, userId);
-  if (last === undefined) return 0; // unseen channel → caught up until opened
-  return Math.max(0, channelMaxSeq(channelId) - last);
+export function getUnread(groupId: string, userId: string): number {
+  const last = readCursor(groupId, userId);
+  if (last === undefined) return 0; // unseen group → caught up until opened
+  return Math.max(0, groupMaxSeq(groupId) - last);
 }
 
-/** Unread counts for all of a user's channels, keyed by channel id. */
+/** Unread counts for all of a user's groups, keyed by group id. */
 export function unreadState(userId: string): Record<string, number> {
   const out: Record<string, number> = {};
-  for (const ch of listChannelsForUser(userId)) {
+  for (const ch of listGroupsForUser(userId)) {
     out[ch.id] = getUnread(ch.id, userId);
   }
   return out;
 }
 
-export function isPublicChannel(channelId: string): boolean {
-  const meta = channels.get(channelId);
+export function isPublicGroup(groupId: string): boolean {
+  const meta = groups.get(groupId);
   return Boolean(meta && meta.type === "group" && !meta.private);
 }
 
@@ -903,7 +903,7 @@ export function isPublicChannel(channelId: string): boolean {
  * caller whether anything was actually deleted (false → don't broadcast).
  */
 export async function deleteMessage(
-  channelId: string,
+  groupId: string,
   msgId: string,
   userId: string,
 ): Promise<boolean> {
@@ -912,22 +912,22 @@ export async function deleteMessage(
     `UPDATE message SET deleted=true,
        data = data || '{"text":"","rich":null,"attachment":null,"reactions":[],"deleted":true}'::jsonb
      WHERE id=$1 AND group_id=$2 AND data->'author'->>'id'=$3 AND deleted=false`,
-    [msgId, channelId, userId],
+    [msgId, groupId, userId],
   );
   if (res.rowCount !== 1) return false;
   reactions.delete(msgId);
-  const list = pins.get(channelId);
+  const list = pins.get(groupId);
   if (list) {
     const idx = list.indexOf(msgId);
     if (idx >= 0) {
       list.splice(idx, 1);
-      pins.set(channelId, list);
+      pins.set(groupId, list);
     }
   }
   bg(
     (async () => {
       await pool.query("DELETE FROM reaction WHERE msg_id=$1", [msgId]);
-      await pool.query("DELETE FROM pin WHERE group_id=$1 AND msg_id=$2", [channelId, msgId]);
+      await pool.query("DELETE FROM pin WHERE group_id=$1 AND msg_id=$2", [groupId, msgId]);
     })(),
   );
   return true;
@@ -942,7 +942,7 @@ export async function deleteMessage(
  * caller can route the broadcast to thread panels.
  */
 export async function editMessage(
-  channelId: string,
+  groupId: string,
   msgId: string,
   userId: string,
   enc: string,
@@ -956,7 +956,7 @@ export async function editMessage(
          'text', '', 'rich', null)
      WHERE id=$1 AND group_id=$2 AND data->'author'->>'id'=$3 AND deleted=false
      RETURNING parent_id`,
-    [msgId, channelId, userId, enc, editedTs],
+    [msgId, groupId, userId, enc, editedTs],
   );
   if (res.rowCount !== 1) return { ok: false };
   return { ok: true, parentId: (res.rows[0].parent_id as string | null) ?? null };

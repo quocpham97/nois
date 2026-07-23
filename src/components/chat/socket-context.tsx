@@ -215,7 +215,7 @@ export function SocketProvider({
   // FIRST publish (it no longer replaces the pool on reconnect — that used to
   // re-add already-consumed prekeys and cause permanent "Unable to decrypt"; see
   // key-store.ts `publish`). So refills generated here for a returning device are
-  // sent as an APPEND via `keys:supplement`, the same channel post-consume
+  // sent as an APPEND via `keys:supplement`, the same group post-consume
   // replenishment uses — the only way to top the server pool up now.
   const provisionAndPublish = useCallback(
     async (s: TypedSocket) => {
@@ -656,7 +656,7 @@ export function SocketProvider({
       await restoreBackup(userId, passphrase, blob);
       // Pull the continuous history store down with the imported storage key —
       // the full message history (forward-secret DMs included) lands in local
-      // SQLite before the app loads channels.
+      // SQLite before the app loads groups.
       await syncHistoryDown(s);
       passphraseRef.current = passphrase;
       setBackupEnabled(true);

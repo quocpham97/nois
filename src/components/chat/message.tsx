@@ -380,8 +380,8 @@ export function Message({ msg }: { msg: Msg }) {
     togglePicker,
     toggleReaction,
     retrySend,
-    currentChannelId,
-    channels,
+    currentGroupId,
+    groups,
     togglePin,
     highlightMsgId,
     deleteMessage,
@@ -408,7 +408,7 @@ export function Message({ msg }: { msg: Msg }) {
   // "+"), so it uses a detached handle to bind both to the same popover.
   const pickerHandle = useMemo(() => createPopoverHandle(), []);
 
-  const isPinned = (channels[currentChannelId]?.pinned || []).some(
+  const isPinned = (groups[currentGroupId]?.pinned || []).some(
     (p) => p.id === msg.id,
   );
   const grouped = msg.sameAuthor;
@@ -440,8 +440,8 @@ export function Message({ msg }: { msg: Msg }) {
     );
   }
 
-  const isDmChannel = channels[currentChannelId]?.type === "dm";
-  const showName = !me && !isDmChannel && !grouped;
+  const isDmGroup = groups[currentGroupId]?.type === "dm";
+  const showName = !me && !isDmGroup && !grouped;
   const timeLabel = msg.ts ? formatMsgTime(msg.ts) : msg.time;
   // Messenger-style corner grouping: within a run of same-author messages the
   // corner facing the previous bubble is tightened.
@@ -456,7 +456,7 @@ export function Message({ msg }: { msg: Msg }) {
   const isOwnOriginal =
     !!msg.replyTo?.authorId && msg.replyTo.authorId === myUser.id;
   const jumpToReply = () => {
-    if (msg.replyTo) jumpToMessage(currentChannelId, msg.replyTo.msgId);
+    if (msg.replyTo) jumpToMessage(currentGroupId, msg.replyTo.msgId);
   };
   // In-bubble quote only fits a real text bubble; jumbo/attachment-only replies
   // show a standalone card above the content instead.
@@ -668,7 +668,7 @@ export function Message({ msg }: { msg: Msg }) {
                   </MenuRow>
                   <MenuRow
                     onClick={() => {
-                      togglePin(currentChannelId, msg.id);
+                      togglePin(currentGroupId, msg.id);
                       closeMore();
                     }}
                   >
@@ -678,12 +678,12 @@ export function Message({ msg }: { msg: Msg }) {
                       className={isPinned ? "text-app-accent" : "text-app-muted"}
                       fill={isPinned ? "var(--app-accent)" : "none"}
                     />
-                    {isPinned ? "Unpin from channel" : "Pin to channel"}
+                    {isPinned ? "Unpin from group" : "Pin to group"}
                   </MenuRow>
                   {me && !msg.pending && !msg.enc && !msg.failed && (
                     <MenuRow
                       onClick={() => {
-                        startEdit(currentChannelId, msg);
+                        startEdit(currentGroupId, msg);
                         closeMore();
                       }}
                     >
@@ -695,7 +695,7 @@ export function Message({ msg }: { msg: Msg }) {
                     <MenuRow
                       danger
                       onClick={() => {
-                        deleteMessage(currentChannelId, msg.id);
+                        deleteMessage(currentGroupId, msg.id);
                         closeMore();
                       }}
                     >
@@ -719,7 +719,7 @@ export function Message({ msg }: { msg: Msg }) {
           >
             <span>{msg.failReason || "Failed to send."}</span>
             <button
-              onClick={() => retrySend(currentChannelId, msg.id)}
+              onClick={() => retrySend(currentGroupId, msg.id)}
               className="font-semibold underline hover:no-underline"
             >
               Retry

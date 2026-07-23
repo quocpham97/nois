@@ -38,7 +38,7 @@ function ActionCard({
   );
 }
 
-/** Main pane when no conversation is selected (no channel matches the URL). */
+/** Main pane when no conversation is selected (no group matches the URL). */
 export function EmptyChatView() {
   const { openCompose } = useChat();
 

@@ -2,15 +2,15 @@
 
 import { ChevronLeft, Info, Phone, Video } from "lucide-react";
 import {
-  type Channel,
-  channelMembers,
+  type Group,
+  groupMembers,
   presenceColor,
   presenceLabel,
 } from "@/lib/chat-data";
 import { useChat } from "../chat/chat-context";
 import { useSocket } from "../chat/socket-context";
 import { useCall } from "../chat/call-context";
-import { ChannelIcon } from "../chat/bits";
+import { GroupIcon } from "../chat/bits";
 import { Message } from "../chat/message";
 import { Composer } from "../chat/composer";
 import { KeyChangeBanner, RecoveryWaitingBanner } from "../chat/key-backup";
@@ -20,14 +20,14 @@ import { KeyChangeBanner, RecoveryWaitingBanner } from "../chat/key-backup";
 // message list reuses the real <Message> component and the send path reuses the
 // real <Composer>, so E2EE decrypt, reactions, replies, edits and drafts are
 // exactly the desktop behavior — nothing about messaging is re-implemented.
-export function ConversationScreen({ ch }: { ch: Channel }) {
-  const { selectChannel, toggleChannelInfo, scrollRef } = useChat();
+export function ConversationScreen({ ch }: { ch: Group }) {
+  const { selectGroup, toggleGroupInfo, scrollRef } = useChat();
   const { user: me } = useSocket();
   const { startCall, call } = useCall();
 
   const isDm = ch.type === "dm";
   const inCall = call != null;
-  const members = channelMembers(ch, me);
+  const members = groupMembers(ch, me);
   const status = isDm
     ? ch.presence === "active"
       ? "Active now"
@@ -39,7 +39,7 @@ export function ConversationScreen({ ch }: { ch: Channel }) {
       {/* header */}
       <div className="flex shrink-0 items-center gap-2.5 border-b border-app-border px-3 pb-2.5 pt-1">
         <button
-          onClick={() => selectChannel("")}
+          onClick={() => selectGroup("")}
           aria-label="Back"
           className="flex size-9 shrink-0 items-center justify-center text-app-accent"
         >
@@ -55,7 +55,7 @@ export function ConversationScreen({ ch }: { ch: Channel }) {
             </span>
           ) : (
             <span className="flex size-10 items-center justify-center rounded-full bg-panel">
-              <ChannelIcon channel={ch} color="var(--app-text)" size={16} />
+              <GroupIcon group={ch} color="var(--app-text)" size={16} />
             </span>
           )}
           {isDm && (
@@ -92,7 +92,7 @@ export function ConversationScreen({ ch }: { ch: Channel }) {
           </>
         ) : (
           <button
-            onClick={toggleChannelInfo}
+            onClick={toggleGroupInfo}
             aria-label="Conversation info"
             className="flex size-[38px] items-center justify-center text-app-accent"
           >
@@ -115,7 +115,7 @@ export function ConversationScreen({ ch }: { ch: Channel }) {
         <div className="h-1" />
       </div>
 
-      <Composer channel={ch} />
+      <Composer group={ch} />
     </div>
   );
 }

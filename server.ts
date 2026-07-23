@@ -22,7 +22,7 @@ import type {
   ClientToServerEvents,
   ServerToClientEvents,
 } from "./src/lib/socket-events";
-import { type Channel, type User, deriveUser } from "./src/lib/chat-data";
+import { type Group, type User, deriveUser } from "./src/lib/chat-data";
 import * as store from "./src/server/store";
 import * as keyStore from "./src/server/key-store";
 import * as mlsDs from "./src/server/mls-ds";
@@ -44,7 +44,7 @@ const app = next({ dev });
 const handle = app.getRequestHandler();
 
 app.prepare().then(async () => {
-  // Hydrate the durable relay state (channels/membership/seq) from Postgres and
+  // Hydrate the durable relay state (groups/membership/seq) from Postgres and
   // ensure the schema before accepting connections.
   await store.init();
   // Hydrate the public device-key directory too (schema created by store.init).
@@ -153,30 +153,30 @@ app.prepare().then(async () => {
     }
   });
 
-  // Notify everyone who can see a channel — but isn't currently in its room
-  // (i.e. not viewing it) — that it has a new unread message. Public channels
-  // reach the whole workspace; private channels only their members' rooms.
-  const bumpUnread = (channelId: string) => {
-    if (store.isPublicChannel(channelId)) {
-      io.except(channelId).emit("unread:bump", { channelId });
+  // Notify everyone who can see a group — but isn't currently in its room
+  // (i.e. not viewing it) — that it has a new unread message. Public groups
+  // reach the whole workspace; private groups only their members' rooms.
+  const bumpUnread = (groupId: string) => {
+    if (store.isPublicGroup(groupId)) {
+      io.except(groupId).emit("unread:bump", { groupId });
     } else {
-      const rooms = store.listMemberIds(channelId).map((id) => "user:" + id);
+      const rooms = store.listMemberIds(groupId).map((id) => "user:" + id);
       if (rooms.length) {
-        io.to(rooms).except(channelId).emit("unread:bump", { channelId });
+        io.to(rooms).except(groupId).emit("unread:bump", { groupId });
       }
     }
   };
 
-  // The per-user rooms of every channel member. Message events are delivered
-  // here — NOT to the channel room (`socket.to(channelId)`) — so a member
-  // receives (and locally stores) messages for ALL their channels even while
-  // they're viewing a different one. The channel room is reserved for "currently
+  // The per-user rooms of every group member. Message events are delivered
+  // here — NOT to the group room (`socket.to(groupId)`) — so a member
+  // receives (and locally stores) messages for ALL their groups even while
+  // they're viewing a different one. The group room is reserved for "currently
   // viewing" signals (typing, and the unread-bump exclusion above). Delivering
   // to members rather than just current viewers stops a message vanishing when
-  // the recipient is looking at another channel; a member who is fully offline
+  // the recipient is looking at another group; a member who is fully offline
   // recovers missed messages + sender keys via replay on reconnect (see below).
-  const memberRooms = (channelId: string) =>
-    store.listMemberIds(channelId).map((id) => "user:" + id);
+  const memberRooms = (groupId: string) =>
+    store.listMemberIds(groupId).map((id) => "user:" + id);
 
   // --- Web Push (Phase 6) ----------------------------------------------------
   const pushReady = !!(
@@ -192,10 +192,10 @@ app.prepare().then(async () => {
     );
   }
 
-  // Should this recipient get a push for a message in `channelId` right now?
+  // Should this recipient get a push for a message in `groupId` right now?
   // E2EE means the server can't read content, so prefs are honored only for
-  // what it CAN know: quiet hours, and channel type (DM vs group). At level 1
-  // ("DMs & mentions") it can't detect a mention in an encrypted channel, so it
+  // what it CAN know: quiet hours, and group type (DM vs group). At level 1
+  // ("DMs & mentions") it can't detect a mention in an encrypted group, so it
   // pushes DMs only. Level 0 = everything; level 2 = nothing.
   const wantsPush = (uid: string, isDm: boolean): boolean => {
     const prefs = (store.getProfile(uid).notif ?? { level: 1, dnd: true }) as {
@@ -212,22 +212,25 @@ app.prepare().then(async () => {
     return true;
   };
 
-  // Fire-and-forget contentless pushes to a channel's OFFLINE members (no live
+  // Fire-and-forget contentless pushes to a group's OFFLINE members (no live
   // socket). Payload carries only server-known routing metadata — never message
   // content (which the server can't decrypt).
-  const maybePush = (channelId: string, senderId: string, senderName: string) => {
+  const maybePush = (groupId: string, senderId: string, senderName: string) => {
     if (!pushReady) return;
     void (async () => {
       const online = new Set(await presence.list());
-      const isDm = store.isDm(channelId);
-      const channelName = isDm ? undefined : store.getChannelName(channelId);
+      const isDm = store.isDm(groupId);
+      const groupName = isDm ? undefined : store.getGroupName(groupId);
       const recipients = store
-        .listMemberIds(channelId)
+        .listMemberIds(groupId)
         .filter((id) => id !== senderId && !online.has(id) && wantsPush(id, isDm));
       const payload = JSON.stringify({
         type: "message",
-        channelId,
-        channelName,
+        // Deep-link routing keys the service worker (public/sw.js) reads; kept
+        // as channelId/channelName because sw.js is a separately-cached artifact
+        // that isn't renamed in lockstep with this bundle.
+        channelId: groupId,
+        channelName: groupName,
         senderId,
         senderName,
       });
@@ -261,30 +264,30 @@ app.prepare().then(async () => {
     console.log(`[ws] connect    ${socket.id} user=${userId}`);
 
     // Per-user room so we can notify a user (e.g. a new DM) on any of their
-    // sockets even before they've joined the relevant channel room.
+    // sockets even before they've joined the relevant group room.
     socket.join("user:" + userId);
 
-    // Replay a channel's durable state to THIS socket: missed messages/replies
+    // Replay a group's durable state to THIS socket: missed messages/replies
     // (from the read cursor) plus every stored sender-key envelope, so a member
     // who was offline can both see and decrypt what they missed — even if the
     // senders are now offline. Idempotent on the client (backfills only missing
     // messages; sender keys are stable).
-    const replayChannel = async (channelId: string) => {
+    const replayGroup = async (groupId: string) => {
       try {
         const [messages, replies] = await Promise.all([
-          store.fetchHistory(channelId, userId),
-          store.fetchReplies(channelId, userId),
+          store.fetchHistory(groupId, userId),
+          store.fetchReplies(groupId, userId),
         ]);
         if (messages.length || replies.length) {
-          socket.emit("history:replay", { channelId, messages, replies });
+          socket.emit("history:replay", { groupId, messages, replies });
         }
-        for (const { fromUserId, env } of store.fetchSenderKeys(channelId)) {
-          socket.emit("group:senderKey", { channelId, fromUserId, env });
+        for (const { fromUserId, env } of store.fetchSenderKeys(groupId)) {
+          socket.emit("group:senderKey", { groupId, fromUserId, env });
         }
         // Replay sealed read-cursors so "seen by" rehydrates after reconnect;
         // idempotent — the client merges the max readSeq per user.
-        for (const { fromUserId, deviceId, env } of store.fetchReceipts(channelId)) {
-          socket.emit("receipt:update", { channelId, fromUserId, deviceId, env });
+        for (const { fromUserId, deviceId, env } of store.fetchReceipts(groupId)) {
+          socket.emit("receipt:update", { groupId, fromUserId, deviceId, env });
         }
       } catch (e) {
         console.error("[ws] replay failed:", (e as Error).message);
@@ -299,16 +302,16 @@ app.prepare().then(async () => {
     });
 
     // Authorization guard for room-scoped actions.
-    const authorized = (channelId: string) => store.canAccess(channelId, userId);
+    const authorized = (groupId: string) => store.canAccess(groupId, userId);
 
-    // Broadcast a channel's updated meta/roster: to the whole workspace for
-    // public channels (everyone can see them), or to its room for private ones.
-    const emitChannelUpdated = (channel: Channel) => {
+    // Broadcast a group's updated meta/roster: to the whole workspace for
+    // public groups (everyone can see them), or to its room for private ones.
+    const emitGroupUpdated = (group: Group) => {
       const target =
-        channel.type === "group" && !channel.private ? io : io.to(channel.id);
+        group.type === "group" && !group.private ? io : io.to(group.id);
       // Strip messages — recipients keep their own viewer-correct history; this
       // only carries meta + roster.
-      target.emit("channel:updated", { channel: { ...channel, messages: [] } });
+      target.emit("group:updated", { group: { ...group, messages: [] } });
     };
 
     // The workspace (name + roster) is shared by everyone — broadcast to all.
@@ -318,37 +321,37 @@ app.prepare().then(async () => {
         members: store.listWorkspaceMembers(),
       });
 
-    // Join a channel's room, then replay durable history from Postgres to this
+    // Join a group's room, then replay durable history from Postgres to this
     // socket (backfills messages missed while offline / on a new device). The
     // client merges it into its local cache and decrypts locally.
-    socket.on("channel:join", ({ channelId }) => {
-      if (!authorized(channelId)) return;
-      socket.join(channelId);
-      // Public-channel access is implicit (anyone may read), but E2EE
+    socket.on("group:join", ({ groupId }) => {
+      if (!authorized(groupId)) return;
+      socket.join(groupId);
+      // Public-group access is implicit (anyone may read), but E2EE
       // sender-key distribution targets the *explicit* member roster. Record
       // the joiner as a member so they receive sender keys (and senders see the
       // roster change and re-key on their next message). Without this, viewers
-      // of a public channel who never created it only ever see 🔒.
-      if (store.isPublicChannel(channelId) && store.addMember(channelId, userId)) {
-        const channel = store.getChannel(channelId, userId);
-        if (channel) emitChannelUpdated(channel);
+      // of a public group who never created it only ever see 🔒.
+      if (store.isPublicGroup(groupId) && store.addMember(groupId, userId)) {
+        const group = store.getGroup(groupId, userId);
+        if (group) emitGroupUpdated(group);
       }
-      void replayChannel(channelId);
+      void replayGroup(groupId);
     });
 
-    socket.on("channel:leave", ({ channelId }) => {
-      socket.leave(channelId);
+    socket.on("group:leave", ({ groupId }) => {
+      socket.leave(groupId);
     });
 
     // Construct + relay a top-level message, ack the sender (optimistic
     // reconcile), and broadcast it to everyone else in the room. The server
     // keeps no copy of the body.
-    socket.on("message:send", ({ channelId, text, clientId, attachment, rich, enc }) => {
+    socket.on("message:send", ({ groupId, text, clientId, attachment, rich, enc }) => {
       const trimmed = (text || "").trim();
       // An encrypted message carries an `enc` envelope and empty text — still valid.
-      if ((!trimmed && !attachment && !enc) || !authorized(channelId)) return;
+      if ((!trimmed && !attachment && !enc) || !authorized(groupId)) return;
       const message = store.addMessage(
-        channelId,
+        groupId,
         me,
         trimmed,
         clientId,
@@ -358,20 +361,20 @@ app.prepare().then(async () => {
       );
       if (!message) return;
       // The sender has, by definition, read up to their own message.
-      store.markRead(channelId, userId);
+      store.markRead(groupId, userId);
       socket.emit("message:ack", { clientId, message });
       // Deliver to every member (their user rooms), not just current viewers, so
-      // members viewing another channel still receive + store it. `socket.to`
+      // members viewing another group still receive + store it. `socket.to`
       // excludes this socket (it already has the ack + optimistic render).
-      socket.to(memberRooms(channelId)).emit("message:new", { channelId, message });
-      bumpUnread(channelId);
-      maybePush(channelId, userId, me.name);
+      socket.to(memberRooms(groupId)).emit("message:new", { groupId, message });
+      bumpUnread(groupId);
+      maybePush(groupId, userId, me.name);
     });
 
-    // Mark a channel read for this user (cursor jumps to its latest message).
-    socket.on("channel:read", ({ channelId }) => {
-      if (!authorized(channelId)) return;
-      store.markRead(channelId, userId);
+    // Mark a group read for this user (cursor jumps to its latest message).
+    socket.on("group:read", ({ groupId }) => {
+      if (!authorized(groupId)) return;
+      store.markRead(groupId, userId);
     });
 
     // Update the viewer's profile. Re-derives `me` so subsequent messages use
@@ -389,22 +392,22 @@ app.prepare().then(async () => {
     // server just drops its metadata (reactions/pin) and relays the removal;
     // each client applies the tombstone locally. The client sends parentId
     // (it knows whether this was a thread reply) since the server has no copy.
-    socket.on("message:delete", async ({ channelId, msgId, parentId }) => {
-      if (!authorized(channelId)) return;
+    socket.on("message:delete", async ({ groupId, msgId, parentId }) => {
+      if (!authorized(groupId)) return;
       // Author-only: the check runs inside the UPDATE (the server holds no
       // message copy) — a non-author's delete matches no row and is dropped.
-      if (!(await store.deleteMessage(channelId, msgId, userId))) return;
+      if (!(await store.deleteMessage(groupId, msgId, userId))) return;
       // To all members (incl. deleter — they have no optimistic tombstone) so
       // the removal applies for everyone who stored the message, not just
       // current viewers.
-      io.to(memberRooms(channelId)).emit("message:deleted", {
-        channelId,
+      io.to(memberRooms(groupId)).emit("message:deleted", {
+        groupId,
         msgId,
         parentId: parentId ?? null,
       });
-      io.to(channelId).emit("pins:updated", {
-        channelId,
-        pinIds: store.listPins(channelId),
+      io.to(groupId).emit("pins:updated", {
+        groupId,
+        pinIds: store.listPins(groupId),
       });
     });
 
@@ -412,14 +415,14 @@ app.prepare().then(async () => {
     // stored row (author-only, checked inside the UPDATE like delete) and relay
     // it to ALL members including the editor — their other devices decrypt it;
     // the editing device itself short-circuits via its local plaintext cache.
-    socket.on("message:edit", async ({ channelId, msgId, enc }) => {
-      if (!authorized(channelId)) return;
+    socket.on("message:edit", async ({ groupId, msgId, enc }) => {
+      if (!authorized(groupId)) return;
       if (typeof enc !== "string" || !enc) return;
       const editedTs = Date.now();
-      const res = await store.editMessage(channelId, msgId, userId, enc, editedTs);
+      const res = await store.editMessage(groupId, msgId, userId, enc, editedTs);
       if (!res.ok) return;
-      io.to(memberRooms(channelId)).emit("message:edited", {
-        channelId,
+      io.to(memberRooms(groupId)).emit("message:edited", {
+        groupId,
         msgId,
         parentId: res.parentId, // the stored row's parent wins over the client's claim
         enc,
@@ -429,15 +432,15 @@ app.prepare().then(async () => {
 
     // Thread reply: broadcast to the whole room (incl. sender) — no optimistic
     // render on the client, so a single broadcast keeps everyone consistent.
-    socket.on("thread:reply", ({ channelId, parentId, text, rich }) => {
+    socket.on("thread:reply", ({ groupId, parentId, text, rich }) => {
       const trimmed = (text || "").trim();
-      if (!trimmed || !authorized(channelId)) return;
-      const res = store.addThreadReply(channelId, parentId, me, trimmed, rich);
+      if (!trimmed || !authorized(groupId)) return;
+      const res = store.addThreadReply(groupId, parentId, me, trimmed, rich);
       if (!res) return;
       // Deliver to all members (incl. the sender — no optimistic render for
-      // thread replies) so replies reach members not currently in the channel.
-      io.to(memberRooms(channelId)).emit("thread:new", {
-        channelId,
+      // thread replies) so replies reach members not currently in the group.
+      io.to(memberRooms(groupId)).emit("thread:new", {
+        groupId,
         parentId,
         reply: res.reply,
         threadCount: res.threadCount,
@@ -448,11 +451,11 @@ app.prepare().then(async () => {
     // Reaction toggle: the sender's reaction is recorded per-user; the
     // aggregated list (with reactor ids) is broadcast so each client derives
     // its own `mine`.
-    socket.on("reaction:toggle", ({ channelId, msgId, emoji }) => {
-      if (!authorized(channelId)) return;
-      const reactions = store.toggleReaction(channelId, msgId, emoji, userId);
+    socket.on("reaction:toggle", ({ groupId, msgId, emoji }) => {
+      if (!authorized(groupId)) return;
+      const reactions = store.toggleReaction(groupId, msgId, emoji, userId);
       if (reactions === null) return;
-      io.to(channelId).emit("reaction:updated", { channelId, msgId, reactions });
+      io.to(groupId).emit("reaction:updated", { groupId, msgId, reactions });
     });
 
     // Compose a new 1:1 DM (or post into an existing one). Announces brand-new
@@ -461,10 +464,10 @@ app.prepare().then(async () => {
       const trimmed = (text || "").trim();
       const recipient = store.userByKey(recipientId);
       if ((!trimmed && !enc) || !recipient) return;
-      // The DM id is the recipient's bare key (no "dm-" prefix); the channel's
+      // The DM id is the recipient's bare key (no "dm-" prefix); the group's
       // `type: "dm"` is what distinguishes it from a group.
       const dmId = recipientId;
-      const isNew = !store.channelExists(dmId);
+      const isNew = !store.groupExists(dmId);
       store.ensureDm(dmId, recipient);
       // Both participants are members of the DM.
       store.addMember(dmId, userId);
@@ -476,107 +479,107 @@ app.prepare().then(async () => {
       socket.emit("message:ack", { clientId, message });
       // Deliver to both participants' user rooms (not just the DM room) so the
       // recipient receives it even while viewing another conversation.
-      socket.to(memberRooms(dmId)).emit("message:new", { channelId: dmId, message });
+      socket.to(memberRooms(dmId)).emit("message:new", { groupId: dmId, message });
       bumpUnread(dmId);
       maybePush(dmId, userId, me.name);
       if (isNew) {
-        const channel = store.getChannel(dmId, userId);
+        const group = store.getGroup(dmId, userId);
         // Announce to both participants (any of their sockets), not the whole
         // workspace — DMs are private.
-        if (channel) {
+        if (group) {
           io.to("user:" + userId)
             .to("user:" + recipientId)
-            .emit("channel:created", { channel });
+            .emit("group:created", { group });
         }
       }
     });
 
-    // Create a channel. Public channels are announced to the whole workspace so
-    // they appear in everyone's sidebar; private channels only to the creator.
-    socket.on("channel:create", ({ name, topic, private: isPrivate }, ack) => {
-      const channel = store.createChannel(name, {
+    // Create a group. Public groups are announced to the whole workspace so
+    // they appear in everyone's sidebar; private groups only to the creator.
+    socket.on("group:create", ({ name, topic, private: isPrivate }, ack) => {
+      const group = store.createGroup(name, {
         topic,
         private: isPrivate,
         creatorId: userId,
       });
-      if (!channel) {
-        ack?.({ ok: false, error: "Enter a valid channel name." });
+      if (!group) {
+        ack?.({ ok: false, error: "Enter a valid group name." });
         return;
       }
-      socket.join(channel.id);
+      socket.join(group.id);
       if (isPrivate) {
-        io.to("user:" + userId).emit("channel:created", { channel });
+        io.to("user:" + userId).emit("group:created", { group });
       } else {
-        io.emit("channel:created", { channel });
+        io.emit("group:created", { group });
       }
-      ack?.({ ok: true, channelId: channel.id });
+      ack?.({ ok: true, groupId: group.id });
     });
 
-    // Edit a channel's name/topic.
-    socket.on("channel:update", ({ channelId, name, topic }, ack) => {
-      if (!authorized(channelId)) {
-        ack?.({ ok: false, error: "You can't edit this channel." });
+    // Edit a group's name/topic.
+    socket.on("group:update", ({ groupId, name, topic }, ack) => {
+      if (!authorized(groupId)) {
+        ack?.({ ok: false, error: "You can't edit this group." });
         return;
       }
-      const channel = store.updateChannel(channelId, { name, topic });
-      if (!channel) {
-        ack?.({ ok: false, error: "Couldn't update the channel." });
+      const group = store.updateGroup(groupId, { name, topic });
+      if (!group) {
+        ack?.({ ok: false, error: "Couldn't update the group." });
         return;
       }
-      emitChannelUpdated(channel);
+      emitGroupUpdated(group);
       ack?.({ ok: true });
     });
 
-    // Delete a channel (not DMs). Announce removal to whoever could see it.
-    socket.on("channel:delete", ({ channelId }, ack) => {
-      const channel = authorized(channelId)
-        ? store.getChannel(channelId, userId)
+    // Delete a group (not DMs). Announce removal to whoever could see it.
+    socket.on("group:delete", ({ groupId }, ack) => {
+      const group = authorized(groupId)
+        ? store.getGroup(groupId, userId)
         : null;
-      if (!channel || channel.type === "dm") {
-        ack?.({ ok: false, error: "This channel can't be deleted." });
+      if (!group || group.type === "dm") {
+        ack?.({ ok: false, error: "This group can't be deleted." });
         return;
       }
-      const isPublic = !channel.private;
-      store.deleteChannel(channelId);
-      if (isPublic) io.emit("channel:deleted", { channelId });
-      else io.to(channelId).emit("channel:deleted", { channelId });
+      const isPublic = !group.private;
+      store.deleteGroup(groupId);
+      if (isPublic) io.emit("group:deleted", { groupId });
+      else io.to(groupId).emit("group:deleted", { groupId });
       ack?.({ ok: true });
     });
 
-    // Add a member to a channel.
-    socket.on("channel:addMember", ({ channelId, userId: memberId }, ack) => {
-      if (!authorized(channelId)) {
-        ack?.({ ok: false, error: "You can't manage this channel." });
+    // Add a member to a group.
+    socket.on("group:addMember", ({ groupId, userId: memberId }, ack) => {
+      if (!authorized(groupId)) {
+        ack?.({ ok: false, error: "You can't manage this group." });
         return;
       }
-      store.addMember(channelId, memberId);
-      const channel = store.getChannel(channelId, userId);
-      if (channel) {
-        emitChannelUpdated(channel);
-        // A new private-channel member needs the channel surfaced for them
+      store.addMember(groupId, memberId);
+      const group = store.getGroup(groupId, userId);
+      if (group) {
+        emitGroupUpdated(group);
+        // A new private-group member needs the group surfaced for them
         // (messages stripped — they'll load fresh history when they open it).
-        if (channel.private) {
-          io.to("user:" + memberId).emit("channel:created", {
-            channel: { ...channel, messages: [] },
+        if (group.private) {
+          io.to("user:" + memberId).emit("group:created", {
+            group: { ...group, messages: [] },
           });
         }
       }
       ack?.({ ok: true });
     });
 
-    // Remove a member from a channel.
-    socket.on("channel:removeMember", ({ channelId, userId: memberId }, ack) => {
-      if (!authorized(channelId)) {
-        ack?.({ ok: false, error: "You can't manage this channel." });
+    // Remove a member from a group.
+    socket.on("group:removeMember", ({ groupId, userId: memberId }, ack) => {
+      if (!authorized(groupId)) {
+        ack?.({ ok: false, error: "You can't manage this group." });
         return;
       }
-      const wasPrivate = store.getChannel(channelId, userId)?.private;
-      store.removeMember(channelId, memberId);
-      const channel = store.getChannel(channelId, userId);
-      if (channel) emitChannelUpdated(channel);
-      // A removed private-channel member loses access — drop it from their UI.
+      const wasPrivate = store.getGroup(groupId, userId)?.private;
+      store.removeMember(groupId, memberId);
+      const group = store.getGroup(groupId, userId);
+      if (group) emitGroupUpdated(group);
+      // A removed private-group member loses access — drop it from their UI.
       if (wasPrivate) {
-        io.to("user:" + memberId).emit("channel:deleted", { channelId });
+        io.to("user:" + memberId).emit("group:deleted", { groupId });
       }
       ack?.({ ok: true });
     });
@@ -602,27 +605,27 @@ app.prepare().then(async () => {
     });
 
     // Typing: ephemeral, broadcast to the room excluding the sender.
-    socket.on("typing:start", ({ channelId }) => {
-      socket.to(channelId).emit("typing:update", {
-        channelId,
+    socket.on("typing:start", ({ groupId }) => {
+      socket.to(groupId).emit("typing:update", {
+        groupId,
         userId,
         isTyping: true,
       });
     });
-    socket.on("typing:stop", ({ channelId }) => {
-      socket.to(channelId).emit("typing:update", {
-        channelId,
+    socket.on("typing:stop", ({ groupId }) => {
+      socket.to(groupId).emit("typing:update", {
+        groupId,
         userId,
         isTyping: false,
       });
     });
 
     // Pin/unpin a message; broadcast the new pin list to the room.
-    socket.on("pin:toggle", ({ channelId, msgId }) => {
-      if (!authorized(channelId)) return;
-      const pinIds = store.togglePin(channelId, msgId, userId);
+    socket.on("pin:toggle", ({ groupId, msgId }) => {
+      if (!authorized(groupId)) return;
+      const pinIds = store.togglePin(groupId, msgId, userId);
       if (pinIds === null) return;
-      io.to(channelId).emit("pins:updated", { channelId, pinIds });
+      io.to(groupId).emit("pins:updated", { groupId, pinIds });
     });
 
     // E2EE key distribution (Phase 0). The server is a public-key directory: it
@@ -642,53 +645,53 @@ app.prepare().then(async () => {
     socket.on("keys:fetch", ({ userId: target }, ack) => {
       if (typeof ack === "function") ack({ bundles: keyStore.fetchBundles(target) });
     });
-    // Group (sender-keys): return every device bundle of every channel member so
+    // Group (sender-keys): return every device bundle of every group member so
     // a sender can wrap its sender key for each. Members with no published keys
     // (e.g. seeded bots) simply contribute nothing.
-    socket.on("keys:fetchChannel", ({ channelId }, ack) => {
+    socket.on("keys:fetchGroup", ({ groupId }, ack) => {
       if (typeof ack !== "function") return;
-      if (!authorized(channelId)) return ack({ bundles: [] });
+      if (!authorized(groupId)) return ack({ bundles: [] });
       const bundles = store
-        .listMemberIds(channelId)
+        .listMemberIds(groupId)
         .flatMap((id) => keyStore.fetchBundles(id));
       ack({ bundles });
     });
     // Relay a sender-key distribution (opaque pairwise-encrypted envelope) to the
-    // rest of the channel room. The server cannot read it.
-    socket.on("group:senderKey", ({ channelId, sender, env }) => {
-      if (!authorized(channelId)) return;
+    // rest of the group room. The server cannot read it.
+    socket.on("group:senderKey", ({ groupId, sender, env }) => {
+      if (!authorized(groupId)) return;
       // Persist the opaque envelope so a member who is offline now can fetch it
       // on reconnect — without this sender having to be online to answer a pull.
-      if (sender) store.persistSenderKey(channelId, sender, userId, env);
-      // To member rooms (not just the channel room) so a member who received an
+      if (sender) store.persistSenderKey(groupId, sender, userId, env);
+      // To member rooms (not just the group room) so a member who received an
       // encrypted message while viewing elsewhere can still get the key.
       socket
-        .to(memberRooms(channelId))
-        .emit("group:senderKey", { channelId, fromUserId: userId, env });
+        .to(memberRooms(groupId))
+        .emit("group:senderKey", { groupId, fromUserId: userId, env });
     });
     // E2EE read receipt: the sealed read-cursor is opaque. Persist the latest
-    // per (channel, user, device) and relay to the channel's member rooms so
+    // per (group, user, device) and relay to the group's member rooms so
     // "seen by" updates live. deviceId comes from the client (public directory
     // data; the server can't read the env to derive it).
-    socket.on("receipt:update", ({ channelId, deviceId, env }) => {
-      if (!authorized(channelId)) return;
+    socket.on("receipt:update", ({ groupId, deviceId, env }) => {
+      if (!authorized(groupId)) return;
       if (!deviceId || typeof env !== "string" || !env) return;
-      store.persistReceipt(channelId, userId, deviceId, env);
+      store.persistReceipt(groupId, userId, deviceId, env);
       socket
-        .to(memberRooms(channelId))
-        .emit("receipt:update", { channelId, fromUserId: userId, deviceId, env });
+        .to(memberRooms(groupId))
+        .emit("receipt:update", { groupId, fromUserId: userId, deviceId, env });
     });
 
-    // Pull-on-miss: relay a key request to the channel's members (by their user
+    // Pull-on-miss: relay a key request to the group's members (by their user
     // rooms, so the asked-for sender hears it even if not currently in the
-    // channel room). Only the matching sender device responds with a fresh key.
-    socket.on("group:senderKey:request", ({ channelId, sender }) => {
-      if (!authorized(channelId)) return;
-      const rooms = store.listMemberIds(channelId).map((id) => "user:" + id);
+    // group room). Only the matching sender device responds with a fresh key.
+    socket.on("group:senderKey:request", ({ groupId, sender }) => {
+      if (!authorized(groupId)) return;
+      const rooms = store.listMemberIds(groupId).map((id) => "user:" + id);
       if (rooms.length) {
         socket
           .to(rooms)
-          .emit("group:senderKey:request", { channelId, sender, fromUserId: userId });
+          .emit("group:senderKey:request", { groupId, sender, fromUserId: userId });
       }
     });
 
@@ -708,36 +711,36 @@ app.prepare().then(async () => {
     // relay — the responder authorizes (re-encrypts only to a genuine DM
     // participant), so routing by the client-claimed peerId can't leak: an
     // unrelated user's device won't recognize the requester as a DM party.
-    socket.on("dm:reheal:request", ({ channelId, msgId, peerId }) => {
+    socket.on("dm:reheal:request", ({ groupId, msgId, peerId }) => {
       if (!msgId || !peerId) return;
-      const relay = { channelId, msgId, fromUserId: userId };
+      const relay = { groupId, msgId, fromUserId: userId };
       socket.to("user:" + peerId).emit("dm:reheal:request", relay);
       socket.to("user:" + userId).emit("dm:reheal:request", relay); // own other devices
     });
-    socket.on("dm:reheal:offer", ({ channelId, msgId, toUserId, enc }) => {
+    socket.on("dm:reheal:offer", ({ groupId, msgId, toUserId, enc }) => {
       if (!toUserId || typeof enc !== "string" || !enc) return;
-      socket.to("user:" + toUserId).emit("dm:reheal:offer", { channelId, msgId, enc });
+      socket.to("user:" + toUserId).emit("dm:reheal:offer", { groupId, msgId, enc });
     });
 
     // 1:1 calls — signaling relay only. SDP/ICE blobs stay opaque and the
     // media itself is peer-to-peer (DTLS-SRTP), so it never touches the
-    // server. The INVITE is the one server-validated step: the channel must
+    // server. The INVITE is the one server-validated step: the group must
     // be a DM the caller belongs to, and the callee is derived from the DM
     // roster (never client-claimed), so a call can only ring an actual DM
     // counterpart. Everything after routes by callId + toUserId and is
     // dropped client-side for unknown callIds.
-    socket.on("call:invite", async ({ callId, channelId, video }, ack) => {
+    socket.on("call:invite", async ({ callId, groupId, video }, ack) => {
       const reply = (r: Parameters<typeof ack>[0]) => {
         if (typeof ack === "function") ack(r);
       };
       if (typeof callId !== "string" || !callId) {
         return reply({ ok: false, reason: "error" });
       }
-      if (!store.isDm(channelId) || !authorized(channelId)) {
+      if (!store.isDm(groupId) || !authorized(groupId)) {
         return reply({ ok: false, reason: "unauthorized" });
       }
       const peerId = store
-        .listMemberIds(channelId)
+        .listMemberIds(groupId)
         .find((id) => id !== userId);
       if (!peerId) return reply({ ok: false, reason: "error" });
       // Adapter-aware online check (works across nodes with the Redis
@@ -747,7 +750,7 @@ app.prepare().then(async () => {
       if (peerSockets.length === 0) return reply({ ok: false, reason: "offline" });
       socket.to("user:" + peerId).emit("call:invite", {
         callId,
-        channelId,
+        groupId,
         fromUserId: userId,
         video: !!video,
       });
@@ -805,10 +808,10 @@ app.prepare().then(async () => {
     // Every member's per-device packages (including the REQUESTER's other
     // devices — they're group leaves too) plus the authoritative member-user
     // roster, so a committer can diff group leaves against real membership.
-    socket.on("mls:fetchChannel", async ({ channelId }, ack) => {
+    socket.on("mls:fetchGroup", async ({ groupId }, ack) => {
       if (typeof ack !== "function") return;
-      if (!authorized(channelId)) return ack({ packages: [], memberIds: [] });
-      const memberIds = store.listMemberIds(channelId);
+      if (!authorized(groupId)) return ack({ packages: [], memberIds: [] });
+      const memberIds = store.listMemberIds(groupId);
       const packages: { userId: string; deviceId: string; keyPackage: string }[] = [];
       for (const id of memberIds) {
         for (const p of await mlsDs.fetchKeyPackages(id)) {
@@ -817,21 +820,21 @@ app.prepare().then(async () => {
       }
       ack({ packages, memberIds });
     });
-    socket.on("mls:commit", async ({ channelId, fromEpoch, commit, welcomes }, ack) => {
+    socket.on("mls:commit", async ({ groupId, fromEpoch, commit, welcomes }, ack) => {
       const reply = (r: Parameters<typeof ack>[0]) => {
         if (typeof ack === "function") ack(r);
       };
-      if (!authorized(channelId)) return reply({ ok: false, reason: "error", currentEpoch: 0 });
-      const res = await mlsDs.submitCommit({ channelId, senderUser: userId, fromEpoch, commit });
+      if (!authorized(groupId)) return reply({ ok: false, reason: "error", currentEpoch: 0 });
+      const res = await mlsDs.submitCommit({ groupId, senderUser: userId, fromEpoch, commit });
       if (!res.ok) return reply(res);
       // Accepted: fan the commit out to members in order, and deliver Welcomes
       // (live to online targets + queued so offline members get them on connect).
-      socket.to(memberRooms(channelId)).emit("mls:commit", { channelId, seq: res.seq, commit });
+      socket.to(memberRooms(groupId)).emit("mls:commit", { groupId, seq: res.seq, commit });
       for (const w of welcomes ?? []) {
         if (!w.toUserId || !w.toDeviceId) continue;
-        mlsDs.queueWelcome(channelId, w.toUserId, w.toDeviceId, w.welcome, res.seq);
+        mlsDs.queueWelcome(groupId, w.toUserId, w.toDeviceId, w.welcome, res.seq);
         socket.to("user:" + w.toUserId).emit("mls:welcome", {
-          channelId,
+          groupId,
           welcome: w.welcome,
           seq: res.seq,
           toDeviceId: w.toDeviceId,
@@ -839,10 +842,10 @@ app.prepare().then(async () => {
       }
       reply(res);
     });
-    socket.on("mls:fetchCommits", async ({ channelId, sinceSeq }, ack) => {
+    socket.on("mls:fetchCommits", async ({ groupId, sinceSeq }, ack) => {
       if (typeof ack !== "function") return;
-      if (!authorized(channelId)) return ack({ commits: [] });
-      ack({ commits: await mlsDs.commitsSince(channelId, sinceSeq) });
+      if (!authorized(groupId)) return ack({ commits: [] });
+      ack({ commits: await mlsDs.commitsSince(groupId, sinceSeq) });
     });
     socket.on("mls:drainWelcomes", async ({ deviceId }, ack) => {
       if (typeof ack !== "function") return;
@@ -1059,23 +1062,23 @@ app.prepare().then(async () => {
     });
 
     // Startup (after handlers are registered): mark online, replay the current
-    // presence roster, and send this user's authorized channel/DM list.
+    // presence roster, and send this user's authorized group/DM list.
     void (async () => {
       // A signed-in user is a member of the workspace. Idempotent — adds them
       // to the roster on first connect so it reflects real users.
       const addedToWorkspace = store.addWorkspaceMember(userId);
-      // Auto-join the default channels so a new user lands in shared, populated
-      // channels as an explicit member (visibility + E2EE membership). Announce
-      // each newly-joined channel's roster to its room so existing senders
+      // Auto-join the default groups so a new user lands in shared, populated
+      // groups as an explicit member (visibility + E2EE membership). Announce
+      // each newly-joined group's roster to its room so existing senders
       // re-key for the new member on their next message.
-      for (const id of store.joinDefaultChannels(userId)) {
-        const channel = store.getChannel(id, userId);
-        if (channel) emitChannelUpdated(channel);
+      for (const id of store.joinDefaultGroups(userId)) {
+        const group = store.getGroup(id, userId);
+        if (group) emitGroupUpdated(group);
       }
-      // Roster first — it carries each channel's presence, so the
+      // Roster first — it carries each group's presence, so the
       // presence:update events below must come *after* to take effect.
-      socket.emit("channels:list", {
-        channels: store.listChannelsForUser(userId),
+      socket.emit("groups:list", {
+        groups: store.listGroupsForUser(userId),
       });
       socket.emit("workspace:updated", {
         name: store.getWorkspaceName(),
@@ -1090,12 +1093,12 @@ app.prepare().then(async () => {
       store.initUserReads(userId);
       socket.emit("unread:state", { counts: store.unreadState(userId) });
       // Catch-up: replay missed messages + sender keys for ALL the user's
-      // channels (not just the one they open), so an offline gap is recovered
+      // groups (not just the one they open), so an offline gap is recovered
       // everywhere. Runs once per connect; the client backfills only what's
-      // missing. The active channel is also replayed via its channel:join.
+      // missing. The active group is also replayed via its group:join.
       void (async () => {
-        for (const ch of store.listChannelsForUser(userId)) {
-          await replayChannel(ch.id);
+        for (const ch of store.listGroupsForUser(userId)) {
+          await replayGroup(ch.id);
         }
       })();
       const prof0 = store.getProfile(userId);

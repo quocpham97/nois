@@ -14,8 +14,8 @@
 // callers (chat-context, key-backup) need no changes. Every export is async and
 // degrades to a no-op / empty result when Workers/OPFS are unavailable (SSR, or
 // an old browser). One record per message: top-level messages carry
-// conv_id = channelId (parent_id NULL); thread replies carry parent_id
-// (conv_id NULL) so they never leak into channel history. Ordering is by the
+// conv_id = groupId (parent_id NULL); thread replies carry parent_id
+// (conv_id NULL) so they never leak into group history. Ordering is by the
 // time-sortable message `id` (see store.newId).
 //
 // KNOWN LIMIT: the SAHPool VFS takes exclusive OPFS access handles, so the DB is
@@ -138,13 +138,13 @@ const sinkRows = (rows: BackupMessageRow[]) => {
 
 const toRow = (
   id: string,
-  channelId: string,
+  groupId: string,
   convId: string | null,
   parentId: string | null,
   msg: Message,
 ): BackupMessageRow => ({
   id,
-  channel_id: channelId,
+  channel_id: groupId,
   conv_id: convId,
   parent_id: parentId,
   data: JSON.stringify(clean(msg)),
@@ -164,32 +164,32 @@ const dec = (rows: Row[]) => rows.map((r) => JSON.parse(r.data) as Message);
  * Persist (or replace) a top-level message. Only acked messages (those carrying
  * a server `seq`) are stored — optimistic temps are skipped until reconciled.
  */
-export async function putMessage(channelId: string, msg: Message): Promise<void> {
+export async function putMessage(groupId: string, msg: Message): Promise<void> {
   if (msg.seq == null) return;
-  const row = toRow(msg.id, channelId, channelId, null, msg);
+  const row = toRow(msg.id, groupId, groupId, null, msg);
   await rpc({ op: "run", sql: UPSERT, bind: upsertBind(row) }, null);
   sinkRows([row]);
 }
 
 /** Persist (or replace) a thread reply under its parent. */
 export async function putReply(
-  channelId: string,
+  groupId: string,
   parentId: string,
   reply: Message,
 ): Promise<void> {
-  const row = toRow(reply.id, channelId, null, parentId, reply);
+  const row = toRow(reply.id, groupId, null, parentId, reply);
   await rpc({ op: "run", sql: UPSERT, bind: upsertBind(row) }, null);
   sinkRows([row]);
 }
 
 /** Bulk-persist top-level messages (each must carry seq). */
 export async function putMessages(
-  channelId: string,
+  groupId: string,
   msgs: Message[],
 ): Promise<void> {
   const rows = msgs
     .filter((m) => m.seq != null)
-    .map((m) => toRow(m.id, channelId, channelId, null, m));
+    .map((m) => toRow(m.id, groupId, groupId, null, m));
   if (!rows.length) return;
   await rpc(
     { op: "runBatch", items: rows.map((r) => ({ sql: UPSERT, bind: upsertBind(r) })) },
@@ -205,7 +205,7 @@ export async function putMessages(
  * locally). Ordering is by the time-sortable id, so it reflects send time.
  */
 export async function getTopPage(
-  channelId: string,
+  groupId: string,
   beforeId: string | null,
   limit: number,
 ): Promise<{ messages: Message[]; nextCursor: string | null }> {
@@ -215,12 +215,12 @@ export async function getTopPage(
       ? {
           op: "all",
           sql: `SELECT data FROM messages WHERE conv_id = ? AND id < ? ORDER BY id DESC LIMIT ?`,
-          bind: [channelId, beforeId, limit],
+          bind: [groupId, beforeId, limit],
         }
       : {
           op: "all",
           sql: `SELECT data FROM messages WHERE conv_id = ? ORDER BY id DESC LIMIT ?`,
-          bind: [channelId, limit],
+          bind: [groupId, limit],
         },
     [],
   );
@@ -239,7 +239,7 @@ export const SNIPPET_CLOSE = "";
 
 export type SearchHit = {
   id: string;
-  channelId: string;
+  groupId: string;
   /** Parent id when the hit is a thread reply (else null → top-level). */
   parentId: string | null;
   /** Matched text with terms wrapped in SNIPPET_OPEN/CLOSE. */
@@ -299,7 +299,7 @@ export async function searchMessages(
   );
   return rows.map((r) => ({
     id: r.msg_id,
-    channelId: r.channel_id,
+    groupId: r.channel_id,
     parentId: r.parent_id ?? null,
     snippet: r.snip,
     time: r.time ?? undefined,
@@ -308,7 +308,7 @@ export async function searchMessages(
 
 export type MediaHit = {
   id: string;
-  channelId: string;
+  groupId: string;
   /** Parent id when the attachment lives on a thread reply (else null). */
   parentId: string | null;
   attachment: Attachment;
@@ -358,7 +358,7 @@ export async function searchMedia(q: string, limit = 50): Promise<MediaHit[]> {
     }
     out.push({
       id: m.id,
-      channelId: r.channel_id,
+      groupId: r.channel_id,
       parentId: r.parent_id ?? null,
       attachment: a,
       text: m.text ?? "",
@@ -377,7 +377,7 @@ export async function searchMedia(q: string, limit = 50): Promise<MediaHit[]> {
  * id when more history exists above the window.
  */
 export async function getPageAround(
-  channelId: string,
+  groupId: string,
   msgId: string,
   radius = 20,
 ): Promise<{ messages: Message[]; nextCursor: string | null }> {
@@ -386,7 +386,7 @@ export async function getPageAround(
       {
         op: "all",
         sql: `SELECT data FROM messages WHERE conv_id = ? AND id < ? ORDER BY id DESC LIMIT ?`,
-        bind: [channelId, msgId, radius],
+        bind: [groupId, msgId, radius],
       },
       [],
     ),
@@ -394,7 +394,7 @@ export async function getPageAround(
       {
         op: "all",
         sql: `SELECT data FROM messages WHERE conv_id = ? AND id >= ? ORDER BY id ASC`,
-        bind: [channelId, msgId],
+        bind: [groupId, msgId],
       },
       [],
     ),
@@ -424,8 +424,8 @@ export async function getReplies(parentId: string): Promise<Message[]> {
  * recency ordering on boot — without loading each conversation's full history.
  * (conv_id is non-NULL only for top-level rows, so replies never win.)
  */
-export async function getLatestPerChannel(): Promise<
-  { channelId: string; message: Message }[]
+export async function getLatestPerGroup(): Promise<
+  { groupId: string; message: Message }[]
 > {
   const rows = await rpc<{ conv_id: string; data: string }[]>(
     {
@@ -437,7 +437,7 @@ export async function getLatestPerChannel(): Promise<
     [],
   );
   return rows.map((r) => ({
-    channelId: r.conv_id,
+    groupId: r.conv_id,
     message: JSON.parse(r.data) as Message,
   }));
 }
@@ -453,19 +453,19 @@ export async function getMessage(id: string): Promise<Message | undefined> {
 
 /**
  * A stored message plus the conversation it lives in (this device's view) —
- * used by the DM self-heal responder, which must know the channel (to derive
+ * used by the DM self-heal responder, which must know the group (to derive
  * the DM peer for the requester-is-a-participant authorization check). Returns
  * null when the message isn't stored locally.
  */
 export async function getMessageMeta(
   id: string,
-): Promise<{ message: Message; channelId: string } | null> {
+): Promise<{ message: Message; groupId: string } | null> {
   const row = await rpc<{ channel_id: string; data: string } | null>(
     { op: "one", sql: `SELECT channel_id, data FROM messages WHERE id = ?`, bind: [id] },
     null,
   );
   if (!row) return null;
-  return { message: JSON.parse(row.data) as Message, channelId: row.channel_id };
+  return { message: JSON.parse(row.data) as Message, groupId: row.channel_id };
 }
 
 /** Apply a partial update to a stored message (e.g. tombstone, threadCount). */
@@ -503,10 +503,10 @@ export async function clearAll(): Promise<void> {
   await rpc({ op: "run", sql: `DELETE FROM messages`, bind: [] }, null);
 }
 
-/** Drop every message belonging to a channel (e.g. on channel delete). */
-export async function removeChannel(channelId: string): Promise<void> {
+/** Drop every message belonging to a group (e.g. on group delete). */
+export async function removeGroup(groupId: string): Promise<void> {
   await rpc(
-    { op: "run", sql: `DELETE FROM messages WHERE channel_id = ?`, bind: [channelId] },
+    { op: "run", sql: `DELETE FROM messages WHERE channel_id = ?`, bind: [groupId] },
     null,
   );
 }

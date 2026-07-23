@@ -9,7 +9,7 @@
 
 import type {
   Attachment,
-  Channel,
+  Group,
   Message,
   User,
   UserProfile,
@@ -31,17 +31,17 @@ export type Handshake = {
 
 export type EchoPayload = { t: number };
 
-export type ChannelJoinPayload = { channelId: string };
-export type ChannelLeavePayload = { channelId: string };
+export type GroupJoinPayload = { groupId: string };
+export type GroupLeavePayload = { groupId: string };
 
 /** Request a page of older messages before the given cursor (a message seq). */
-export type HistoryMorePayload = { channelId: string; beforeSeq: number };
+export type HistoryMorePayload = { groupId: string; beforeSeq: number };
 
 /** Request a window of messages centred on a specific message (jump-to). */
-export type HistoryAroundPayload = { channelId: string; msgId: string };
+export type HistoryAroundPayload = { groupId: string; msgId: string };
 
 export type MessageSendPayload = {
-  channelId: string;
+  groupId: string;
   text: string;
   /** Client-generated id used to reconcile the optimistic message on ack. */
   clientId: string;
@@ -54,7 +54,7 @@ export type MessageSendPayload = {
 };
 
 export type ThreadReplyPayload = {
-  channelId: string;
+  groupId: string;
   parentId: string;
   text: string;
   clientId: string;
@@ -63,7 +63,7 @@ export type ThreadReplyPayload = {
 };
 
 export type ReactionTogglePayload = {
-  channelId: string;
+  groupId: string;
   msgId: string;
   emoji: string;
 };
@@ -76,31 +76,31 @@ export type DmCreatePayload = {
   enc?: string;
 };
 
-export type ChannelCreatePayload = {
+export type GroupCreatePayload = {
   name: string;
   topic?: string;
   private?: boolean;
 };
 
-/** Ack for channel:create — carries the server-assigned id on success. */
-export type ChannelCreateResult =
-  | { ok: true; channelId: string }
+/** Ack for group:create — carries the server-assigned id on success. */
+export type GroupCreateResult =
+  | { ok: true; groupId: string }
   | { ok: false; error: string };
 
-export type ChannelUpdatePayload = {
-  channelId: string;
+export type GroupUpdatePayload = {
+  groupId: string;
   name?: string;
   topic?: string;
 };
-export type ChannelDeletePayload = { channelId: string };
-export type ChannelMemberPayload = { channelId: string; userId: string };
+export type GroupDeletePayload = { groupId: string };
+export type GroupMemberPayload = { groupId: string; userId: string };
 
-/** Generic ack for channel mutations. */
-export type ChannelOpResult = { ok: true } | { ok: false; error: string };
+/** Generic ack for group mutations. */
+export type GroupOpResult = { ok: true } | { ok: false; error: string };
 
-export type TypingPayload = { channelId: string };
+export type TypingPayload = { groupId: string };
 
-export type PinTogglePayload = { channelId: string; msgId: string };
+export type PinTogglePayload = { groupId: string; msgId: string };
 
 // E2EE key distribution (Phase 0). Devices publish public key bundles and
 // fetch peers' prekey bundles to bootstrap sessions. Public material only —
@@ -114,44 +114,44 @@ export type KeysSupplementPayload = {
   oneTimePreKeys: PublicPreKey[];
 };
 
-// Group (sender-keys) key distribution. `keys:fetchChannel` returns the prekey
-// bundles of every device of every member of a channel (so a sender can wrap
+// Group (sender-keys) key distribution. `keys:fetchGroup` returns the prekey
+// bundles of every device of every member of a group (so a sender can wrap
 // its sender key for each). `group:senderKey` relays a sender-key distribution
 // — a pairwise-encrypted envelope (opaque to the server) — to the room.
-export type KeysFetchChannelPayload = { channelId: string };
+export type KeysFetchGroupPayload = { groupId: string };
 export type GroupSenderKeyPayload = {
-  channelId: string;
+  groupId: string;
   /** The distributing device's id, so the server can persist one env per
    *  sender device for offline replay. Not secret (it's in the key directory). */
   sender: string;
   env: string;
 };
 export type GroupSenderKeyRelay = {
-  channelId: string;
+  groupId: string;
   /** Sender userId, so recipients can route/verify; the env stays opaque. */
   fromUserId: string;
   env: string;
 };
 // Pull-on-miss: a member that can't decrypt a message asks the sender device to
 // re-distribute its sender key. `sender` is the sender's deviceId (from the
-// undecryptable envelope). The server relays it to the channel's members; only
+// undecryptable envelope). The server relays it to the group's members; only
 // the matching sender device responds (with a fresh `group:senderKey`).
 
-// E2EE read receipts (Phase 2). A receipt is a per-channel READ CURSOR
+// E2EE read receipts (Phase 2). A receipt is a per-group READ CURSOR
 // ("I've seen up to seq N"), sealed with the same envelope crypto as messages
 // (group sender-key / DM pairwise / MLS) so the server relays it opaquely and
 // never learns who read what. The server stores the latest blob per
-// (channel, user, device) — no ordering needed, latest wins — and replays them
+// (group, user, device) — no ordering needed, latest wins — and replays them
 // on (re)join. `deviceId` is public key-directory data (the server can't derive
 // it from the opaque env), so the client includes it; recipients merge the max
 // readSeq per user across that user's devices.
 export type ReceiptUpdatePayload = {
-  channelId: string;
+  groupId: string;
   deviceId: string;
   env: string;
 };
 export type ReceiptRelayPayload = {
-  channelId: string;
+  groupId: string;
   fromUserId: string;
   deviceId: string;
   env: string;
@@ -218,28 +218,28 @@ export type HistoryFetchResult = {
 // participant of the DM the message lives in, so a DM can't leak to a third
 // party. Complements the group sender-key pull-on-miss (which has no DM analog).
 export type DmRehealRequestPayload = {
-  /** The REQUESTER's DM channel id (not viewer-symmetric — echoed back so the
+  /** The REQUESTER's DM group id (not viewer-symmetric — echoed back so the
    *  offer applies to the right conversation on the requester's side). */
-  channelId: string;
+  groupId: string;
   msgId: string;
   /** The DM peer, so the server can route the request to that user's devices. */
   peerId: string;
 };
 export type DmRehealRequestRelay = {
-  channelId: string;
+  groupId: string;
   msgId: string;
   /** The requester — whom the responder re-encrypts the plaintext to. */
   fromUserId: string;
 };
 export type DmRehealOfferPayload = {
-  channelId: string;
+  groupId: string;
   msgId: string;
   /** The requester (server routes the offer to that user's room). */
   toUserId: string;
   /** Envelope re-sealed to the requester's current devices. */
   enc: string;
 };
-export type DmRehealOfferRelay = { channelId: string; msgId: string; enc: string };
+export type DmRehealOfferRelay = { groupId: string; msgId: string; enc: string };
 
 // 1:1 voice/video calls (DMs only). The server relays call signaling (SDP
 // offers/answers + trickle ICE, opaque `data` strings) between the two DM
@@ -247,11 +247,11 @@ export type DmRehealOfferRelay = { channelId: string; msgId: string; enc: string
 // touches the server. `callId` is a caller-generated UUID — every event
 // carries it and clients drop events for ids they don't recognize, so only
 // the invite (which creates UI out of nothing) is server-validated: the
-// channel must be a DM the caller belongs to, and the server derives the
+// group must be a DM the caller belongs to, and the server derives the
 // callee from the DM roster rather than trusting a client-claimed peer.
 export type CallInvitePayload = {
   callId: string;
-  channelId: string;
+  groupId: string;
   /** Camera call (true) vs voice-only (false). */
   video: boolean;
 };
@@ -261,9 +261,9 @@ export type CallInviteResult =
   | { ok: false; reason: "offline" | "unauthorized" | "error" };
 export type CallInviteRelay = {
   callId: string;
-  /** The CALLER's DM channel id (not viewer-symmetric) — the callee resolves
+  /** The CALLER's DM group id (not viewer-symmetric) — the callee resolves
    *  its own conversation by `fromUserId`, not by this id. */
-  channelId: string;
+  groupId: string;
   fromUserId: string;
   video: boolean;
 };
@@ -304,23 +304,23 @@ export type RecoveryOfferRelay = { fromDeviceId: string; env: string };
 // Delivery Service). Commits are submitted with the epoch they were built
 // against; the server accepts one per epoch and assigns a global `seq`.
 // Multi-device: every device is its own MLS leaf, so KeyPackages, Welcomes and
-// the drain are DEVICE-granular. `mls:fetchChannel` also returns the channel's
+// the drain are DEVICE-granular. `mls:fetchGroup` also returns the group's
 // member USER ids (the server-authoritative roster) so a committer can diff
 // the group's leaves against actual membership and remove departed users.
 export type MlsPublishKeyPackagePayload = { deviceId: string; keyPackage: string };
-export type MlsFetchChannelPayload = { channelId: string };
+export type MlsFetchGroupPayload = { groupId: string };
 export type MlsMemberPackage = { userId: string; deviceId: string; keyPackage: string };
-export type MlsFetchChannelResult = {
+export type MlsFetchGroupResult = {
   /** Every member's published packages, INCLUDING the requester's other devices. */
   packages: MlsMemberPackage[];
-  /** The channel's member user ids (roster), including the requester. */
+  /** The group's member user ids (roster), including the requester. */
   memberIds: string[];
 };
 // Submit a commit (+ any Welcomes for newly-added member devices). Ack tells the
 // client whether it was accepted (with its ordering `seq`+new `epoch`) or
 // rejected as a stale/concurrent commit (`conflict`) so it can catch up + rebase.
 export type MlsCommitPayload = {
-  channelId: string;
+  groupId: string;
   fromEpoch: number;
   commit: string;
   welcomes: { toUserId: string; toDeviceId: string; welcome: string }[];
@@ -329,28 +329,28 @@ export type MlsCommitAck =
   | { ok: true; seq: number; epoch: number }
   | { ok: false; reason: "conflict" | "no_group" | "error"; currentEpoch: number };
 // Server → members: an accepted commit to apply, in `seq` order.
-export type MlsCommitRelay = { channelId: string; seq: number; commit: string };
+export type MlsCommitRelay = { groupId: string; seq: number; commit: string };
 // Server → a newly-added member device: a Welcome to join with. `toDeviceId`
 // lets the target device act on it (siblings ignore it — theirs arrives
 // separately). `seq` is the commit that added them — catch-up resumes there.
 export type MlsWelcomeRelay = {
-  channelId: string;
+  groupId: string;
   welcome: string;
   seq: number;
   toDeviceId: string;
 };
 // Catch-up: fetch ordered commits after the last one this client applied.
-export type MlsFetchCommitsPayload = { channelId: string; sinceSeq: number };
+export type MlsFetchCommitsPayload = { groupId: string; sinceSeq: number };
 export type MlsFetchCommitsResult = { commits: { seq: number; commit: string }[] };
 // Drain THIS DEVICE's queued Welcomes on (re)connect (added while offline).
 export type MlsDrainWelcomesPayload = { deviceId: string };
 export type MlsDrainWelcomesResult = {
-  welcomes: { channelId: string; welcome: string; seq: number }[];
+  welcomes: { groupId: string; welcome: string; seq: number }[];
 };
 
-export type GroupSenderKeyRequestPayload = { channelId: string; sender: string };
+export type GroupSenderKeyRequestPayload = { groupId: string; sender: string };
 export type GroupSenderKeyRequestRelay = {
-  channelId: string;
+  groupId: string;
   sender: string;
   fromUserId: string;
 };
@@ -363,39 +363,39 @@ export type EchoReply = { t: number; serverTime: number };
 
 /** `nextCursor` is the seq to pass to history:more for older messages, or null. */
 export type HistoryPayload = {
-  channelId: string;
+  groupId: string;
   messages: Message[];
   nextCursor: number | null;
 };
 
 export type HistoryPagePayload = {
-  channelId: string;
+  groupId: string;
   messages: Message[];
   nextCursor: number | null;
 };
 
 /** A window of messages centred on `focusId`, to scroll to and highlight. */
 export type HistoryFocusPayload = {
-  channelId: string;
+  groupId: string;
   messages: Message[];
   nextCursor: number | null;
   focusId: string;
 };
 
-/** Durable history replayed to a socket on channel join (server-persisted). */
+/** Durable history replayed to a socket on group join (server-persisted). */
 export type HistoryReplayPayload = {
-  channelId: string;
+  groupId: string;
   messages: Message[];
   replies: { parentId: string; reply: Message }[];
 };
 
-export type MessageNewPayload = { channelId: string; message: Message };
+export type MessageNewPayload = { groupId: string; message: Message };
 
 /** Echoed to the sender so the optimistic temp message can be swapped out. */
 export type MessageAckPayload = { clientId: string; message: Message };
 
 export type ThreadNewPayload = {
-  channelId: string;
+  groupId: string;
   parentId: string;
   reply: Message;
   threadCount: number;
@@ -406,20 +406,20 @@ export type ThreadNewPayload = {
 export type ReactionAggWire = { e: string; n: number; by: string[] };
 
 export type ReactionUpdatedPayload = {
-  channelId: string;
+  groupId: string;
   msgId: string;
   reactions: ReactionAggWire[];
 };
 
-/** The channels/DMs an authenticated user is authorized to see (roster). */
-export type ChannelsListPayload = { channels: Channel[] };
+/** The groups/DMs an authenticated user is authorized to see (roster). */
+export type GroupsListPayload = { groups: Group[] };
 
 /** Pinned message ids; clients resolve snippets from their local IndexedDB. */
-export type PinsUpdatedPayload = { channelId: string; pinIds: string[] };
+export type PinsUpdatedPayload = { groupId: string; pinIds: string[] };
 
-export type ChannelCreatedPayload = { channel: Channel };
-export type ChannelUpdatedPayload = { channel: Channel };
-export type ChannelDeletedPayload = { channelId: string };
+export type GroupCreatedPayload = { group: Group };
+export type GroupUpdatedPayload = { group: Group };
+export type GroupDeletedPayload = { groupId: string };
 
 export type WorkspaceRenamePayload = { name: string };
 export type WorkspaceMemberPayload = { userId: string };
@@ -430,7 +430,7 @@ export type ProfileUpdatePayload = { patch: Partial<UserProfile> };
 export type ProfileInfoPayload = { profile: UserProfile; user: User };
 
 export type MessageDeletePayload = {
-  channelId: string;
+  groupId: string;
   msgId: string;
   /** The client supplies parentId (it knows); the server keeps no message copy. */
   parentId?: string | null;
@@ -442,7 +442,7 @@ export type MessageDeletePayload = {
  * plaintext). Author-only, enforced server-side against the stored row.
  */
 export type MessageEditPayload = {
-  channelId: string;
+  groupId: string;
   msgId: string;
   /** Thread-reply edits carry the parent id; the server's stored row wins. */
   parentId?: string | null;
@@ -451,7 +451,7 @@ export type MessageEditPayload = {
 };
 
 export type MessageEditedPayload = {
-  channelId: string;
+  groupId: string;
   msgId: string;
   parentId: string | null;
   enc: string;
@@ -459,22 +459,22 @@ export type MessageEditedPayload = {
   editedTs: number;
 };
 export type MessageDeletedPayload = {
-  channelId: string;
+  groupId: string;
   msgId: string;
   parentId: string | null;
 };
 
-export type ChannelReadPayload = { channelId: string };
-/** Full unread snapshot (sent on connect), keyed by channel id. */
+export type GroupReadPayload = { groupId: string };
+/** Full unread snapshot (sent on connect), keyed by group id. */
 export type UnreadStatePayload = { counts: Record<string, number> };
-/** A channel gained a new message the recipient hasn't seen. */
-export type UnreadBumpPayload = { channelId: string };
+/** A group gained a new message the recipient hasn't seen. */
+export type UnreadBumpPayload = { groupId: string };
 
 export type PresenceStatus = "active" | "idle" | "offline";
 export type PresenceUpdatePayload = { userId: string; status: PresenceStatus };
 
 export type TypingUpdatePayload = {
-  channelId: string;
+  groupId: string;
   userId: string;
   isTyping: boolean;
 };
@@ -485,47 +485,47 @@ export type TypingUpdatePayload = {
 
 export type ClientToServerEvents = {
   echo: (payload: EchoPayload, ack: (reply: EchoReply) => void) => void;
-  "channel:join": (payload: ChannelJoinPayload) => void;
-  "channel:leave": (payload: ChannelLeavePayload) => void;
+  "group:join": (payload: GroupJoinPayload) => void;
+  "group:leave": (payload: GroupLeavePayload) => void;
   "history:more": (payload: HistoryMorePayload) => void;
   "history:around": (payload: HistoryAroundPayload) => void;
   "message:send": (payload: MessageSendPayload) => void;
   "thread:reply": (payload: ThreadReplyPayload) => void;
   "reaction:toggle": (payload: ReactionTogglePayload) => void;
   "dm:create": (payload: DmCreatePayload) => void;
-  "channel:create": (
-    payload: ChannelCreatePayload,
-    ack: (result: ChannelCreateResult) => void,
+  "group:create": (
+    payload: GroupCreatePayload,
+    ack: (result: GroupCreateResult) => void,
   ) => void;
-  "channel:update": (
-    payload: ChannelUpdatePayload,
-    ack: (result: ChannelOpResult) => void,
+  "group:update": (
+    payload: GroupUpdatePayload,
+    ack: (result: GroupOpResult) => void,
   ) => void;
-  "channel:delete": (
-    payload: ChannelDeletePayload,
-    ack: (result: ChannelOpResult) => void,
+  "group:delete": (
+    payload: GroupDeletePayload,
+    ack: (result: GroupOpResult) => void,
   ) => void;
-  "channel:addMember": (
-    payload: ChannelMemberPayload,
-    ack: (result: ChannelOpResult) => void,
+  "group:addMember": (
+    payload: GroupMemberPayload,
+    ack: (result: GroupOpResult) => void,
   ) => void;
-  "channel:removeMember": (
-    payload: ChannelMemberPayload,
-    ack: (result: ChannelOpResult) => void,
+  "group:removeMember": (
+    payload: GroupMemberPayload,
+    ack: (result: GroupOpResult) => void,
   ) => void;
   "workspace:rename": (
     payload: WorkspaceRenamePayload,
-    ack: (result: ChannelOpResult) => void,
+    ack: (result: GroupOpResult) => void,
   ) => void;
   "workspace:invite": (
     payload: WorkspaceMemberPayload,
-    ack: (result: ChannelOpResult) => void,
+    ack: (result: GroupOpResult) => void,
   ) => void;
   "workspace:removeMember": (
     payload: WorkspaceMemberPayload,
-    ack: (result: ChannelOpResult) => void,
+    ack: (result: GroupOpResult) => void,
   ) => void;
-  "channel:read": (payload: ChannelReadPayload) => void;
+  "group:read": (payload: GroupReadPayload) => void;
   "message:delete": (payload: MessageDeletePayload) => void;
   "message:edit": (payload: MessageEditPayload) => void;
   "profile:update": (payload: ProfileUpdatePayload) => void;
@@ -538,8 +538,8 @@ export type ClientToServerEvents = {
     payload: KeysFetchPayload,
     ack: (result: KeysFetchResult) => void,
   ) => void;
-  "keys:fetchChannel": (
-    payload: KeysFetchChannelPayload,
+  "keys:fetchGroup": (
+    payload: KeysFetchGroupPayload,
     ack: (result: KeysFetchResult) => void,
   ) => void;
   "group:senderKey": (payload: GroupSenderKeyPayload) => void;
@@ -572,9 +572,9 @@ export type ClientToServerEvents = {
   "call:signal": (payload: CallSignalPayload) => void;
   "call:end": (payload: CallEndPayload) => void;
   "mls:publishKeyPackage": (payload: MlsPublishKeyPackagePayload) => void;
-  "mls:fetchChannel": (
-    payload: MlsFetchChannelPayload,
-    ack: (res: MlsFetchChannelResult) => void,
+  "mls:fetchGroup": (
+    payload: MlsFetchGroupPayload,
+    ack: (res: MlsFetchGroupResult) => void,
   ) => void;
   "mls:commit": (payload: MlsCommitPayload, ack: (res: MlsCommitAck) => void) => void;
   "mls:fetchCommits": (
@@ -588,7 +588,7 @@ export type ClientToServerEvents = {
 };
 
 export type ServerToClientEvents = {
-  "channels:list": (payload: ChannelsListPayload) => void;
+  "groups:list": (payload: GroupsListPayload) => void;
   "history:replay": (payload: HistoryReplayPayload) => void;
   history: (payload: HistoryPayload) => void;
   "history:page": (payload: HistoryPagePayload) => void;
@@ -599,9 +599,9 @@ export type ServerToClientEvents = {
   "message:edited": (payload: MessageEditedPayload) => void;
   "thread:new": (payload: ThreadNewPayload) => void;
   "reaction:updated": (payload: ReactionUpdatedPayload) => void;
-  "channel:created": (payload: ChannelCreatedPayload) => void;
-  "channel:updated": (payload: ChannelUpdatedPayload) => void;
-  "channel:deleted": (payload: ChannelDeletedPayload) => void;
+  "group:created": (payload: GroupCreatedPayload) => void;
+  "group:updated": (payload: GroupUpdatedPayload) => void;
+  "group:deleted": (payload: GroupDeletedPayload) => void;
   "workspace:updated": (payload: WorkspaceInfoPayload) => void;
   "profile:updated": (payload: ProfileInfoPayload) => void;
   "unread:state": (payload: UnreadStatePayload) => void;

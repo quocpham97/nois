@@ -85,7 +85,7 @@ export type ReplyRef = {
 export type Message = {
   id: string;
   /**
-   * Server-assigned, per-channel monotonic sequence for top-level messages.
+   * Server-assigned, per-group monotonic sequence for top-level messages.
    * Drives ordering and IndexedDB pagination on the client. Absent on
    * optimistic (not-yet-acked) messages and on thread replies.
    */
@@ -148,10 +148,10 @@ export type Pinned = {
   text: string;
 };
 
-export type Channel = {
+export type Group = {
   id: string;
   /** The two conversation kinds. A DM is a 1:1; everything else is a group
-   *  (formerly "channel"). This field — not the id — is the sole discriminator. */
+   *  (formerly "group"). This field — not the id — is the sole discriminator. */
   type: "group" | "dm";
   name: string;
   icon?: "hash" | "lock" | "megaphone";
@@ -214,7 +214,7 @@ export type UserProfile = {
   bubbleTheme?: string;
   /** Quick emoji sent by the composer's Like button. */
   likeEmoji?: string;
-  /** Archived conversation (channel/DM) ids. */
+  /** Archived conversation (group/DM) ids. */
   archived?: string[];
   /**
    * Link previews are OPT-IN: generating one makes the sender's browser fetch
@@ -230,7 +230,7 @@ export type UserProfile = {
 };
 
 /** Push preferences. `level`: 0=all, 1=direct messages & mentions, 2=none.
- *  E2EE caveat: the server can't detect mentions in encrypted group channels,
+ *  E2EE caveat: the server can't detect mentions in encrypted group groups,
  *  so at level 1 it pushes DMs only (documented in the settings copy). */
 export type NotifPrefs = {
   level: 0 | 1 | 2;
@@ -256,7 +256,7 @@ export function gradientFor(theme?: string): string {
 /** Quick-emoji choices offered in Customize chat. */
 export const QUICK_EMOJI = ["👍", "❤️", "😂", "🔥", "🎉", "☕"];
 
-export type ChannelMap = Record<string, Channel>;
+export type GroupMap = Record<string, Group>;
 
 export type Workspace = {
   name: string;
@@ -279,12 +279,12 @@ export function presenceLabel(p?: Presence): string {
 }
 
 /**
- * The members we can actually see in a channel: everyone who has posted in the
- * loaded history, plus the viewer (and the partner for a DM). Public channels
+ * The members we can actually see in a group: everyone who has posted in the
+ * loaded history, plus the viewer (and the partner for a DM). Public groups
  * aren't membership-tracked server-side, so this is the truthful participant
- * set — shared by the header avatars and the channel-info panel so they match.
+ * set — shared by the header avatars and the group-info panel so they match.
  */
-export function channelMembers(ch: Channel, me: User): User[] {
+export function groupMembers(ch: Group, me: User): User[] {
   // Prefer the server's authoritative roster; fall back to participants seen in
   // loaded history (e.g. before the roster has arrived, or optimistic state).
   if (ch.memberList) return ch.memberList;

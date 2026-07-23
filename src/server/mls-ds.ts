@@ -5,7 +5,7 @@
 // a specific epoch, and all members must apply commits in the SAME order or
 // their ratchet trees diverge irrecoverably. A pure relay can't guarantee that.
 // This service does:
-//   1. GROUP CREATION GATING — the first commit for a channel establishes the
+//   1. GROUP CREATION GATING — the first commit for a group establishes the
 //      one canonical group; later "create" attempts are rejected so those
 //      members JOIN (via Welcome) instead of forking a second group.
 //   2. TOTAL COMMIT ORDERING — a commit is accepted only when its `fromEpoch`
@@ -19,22 +19,22 @@
 //
 // The server only ever sees opaque wire-encoded MLSMessages; it orders them, it
 // can't read them. Durable in Postgres; a small in-memory epoch cache + a
-// per-channel mutex serialize submissions within this process.
+// per-group mutex serialize submissions within this process.
 
 import { getPool } from "../lib/db";
 
 type GroupHead = { epoch: number; lastSeq: number };
 
 const heads = new Map<string, GroupHead>();
-// Per-channel promise chain so concurrent submitCommit calls for the same
-// channel are serialized (single-process single-accept-per-epoch guarantee).
+// Per-group promise chain so concurrent submitCommit calls for the same
+// group are serialized (single-process single-accept-per-epoch guarantee).
 const locks = new Map<string, Promise<unknown>>();
 
-function withLock<T>(channelId: string, fn: () => Promise<T>): Promise<T> {
-  const prev = locks.get(channelId) ?? Promise.resolve();
+function withLock<T>(groupId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = locks.get(groupId) ?? Promise.resolve();
   const next = prev.then(fn, fn);
   locks.set(
-    channelId,
+    groupId,
     next.then(
       () => undefined,
       () => undefined,
@@ -110,29 +110,29 @@ export type SubmitResult =
  * fromEpoch === current epoch and rejects with `conflict` on a mismatch.
  */
 export function submitCommit(args: {
-  channelId: string;
+  groupId: string;
   senderUser: string;
   fromEpoch: number;
   commit: string;
 }): Promise<SubmitResult> {
-  const { channelId, senderUser, fromEpoch, commit } = args;
-  return withLock(channelId, async () => {
-    const head = heads.get(channelId);
+  const { groupId, senderUser, fromEpoch, commit } = args;
+  return withLock(groupId, async () => {
+    const head = heads.get(groupId);
     try {
       if (!head) {
-        // Establishment: the first commit for this channel creates the group.
+        // Establishment: the first commit for this group creates the group.
         if (fromEpoch !== 0) return { ok: false, reason: "no_group", currentEpoch: 0 };
         const seq = 1;
         const epoch = 1;
         await getPool().query(
           "INSERT INTO mls_commit (group_id, seq, from_epoch, sender_user, commit_msg) VALUES ($1,$2,$3,$4,$5)",
-          [channelId, seq, fromEpoch, senderUser, commit],
+          [groupId, seq, fromEpoch, senderUser, commit],
         );
         await getPool().query(
           "INSERT INTO mls_group (group_id, epoch, last_seq) VALUES ($1,$2,$3) ON CONFLICT (group_id) DO NOTHING",
-          [channelId, epoch, seq],
+          [groupId, epoch, seq],
         );
-        heads.set(channelId, { epoch, lastSeq: seq });
+        heads.set(groupId, { epoch, lastSeq: seq });
         return { ok: true, seq, epoch };
       }
       if (fromEpoch !== head.epoch) {
@@ -142,13 +142,13 @@ export function submitCommit(args: {
       const epoch = head.epoch + 1;
       await getPool().query(
         "INSERT INTO mls_commit (group_id, seq, from_epoch, sender_user, commit_msg) VALUES ($1,$2,$3,$4,$5)",
-        [channelId, seq, fromEpoch, senderUser, commit],
+        [groupId, seq, fromEpoch, senderUser, commit],
       );
       await getPool().query(
         "UPDATE mls_group SET epoch=$2, last_seq=$3 WHERE group_id=$1",
-        [channelId, epoch, seq],
+        [groupId, epoch, seq],
       );
-      heads.set(channelId, { epoch, lastSeq: seq });
+      heads.set(groupId, { epoch, lastSeq: seq });
       return { ok: true, seq, epoch };
     } catch (e) {
       console.error("[mls-ds] submitCommit:", (e as Error).message);
@@ -159,13 +159,13 @@ export function submitCommit(args: {
 
 /** Ordered commits with seq strictly greater than `sinceSeq` (for catch-up). */
 export async function commitsSince(
-  channelId: string,
+  groupId: string,
   sinceSeq: number,
 ): Promise<{ seq: number; commit: string }[]> {
   try {
     const { rows } = await getPool().query(
       "SELECT seq, commit_msg FROM mls_commit WHERE group_id=$1 AND seq>$2 ORDER BY seq",
-      [channelId, sinceSeq],
+      [groupId, sinceSeq],
     );
     return rows.map((r) => ({ seq: Number(r.seq), commit: r.commit_msg as string }));
   } catch (e) {
@@ -175,14 +175,14 @@ export async function commitsSince(
 }
 
 /** Current epoch of a group (0 if it doesn't exist yet). */
-export function groupEpoch(channelId: string): number {
-  return heads.get(channelId)?.epoch ?? 0;
+export function groupEpoch(groupId: string): number {
+  return heads.get(groupId)?.epoch ?? 0;
 }
 
 // --- welcomes --------------------------------------------------------------
 
 export function queueWelcome(
-  channelId: string,
+  groupId: string,
   toUser: string,
   toDevice: string,
   welcome: string,
@@ -191,7 +191,7 @@ export function queueWelcome(
   void getPool()
     .query(
       "INSERT INTO mls_welcome (group_id, to_user, to_device, welcome, seq) VALUES ($1,$2,$3,$4,$5)",
-      [channelId, toUser, toDevice, welcome, seq],
+      [groupId, toUser, toDevice, welcome, seq],
     )
     .catch((e) => console.error("[mls-ds] queueWelcome:", (e as Error).message));
 }
@@ -202,7 +202,7 @@ export function queueWelcome(
 export async function drainWelcomes(
   toUser: string,
   toDevice: string,
-): Promise<{ channelId: string; welcome: string; seq: number }[]> {
+): Promise<{ groupId: string; welcome: string; seq: number }[]> {
   try {
     const { rows } = await getPool().query(
       `DELETE FROM mls_welcome WHERE to_user=$1 AND to_device=$2
@@ -210,7 +210,7 @@ export async function drainWelcomes(
       [toUser, toDevice],
     );
     return rows.map((r) => ({
-      channelId: r.group_id as string,
+      groupId: r.group_id as string,
       welcome: r.welcome as string,
       seq: Number(r.seq),
     }));

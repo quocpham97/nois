@@ -98,7 +98,7 @@ function openDb(userId: string): Promise<IDBDatabase> {
       if (!req.result.objectStoreNames.contains(STORE)) {
         req.result.createObjectStore(STORE);
       }
-      // v2: per-channel sender-key chains for group encryption (crypto/group.ts).
+      // v2: per-group sender-key chains for group encryption (crypto/group.ts).
       if (!req.result.objectStoreNames.contains(GROUP_STORE)) {
         req.result.createObjectStore(GROUP_STORE);
       }
