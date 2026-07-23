@@ -142,7 +142,7 @@ function BrandPanel() {
 
       <div className="relative mt-[52px] max-w-[520px]">
         <h1 className="m-0 text-balance text-[46px] font-extrabold leading-[1.08] tracking-[-0.03em] text-white">
-          Keep every conversation in the loop.
+          Say more. Stay close.
         </h1>
         <p className="mt-5 max-w-[440px] text-[18px] leading-normal text-white/85 dark:text-[#E4E6EB]/70">
           Fast, private messaging for the people and teams you actually want to
