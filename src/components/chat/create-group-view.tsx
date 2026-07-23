@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Hash, Lock } from "lucide-react";
 import { useChat } from "./chat-context";
 
-/** Mirror of the server's slug rule, for a live preview of the channel id. */
+/** Mirror of the server's slug rule, for a live preview of the group id. */
 const toSlug = (s: string) =>
   s
     .trim()
@@ -12,8 +12,8 @@ const toSlug = (s: string) =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
 
-export function CreateChannelView() {
-  const { closeCreateChannel, createChannel } = useChat();
+export function CreateGroupView() {
+  const { closeCreateGroup, createGroup } = useChat();
   const [name, setName] = useState("");
   const [topic, setTopic] = useState("");
   const [isPrivate, setIsPrivate] = useState(false);
@@ -24,15 +24,15 @@ export function CreateChannelView() {
 
   const submit = () => {
     setError(null);
-    createChannel(name, topic, isPrivate, setError);
+    createGroup(name, topic, isPrivate, setError);
   };
 
   return (
     <>
       <div className="flex h-14 items-center gap-3 border-b border-app-border px-4">
-        <h2 className="m-0 text-[16px] font-bold">Create a channel</h2>
+        <h2 className="m-0 text-[16px] font-bold">Create a group</h2>
         <button
-          onClick={closeCreateChannel}
+          onClick={closeCreateGroup}
           className="ml-auto rounded-[5px] border border-app-border px-2.5 py-1 text-[13px] text-app-muted hover:bg-panel-hover"
         >
           Cancel
@@ -42,7 +42,7 @@ export function CreateChannelView() {
       <div className="app-scroll flex-1 overflow-y-auto">
         <div className="mx-auto max-w-[560px] px-6 py-6">
           <p className="m-0 mb-6 text-[13.5px] text-app-muted">
-            Channels are where your team communicates. They&apos;re best
+            Groups are where your team communicates. They&apos;re best
             organized around a topic — #marketing, for example.
           </p>
 
@@ -92,7 +92,7 @@ export function CreateChannelView() {
               if (e.key === "Enter" && canCreate) submit();
             }}
             maxLength={120}
-            placeholder="What's this channel about?"
+            placeholder="What's this group about?"
             className="w-full rounded-lg border border-app-border bg-panel-2 px-3 py-2.5 text-[14px] text-app-text outline-none focus:border-border-strong"
           />
 
@@ -108,7 +108,7 @@ export function CreateChannelView() {
                 Make private
               </span>
               <span className="block text-[12.5px] text-app-muted">
-                When a channel is private, it can only be viewed or joined by
+                When a group is private, it can only be viewed or joined by
                 invitation.
               </span>
             </span>
@@ -143,7 +143,7 @@ export function CreateChannelView() {
                 color: canCreate ? "var(--on-accent)" : "var(--app-faint)",
               }}
             >
-              Create channel
+              Create group
             </button>
           </div>
         </div>

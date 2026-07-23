@@ -5,46 +5,46 @@ import { Search, SquarePen } from "lucide-react";
 import { useChat } from "../chat/chat-context";
 import { previewOf, ConvAvatar } from "../chat/sidebar";
 import { Avatar } from "../chat/bits";
-import type { Channel } from "@/lib/chat-data";
+import type { Group } from "@/lib/chat-data";
 
 // Chats tab — the mobile home. Mirrors the "Chats" screen of Messenger Mobile:
 // big title + compose, a search pill, an "active now" avatar strip, then the
 // conversation rows. All data is live from useChat(); rows reuse the desktop
 // sidebar's previewOf() and ConvAvatar so previews/avatars stay identical.
-function lastTs(ch: Channel): number {
+function lastTs(ch: Group): number {
   return ch.messages[ch.messages.length - 1]?.ts ?? 0;
 }
 
 export function ChatsScreen() {
   const {
-    channels,
-    channelOrder,
+    groups,
+    groupOrder,
     dmOrder,
     isArchived,
-    unreadByChannel,
-    selectChannel,
+    unreadByGroup,
+    selectGroup,
     openCompose,
     openSearch,
     myUser,
   } = useChat();
 
   const rows = useMemo(() => {
-    const ids = [...channelOrder, ...dmOrder].filter(
-      (id) => channels[id] && !isArchived(id),
+    const ids = [...groupOrder, ...dmOrder].filter(
+      (id) => groups[id] && !isArchived(id),
     );
     return ids
-      .map((id) => channels[id])
+      .map((id) => groups[id])
       .sort((a, b) => lastTs(b) - lastTs(a));
-  }, [channels, channelOrder, dmOrder, isArchived]);
+  }, [groups, groupOrder, dmOrder, isArchived]);
 
   // "Active now" strip: DM partners currently online (presence rides on the DM
-  // channel), tapping opens that DM.
+  // group), tapping opens that DM.
   const active = useMemo(
     () =>
-      Object.values(channels).filter(
+      Object.values(groups).filter(
         (ch) => ch.type === "dm" && ch.presence === "active" && ch.user,
       ),
-    [channels],
+    [groups],
   );
 
   return (
@@ -77,7 +77,7 @@ export function ChatsScreen() {
           {active.map((ch) => (
             <button
               key={ch.id}
-              onClick={() => selectChannel(ch.id)}
+              onClick={() => selectGroup(ch.id)}
               className="flex w-[58px] shrink-0 flex-col items-center gap-1.5"
             >
               <span className="relative">
@@ -105,12 +105,12 @@ export function ChatsScreen() {
         ) : (
           rows.map((ch) => {
             const pv = previewOf(ch);
-            const unread = (unreadByChannel[ch.id] ?? 0) > 0;
+            const unread = (unreadByGroup[ch.id] ?? 0) > 0;
             const name = ch.type === "dm" ? ch.user?.name ?? ch.name : ch.name;
             return (
               <button
                 key={ch.id}
-                onClick={() => selectChannel(ch.id)}
+                onClick={() => selectGroup(ch.id)}
                 className="flex w-full items-center gap-3 rounded-2xl px-2.5 py-2 text-left active:bg-app-hover"
               >
                 <ConvAvatar ch={ch} me={myUser} size={56} />

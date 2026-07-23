@@ -3,7 +3,7 @@
 _Created 2026-06-15 · Research & design (not yet implemented)_
 
 This is the deferred "later" task. It has three independent strands — **authentication**,
-**authorization**, and **horizontal scale** — plus a follow-up (**channel-list sync**)
+**authorization**, and **horizontal scale** — plus a follow-up (**group-list sync**)
 that auth naturally subsumes. Each is grounded in the code we built in Phases A–E.
 
 ## Where the code is today (the gaps)
@@ -11,8 +11,8 @@ that auth naturally subsumes. Each is grounded in the code we built in Phases A�
 - **Identity is spoofable.** `SocketProvider` sends `auth: { userId }` resolved from
   `?as=<key>` (default `alex`); the server trusts it verbatim (`server.ts`
   `socket.handshake.auth?.userId`). Anyone can connect as anyone.
-- **No authorization.** `channel:join` accepts *any* `channelId` that exists
-  (`store.channelExists`). Private channels (`launch-q3`) and other people's DMs are
+- **No authorization.** `group:join` accepts *any* `groupId` that exists
+  (`store.groupExists`). Private groups (`launch-q3`) and other people's DMs are
   joinable by any client. `message:send` / `reaction:toggle` / `thread:reply` aren't
   membership-checked either.
 - **State is per-process.** Rooms live in one Socket.IO instance; presence is an
@@ -48,14 +48,14 @@ page + session issuance, and a `users` table (replace the seeded `users` map).
 
 ## Part B — Authorization & per-user correctness
 
-**Membership model:** add a `channel_members(channel_id, user_id, role)` table. Then
+**Membership model:** add a `group_members(group_id, user_id, role)` table. Then
 authorize every room-scoped action against it:
 
-- `channel:join` / `history:more` → must be a member (reject otherwise). Closes the
-  private-channel and DM leakage.
+- `group:join` / `history:more` → must be a member (reject otherwise). Closes the
+  private-group and DM leakage.
 - `message:send` / `thread:reply` / `reaction:toggle` → must be a member; ignore the
   client-sent author entirely and use `socket.data.user`.
-- `dm:create` → both participants become members of the DM channel.
+- `dm:create` → both participants become members of the DM group.
 
 **Per-user reactions:** the current single `mine` flag on a reaction is viewer-relative
 and only correct for one identity. Replace with a `message_reactions(message_id,
@@ -114,12 +114,12 @@ load balancer.
 
 ---
 
-## Part D — Channel-list sync (folds in here)
+## Part D — Group-list sync (folds in here)
 
-The deferred follow-up: the client still seeds its channel/DM list from
-`seedChannels()` locally, so a persisted new DM doesn't reappear after restart. With
+The deferred follow-up: the client still seeds its group/DM list from
+`seedGroups()` locally, so a persisted new DM doesn't reappear after restart. With
 auth + membership, the server can send each client **its authorized roster** on connect
-(`channels:list`), and the client builds the sidebar from that instead of the seed.
+(`groups:list`), and the client builds the sidebar from that instead of the seed.
 This both fixes the restart gap and enforces authorization on what's even listed.
 
 ---
@@ -128,9 +128,9 @@ This both fixes the restart gap and enforces authorization on what's even listed
 
 1. **Auth foundation** — login flow + session, `users` table, `io.use` verification,
    author from `socket.data.user`, drop `?as=`.
-2. **Authorization** — `channel_members`, enforce on join/send/history; per-user
+2. **Authorization** — `group_members`, enforce on join/send/history; per-user
    `message_reactions`.
-3. **Channel-list sync** — server-driven roster on connect (depends on 1–2).
+3. **Group-list sync** — server-driven roster on connect (depends on 1–2).
 4. **Shared persistence** — migrate SQLite → Postgres.
 5. **Redis adapter + Redis presence** — multi-node broadcast + cross-node presence.
 6. **Deploy** — Docker + Redis + Postgres + LB (WebSocket-only to skip sticky sessions,

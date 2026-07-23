@@ -9,7 +9,7 @@
 // relays these opaquely, exactly like the sender-keys envelopes.
 //
 // MIGRATION NOTE: this implements the same conceptual surface as
-// crypto/group.ts (a per-channel group cipher) and is intended to replace it
+// crypto/group.ts (a per-group group cipher) and is intended to replace it
 // behind chat-context. The cutover swaps three things vs. sender keys:
 //   * published key material: an MLS KeyPackage instead of prekeys (Phase 0)
 //   * membership: a Commit + Welcome (relayed) instead of a sender-key rotation
@@ -178,14 +178,14 @@ export function mlsDecodeKeyPackage(b64: string): KeyPackage | null {
 
 // --- group lifecycle -------------------------------------------------------
 
-/** Create a new MLS group for a channel, with this device as the sole member. */
+/** Create a new MLS group for a group, with this device as the sole member. */
 export async function mlsCreateGroup(
-  channelId: string,
+  groupId: string,
   kp: MlsKeyPair,
 ): Promise<ClientState> {
   const cs = await mlsCiphersuite();
   return createGroup(
-    new TextEncoder().encode(channelId),
+    new TextEncoder().encode(groupId),
     kp.publicPackage,
     kp.privatePackage,
     [],

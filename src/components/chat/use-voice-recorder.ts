@@ -148,7 +148,7 @@ export function useVoiceRecorder(onFinish: (note: VoiceNote) => void) {
     recorderRef.current?.stop();
   }, []);
 
-  // Unmount (channel switch) while recording → discard, release the mic.
+  // Unmount (group switch) while recording → discard, release the mic.
   useEffect(
     () => () => {
       cancelledRef.current = true;

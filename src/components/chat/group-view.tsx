@@ -3,9 +3,9 @@
 import { useEffect, useRef } from "react";
 import { Info, Phone, Pin, Search, Video, X } from "lucide-react";
 import {
-  type Channel,
+  type Group,
   type Message as Msg,
-  channelMembers,
+  groupMembers,
   deriveUser,
   presenceColor,
   presenceLabel,
@@ -13,26 +13,26 @@ import {
 import { useChat } from "./chat-context";
 import { useSocket } from "./socket-context";
 import { useCall } from "./call-context";
-import { Avatar, ChannelIcon } from "./bits";
+import { Avatar, GroupIcon } from "./bits";
 import { ConvAvatar } from "./sidebar";
 import { Message } from "./message";
 import { Composer } from "./composer";
 
-function ChannelHeader({ ch }: { ch: Channel }) {
+function GroupHeader({ ch }: { ch: Group }) {
   const {
     openSearch,
     pinnedPanelFor,
     togglePinnedPanel,
     togglePin,
     jumpToMessage,
-    channelInfoOpen,
-    toggleChannelInfo,
+    groupInfoOpen,
+    toggleGroupInfo,
   } = useChat();
   const { user: me } = useSocket();
   const { startCall, call } = useCall();
   const inCall = call != null;
   const isDm = ch.type === "dm";
-  const members = channelMembers(ch, me);
+  const members = groupMembers(ch, me);
   const pins = ch.pinned || [];
   const panelOpen = pinnedPanelFor === ch.id;
 
@@ -71,7 +71,7 @@ function ChannelHeader({ ch }: { ch: Channel }) {
           </span>
         ) : (
           <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-panel">
-            <ChannelIcon channel={ch} color="var(--app-text)" size={16} />
+            <GroupIcon group={ch} color="var(--app-text)" size={16} />
           </span>
         )}
         <div className="min-w-0">
@@ -105,7 +105,7 @@ function ChannelHeader({ ch }: { ch: Channel }) {
       <div className="ml-auto flex items-center gap-0.5">
         {!isDm && (
           <button
-            onClick={toggleChannelInfo}
+            onClick={toggleGroupInfo}
             title="View members"
             className="flex items-center gap-1.5 rounded-full px-2 py-1 text-[13px] text-app-muted hover:bg-app-hover"
           >
@@ -214,11 +214,11 @@ function ChannelHeader({ ch }: { ch: Channel }) {
           )}
         </div>
         <button
-          onClick={toggleChannelInfo}
-          title="Channel info"
+          onClick={toggleGroupInfo}
+          title="Group info"
           className="flex size-10 items-center justify-center rounded-full hover:bg-app-hover"
           style={{
-            color: channelInfoOpen ? "var(--app-accent-hover)" : "var(--app-accent)",
+            color: groupInfoOpen ? "var(--app-accent-hover)" : "var(--app-accent)",
           }}
         >
           <Info size={19} strokeWidth={1.9} />
@@ -228,7 +228,7 @@ function ChannelHeader({ ch }: { ch: Channel }) {
   );
 }
 
-function PinnedBar({ ch }: { ch: Channel }) {
+function PinnedBar({ ch }: { ch: Group }) {
   const { pinnedBarHidden, hidePinnedBar, jumpToMessage } = useChat();
   if (!ch.pinned || ch.pinned.length === 0 || pinnedBarHidden[ch.id])
     return null;
@@ -276,9 +276,9 @@ function firstName(uid: string): string {
 }
 
 /** Messenger-style typing indicator: the typer's avatar + a dots bubble. */
-function TypingIndicator({ ch }: { ch: Channel }) {
-  const { typingByChannel, userId } = useChat();
-  const typers = (typingByChannel[ch.id] || []).filter((u) => u !== userId);
+function TypingIndicator({ ch }: { ch: Group }) {
+  const { typingByGroup, userId } = useChat();
+  const typers = (typingByGroup[ch.id] || []).filter((u) => u !== userId);
   if (typers.length === 0) {
     return <div className="h-2" />;
   }
@@ -310,10 +310,10 @@ function TypingIndicator({ ch }: { ch: Channel }) {
 }
 
 /** Intro block at the very start of a conversation's history. */
-function ConvIntro({ ch }: { ch: Channel }) {
+function ConvIntro({ ch }: { ch: Group }) {
   const { myUser } = useChat();
   const isDm = ch.type === "dm";
-  const members = channelMembers(ch, myUser);
+  const members = groupMembers(ch, myUser);
   return (
     <div className="flex flex-col items-center px-5 pb-3 pt-6 text-center">
       <ConvAvatar ch={ch} me={myUser} size={72} />
@@ -329,7 +329,7 @@ function ConvIntro({ ch }: { ch: Channel }) {
   );
 }
 
-function EmptyState({ ch }: { ch: Channel }) {
+function EmptyState({ ch }: { ch: Group }) {
   const { sendMessage } = useChat();
   const isDm = ch.type === "dm";
   return (
@@ -352,7 +352,7 @@ function EmptyState({ ch }: { ch: Channel }) {
         </div>
       ) : (
         <div className="mb-4 flex size-[72px] items-center justify-center rounded-full border border-app-border bg-panel text-app-muted">
-          <ChannelIcon channel={ch} color="var(--app-muted)" size={28} />
+          <GroupIcon group={ch} color="var(--app-muted)" size={28} />
         </div>
       )}
       <h2 className="m-0 text-[22px] font-bold">
@@ -373,13 +373,13 @@ function EmptyState({ ch }: { ch: Channel }) {
   );
 }
 
-export function ChannelView({ ch }: { ch: Channel }) {
+export function GroupView({ ch }: { ch: Group }) {
   const { scrollRef, historyCursor, loadOlder, highlightMsgId, clearHighlight } =
     useChat();
   const empty = ch.messages.length === 0;
   const hasOlder = historyCursor[ch.id] != null;
 
-  // Pin to the latest message on channel open / history load / new bottom
+  // Pin to the latest message on group open / history load / new bottom
   // message — but not when older pages are prepended (same last id) or while
   // jumping to a highlighted message (which positions itself).
   const lastId = ch.messages[ch.messages.length - 1]?.id;
@@ -388,10 +388,10 @@ export function ChannelView({ ch }: { ch: Channel }) {
     const el = scrollRef.current;
     if (!el) return;
     const prev = lastSeen.current;
-    const channelChanged = prev.chId !== ch.id;
+    const groupChanged = prev.chId !== ch.id;
     const newBottom = prev.lastId !== lastId;
     lastSeen.current = { chId: ch.id, lastId };
-    if ((channelChanged || newBottom) && !highlightMsgId) {
+    if ((groupChanged || newBottom) && !highlightMsgId) {
       requestAnimationFrame(() => {
         el.scrollTop = el.scrollHeight;
       });
@@ -423,7 +423,7 @@ export function ChannelView({ ch }: { ch: Channel }) {
 
   return (
     <>
-      <ChannelHeader ch={ch} />
+      <GroupHeader ch={ch} />
       <PinnedBar ch={ch} />
       <div
         ref={scrollRef}
@@ -458,7 +458,7 @@ export function ChannelView({ ch }: { ch: Channel }) {
         )}
       </div>
       {!empty && <TypingIndicator ch={ch} />}
-      <Composer channel={ch} inThread={false} />
+      <Composer group={ch} inThread={false} />
     </>
   );
 }

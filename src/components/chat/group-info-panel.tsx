@@ -18,7 +18,7 @@ import type { Attachment, User } from "@/lib/chat-data";
 import {
   CHAT_GRADIENTS,
   QUICK_EMOJI,
-  channelMembers,
+  groupMembers,
   presenceColor,
   presenceLabel,
 } from "@/lib/chat-data";
@@ -84,15 +84,15 @@ function MediaThumb({ a }: { a: Attachment }) {
   );
 }
 
-export function ChannelInfoPanel() {
+export function GroupInfoPanel() {
   const {
-    channels,
-    currentChannelId,
-    closeChannelInfo,
-    updateChannel,
-    deleteChannel,
-    addChannelMember,
-    removeChannelMember,
+    groups,
+    currentGroupId,
+    closeGroupInfo,
+    updateGroup,
+    deleteGroup,
+    addGroupMember,
+    removeGroupMember,
     myUser: me,
     workspaceMembers,
     bubbleTheme,
@@ -111,10 +111,10 @@ export function ChannelInfoPanel() {
   const [filesOpen, setFilesOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const ch = channels[currentChannelId];
+  const ch = groups[currentGroupId];
   if (!ch) return null;
   const isDm = ch.type === "dm";
-  const members = channelMembers(ch, me);
+  const members = groupMembers(ch, me);
   const memberNames = new Set(members.map((m) => m.name));
   const addable = workspaceMembers.filter((u) => !memberNames.has(u.name));
 
@@ -134,7 +134,7 @@ export function ChannelInfoPanel() {
     setEditing(true);
   };
   const saveEdit = () => {
-    updateChannel(ch.id, { name: editName, topic: editTopic }, setError);
+    updateGroup(ch.id, { name: editName, topic: editTopic }, setError);
     setEditing(false);
   };
 
@@ -158,7 +158,7 @@ export function ChannelInfoPanel() {
   return (
     <aside className="relative flex w-[340px] shrink-0 flex-col border-l border-app-border bg-app-bg">
       <button
-        onClick={closeChannelInfo}
+        onClick={closeGroupInfo}
         title="Close"
         className="absolute right-3 top-3 z-[1] flex size-8 items-center justify-center rounded-full text-app-muted hover:bg-app-hover hover:text-app-text"
       >
@@ -250,7 +250,7 @@ export function ChannelInfoPanel() {
           </div>
         </Section>
 
-        {/* Chat info (channels) */}
+        {/* Chat info (groups) */}
         {!isDm &&
           (editing ? (
             <Section label="Edit group">
@@ -307,7 +307,7 @@ export function ChannelInfoPanel() {
             </Section>
           ))}
 
-        {/* Members (channels) */}
+        {/* Members (groups) */}
         {!isDm && (
           <Section
             label={`Chat members · ${members.length}`}
@@ -330,7 +330,7 @@ export function ChannelInfoPanel() {
                   addable.map((u) => (
                     <button
                       key={u.name}
-                      onClick={() => addChannelMember(ch.id, memberId(u))}
+                      onClick={() => addGroupMember(ch.id, memberId(u))}
                       className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left hover:bg-panel-hover"
                     >
                       <Avatar initials={u.initials} bg={u.bg} size={24} radius={999} />
@@ -355,7 +355,7 @@ export function ChannelInfoPanel() {
                     <span className="text-[12px] text-app-faint">you</span>
                   )}
                   <button
-                    onClick={() => removeChannelMember(ch.id, memberId(u))}
+                    onClick={() => removeGroupMember(ch.id, memberId(u))}
                     title={`Remove ${u.name}`}
                     className="ml-auto flex size-6 items-center justify-center rounded-full text-app-muted opacity-0 hover:bg-panel hover:text-app-red group-hover:opacity-100"
                   >
@@ -435,7 +435,7 @@ export function ChannelInfoPanel() {
               </div>
               <div className="flex gap-2">
                 <button
-                  onClick={() => deleteChannel(ch.id, setError)}
+                  onClick={() => deleteGroup(ch.id, setError)}
                   className="rounded-full px-3.5 py-1.5 text-[13px] font-semibold text-white"
                   style={{ background: "var(--app-red)" }}
                 >

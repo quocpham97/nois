@@ -5,7 +5,7 @@ import { auth } from "@/auth";
 // Sender-side unfurl proxy for link previews. The SENDER's browser calls this
 // once while composing (browser CORS blocks fetching arbitrary pages directly);
 // the resulting preview travels to recipients ONLY inside the E2EE envelope, so
-// they never fetch anything and the server never learns which message/channel
+// they never fetch anything and the server never learns which message/group
 // carries the URL. This endpoint is the deliberate, opt-in residual leak of the
 // design (the server sees "this user fetched this URL once") — so it must never
 // log the URL, forward credentials upstream, or be reachable unauthenticated.

@@ -14,7 +14,7 @@ import * as mls from "../src/lib/crypto/mls.ts";
 import { getPool, ensureSchema } from "../src/lib/db.ts";
 
 const URL = "http://localhost:4000";
-let CH = ""; // a fresh public channel is created per run (avoids stale DS cache)
+let CH = ""; // a fresh public group is created per run (avoids stale DS cache)
 const ALICE = "mls-alice@test";
 const BOB = "mls-bob@test";
 const CAROL = "mls-carol@test";
@@ -77,8 +77,8 @@ class Device {
   listen() {
     this.socket.on(
       "mls:welcome",
-      async (p: { channelId: string; welcome: string; seq: number; toDeviceId: string }) => {
-        if (p.channelId !== CH || this.state || p.toDeviceId !== this.deviceId) return;
+      async (p: { groupId: string; welcome: string; seq: number; toDeviceId: string }) => {
+        if (p.groupId !== CH || this.state || p.toDeviceId !== this.deviceId) return;
         try {
           this.state = await mls.mlsJoinFromWelcome(p.welcome, this.kp);
           this.seq = p.seq;
@@ -89,8 +89,8 @@ class Device {
     );
     this.socket.on(
       "mls:commit",
-      async (p: { channelId: string; seq: number; commit: string }) => {
-        if (p.channelId !== CH || !this.state || p.seq <= this.seq) return;
+      async (p: { groupId: string; seq: number; commit: string }) => {
+        if (p.groupId !== CH || !this.state || p.seq <= this.seq) return;
         try {
           this.state = await mls.mlsProcessCommit(this.state, p.commit);
           this.seq = p.seq;
@@ -101,8 +101,8 @@ class Device {
     );
     this.socket.on(
       "message:new",
-      async (p: { channelId: string; message: { enc?: string } }) => {
-        if (p.channelId !== CH || !p.message.enc || !this.state) return;
+      async (p: { groupId: string; message: { enc?: string } }) => {
+        if (p.groupId !== CH || !p.message.enc || !this.state) return;
         try {
           const env = JSON.parse(p.message.enc) as { t?: string; w?: string };
           if (env.t !== "mls" || !env.w) return;
@@ -124,15 +124,15 @@ async function main() {
   const bob = new Device(BOB, "dev-b1", await connect(BOB), await mls.mlsGenerateKeyPackage(BOB, "dev-b1"));
   check(true, "three sockets authenticated + connected (alice ×2 devices, bob)");
 
-  // Fresh public channel per run; alice + bob join (carol joins later).
-  const mk = await emitAck<{ ok: boolean; channelId?: string }>(
-    aliceD1.socket, "channel:create",
+  // Fresh public group per run; alice + bob join (carol joins later).
+  const mk = await emitAck<{ ok: boolean; groupId?: string }>(
+    aliceD1.socket, "group:create",
     { name: "mlstest-" + Math.random().toString(36).slice(2, 8) });
-  CH = mk?.channelId ?? "";
-  check(!!CH, `created fresh test channel (${CH})`);
-  aliceD1.socket.emit("channel:join", { channelId: CH });
-  aliceD2.socket.emit("channel:join", { channelId: CH });
-  bob.socket.emit("channel:join", { channelId: CH });
+  CH = mk?.groupId ?? "";
+  check(!!CH, `created fresh test group (${CH})`);
+  aliceD1.socket.emit("group:join", { groupId: CH });
+  aliceD2.socket.emit("group:join", { groupId: CH });
+  bob.socket.emit("group:join", { groupId: CH });
   await sleep(500);
 
   for (const d of [aliceD1, aliceD2, bob]) {
@@ -145,16 +145,16 @@ async function main() {
   const fetched = await emitAck<{
     packages: { userId: string; deviceId: string; keyPackage: string }[];
     memberIds: string[];
-  }>(aliceD1.socket, "mls:fetchChannel", { channelId: CH });
+  }>(aliceD1.socket, "mls:fetchGroup", { groupId: CH });
   const pkgs = fetched?.packages ?? [];
   check(
     pkgs.some((p) => p.userId === ALICE && p.deviceId === "dev-a2") &&
       pkgs.some((p) => p.userId === BOB && p.deviceId === "dev-b1"),
-    `fetchChannel returns per-device packages incl. requester's sibling (${pkgs.length})`,
+    `fetchGroup returns per-device packages incl. requester's sibling (${pkgs.length})`,
   );
   check(
     (fetched?.memberIds ?? []).includes(ALICE) && (fetched?.memberIds ?? []).includes(BOB),
-    `fetchChannel returns the member roster (${JSON.stringify(fetched?.memberIds)})`,
+    `fetchGroup returns the member roster (${JSON.stringify(fetched?.memberIds)})`,
   );
 
   const targets = pkgs
@@ -165,7 +165,7 @@ async function main() {
   const ack = await emitAck<{ ok: boolean; seq?: number; epoch?: number }>(
     aliceD1.socket, "mls:commit",
     {
-      channelId: CH,
+      groupId: CH,
       fromEpoch: 0,
       commit: added.commit,
       welcomes: targets.map((t) => ({ toUserId: t.userId, toDeviceId: t.deviceId, welcome: added.welcome })),
@@ -182,7 +182,7 @@ async function main() {
   {
     const { state, wire } = await mls.mlsEncrypt(aliceD1.state!, { text: "HELLO-MLS" });
     aliceD1.state = state;
-    aliceD1.socket.emit("message:send", { channelId: CH, text: "", clientId: "h1", enc: JSON.stringify({ t: "mls", w: wire }) });
+    aliceD1.socket.emit("message:send", { groupId: CH, text: "", clientId: "h1", enc: JSON.stringify({ t: "mls", w: wire }) });
   }
   await sleep(900);
   check(bob.got.includes("HELLO-MLS"), `bob decrypted alice's MLS message (${JSON.stringify(bob.got)})`);
@@ -194,13 +194,13 @@ async function main() {
   const carolKp = mls.mlsImportKeyPair(mls.mlsExportKeyPair(carolKpOrig));
   check(!!carolKp, "KeyPackage keypair survives export → import (persistence)");
   const carol = new Device(CAROL, "dev-c1", await connect(CAROL), carolKp!);
-  carol.socket.emit("channel:join", { channelId: CH });
+  carol.socket.emit("group:join", { groupId: CH });
   await sleep(300);
   carol.publish();
   await sleep(500);
   // Carol does NOT listen live — she'll DRAIN her per-device Welcome instead.
-  carol.socket.on("message:new", async (p: { channelId: string; message: { enc?: string } }) => {
-    if (p.channelId !== CH || !p.message.enc || !carol.state) return;
+  carol.socket.on("message:new", async (p: { groupId: string; message: { enc?: string } }) => {
+    if (p.groupId !== CH || !p.message.enc || !carol.state) return;
     try {
       const env = JSON.parse(p.message.enc) as { t?: string; w?: string };
       if (env.t !== "mls" || !env.w) return;
@@ -215,7 +215,7 @@ async function main() {
   const fetched2 = await emitAck<{
     packages: { userId: string; deviceId: string; keyPackage: string }[];
     memberIds: string[];
-  }>(aliceD1.socket, "mls:fetchChannel", { channelId: CH });
+  }>(aliceD1.socket, "mls:fetchGroup", { groupId: CH });
   const leaves = mls.mlsGroupMembers(aliceD1.state!);
   const leafIds = new Set(leaves.map((l) => l.identity));
   const missing = (fetched2?.packages ?? []).filter(
@@ -233,7 +233,7 @@ async function main() {
   const ack2 = await emitAck<{ ok: boolean; seq?: number; epoch?: number }>(
     aliceD1.socket, "mls:commit",
     {
-      channelId: CH,
+      groupId: CH,
       fromEpoch: mls.mlsEpoch(aliceD1.state!),
       commit: sync!.commit,
       welcomes: missing.map((p) => ({ toUserId: p.userId, toDeviceId: p.deviceId, welcome: sync!.welcome! })),
@@ -244,22 +244,22 @@ async function main() {
   await sleep(700); // bob + aliceD2 apply the relayed commit
 
   // Carol drains HER device's Welcome (per-device: dev-c1 only).
-  const drained = await emitAck<{ welcomes: { channelId: string; welcome: string; seq: number }[] }>(
+  const drained = await emitAck<{ welcomes: { groupId: string; welcome: string; seq: number }[] }>(
     carol.socket, "mls:drainWelcomes", { deviceId: "dev-c1" });
-  const w = (drained?.welcomes ?? []).find((x) => x.channelId === CH);
+  const w = (drained?.welcomes ?? []).find((x) => x.groupId === CH);
   check(!!w, "carol drained her queued per-device Welcome");
   if (w) {
     carol.state = await mls.mlsJoinFromWelcome(w.welcome, carol.kp);
     carol.seq = w.seq;
   }
-  const drained2 = await emitAck<{ welcomes: { channelId: string; welcome: string; seq: number }[] }>(
+  const drained2 = await emitAck<{ welcomes: { groupId: string; welcome: string; seq: number }[] }>(
     carol.socket, "mls:drainWelcomes", { deviceId: "dev-c1" });
   check((drained2?.welcomes ?? []).length === 0, "welcome drain is one-shot");
 
   {
     const { state, wire } = await mls.mlsEncrypt(aliceD1.state!, { text: "AFTER-DRIFT" });
     aliceD1.state = state;
-    aliceD1.socket.emit("message:send", { channelId: CH, text: "", clientId: "h2", enc: JSON.stringify({ t: "mls", w: wire }) });
+    aliceD1.socket.emit("message:send", { groupId: CH, text: "", clientId: "h2", enc: JSON.stringify({ t: "mls", w: wire }) });
   }
   await sleep(900);
   check(carol.got.includes("AFTER-DRIFT"), `late-joiner carol decrypts post-add traffic (${JSON.stringify(carol.got)})`);
@@ -278,8 +278,8 @@ async function main() {
   const aliceRemove = await mls.mlsSyncCommit(aliceD1.state!, [], [carolLeaf!.leafIndex]);
   const ep = mls.mlsEpoch(aliceD1.state!);
   const [r1, r2] = await Promise.all([
-    emitAck<{ ok: boolean }>(aliceD1.socket, "mls:commit", { channelId: CH, fromEpoch: ep, commit: aliceRemove!.commit, welcomes: [] }),
-    emitAck<{ ok: boolean }>(bob.socket, "mls:commit", { channelId: CH, fromEpoch: ep, commit: bobRemove!.commit, welcomes: [] }),
+    emitAck<{ ok: boolean }>(aliceD1.socket, "mls:commit", { groupId: CH, fromEpoch: ep, commit: aliceRemove!.commit, welcomes: [] }),
+    emitAck<{ ok: boolean }>(bob.socket, "mls:commit", { groupId: CH, fromEpoch: ep, commit: bobRemove!.commit, welcomes: [] }),
   ]);
   const winners = [r1, r2].filter((r) => r?.ok).length;
   check(winners === 1, `two concurrent remove commits → exactly one accepted (${winners})`);
@@ -288,7 +288,7 @@ async function main() {
     aliceD1.state = aliceRemove!.state;
   } else {
     const cu = await emitAck<{ commits: { seq: number; commit: string }[] }>(
-      aliceD1.socket, "mls:fetchCommits", { channelId: CH, sinceSeq: aliceD1.seq });
+      aliceD1.socket, "mls:fetchCommits", { groupId: CH, sinceSeq: aliceD1.seq });
     for (const c of cu?.commits ?? []) {
       aliceD1.state = await mls.mlsProcessCommit(aliceD1.state!, c.commit);
       aliceD1.seq = c.seq;
@@ -299,7 +299,7 @@ async function main() {
   {
     const { state, wire } = await mls.mlsEncrypt(aliceD1.state!, { text: "AFTER-REMOVE" });
     aliceD1.state = state;
-    aliceD1.socket.emit("message:send", { channelId: CH, text: "", clientId: "h3", enc: JSON.stringify({ t: "mls", w: wire }) });
+    aliceD1.socket.emit("message:send", { groupId: CH, text: "", clientId: "h3", enc: JSON.stringify({ t: "mls", w: wire }) });
   }
   await sleep(900);
   check(bob.got.includes("AFTER-REMOVE"), `bob decrypts post-removal traffic (${JSON.stringify(bob.got)})`);

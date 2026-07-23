@@ -146,14 +146,14 @@ function GroupHead({ label, count }: { label: string; count?: number }) {
  *  media from the local message store. */
 export function SearchView() {
   const {
-    channels,
-    channelOrder,
+    groups,
+    groupOrder,
     dmOrder,
     isArchived,
     searchQ,
     setSearchQ,
     closeSearch,
-    selectChannel,
+    selectGroup,
     jumpToMessage,
     workspaceMembers,
     myUser,
@@ -243,23 +243,23 @@ export function SearchView() {
   // sidebar (most recent activity first, archived hidden).
   const convIds = useMemo(() => {
     const lastTs = (id: string) => {
-      const msgs = channels[id]?.messages ?? [];
+      const msgs = groups[id]?.messages ?? [];
       return msgs.length ? (msgs[msgs.length - 1].ts ?? 0) : 0;
     };
-    return [...channelOrder, ...dmOrder]
-      .filter((id) => channels[id] && !isArchived(id))
+    return [...groupOrder, ...dmOrder]
+      .filter((id) => groups[id] && !isArchived(id))
       .sort((a, b) => lastTs(b) - lastTs(a));
-  }, [channels, channelOrder, dmOrder, isArchived]);
+  }, [groups, groupOrder, dmOrder, isArchived]);
 
-  const convTitle = (channelId: string): string => {
-    const ch = channels[channelId];
-    if (!ch) return channelId;
+  const convTitle = (groupId: string): string => {
+    const ch = groups[groupId];
+    if (!ch) return groupId;
     return ch.type === "dm" && ch.user ? ch.user.name : ch.name;
   };
-  // Presence for a person, read off any DM channel we share with them.
+  // Presence for a person, read off any DM group we share with them.
   const presenceOf = (person: User) => {
     for (const id of dmOrder) {
-      const ch = channels[id];
+      const ch = groups[id];
       if (ch?.user && (ch.user.id ? ch.user.id === person.id : ch.user.name === person.name))
         return ch.presence;
     }
@@ -278,24 +278,24 @@ export function SearchView() {
   const openPerson = (person: User) => {
     pushRecent(person.name);
     const dmId = dmOrder.find((chId) => {
-      const u = channels[chId]?.user;
+      const u = groups[chId]?.user;
       return u && (u.id ? u.id === person.id : u.name === person.name);
     });
     closeSearch();
-    if (dmId) selectChannel(dmId);
+    if (dmId) selectGroup(dmId);
     else {
       openCompose();
       addRecipient(person.name);
     }
   };
-  const openHit = (channelId: string, msgId: string, parentId: string | null) => {
+  const openHit = (groupId: string, msgId: string, parentId: string | null) => {
     pushRecent(q);
     closeSearch();
-    jumpToMessage(channelId, msgId, parentId);
+    jumpToMessage(groupId, msgId, parentId);
   };
-  const openConv = (channelId: string) => {
+  const openConv = (groupId: string) => {
     closeSearch();
-    selectChannel(channelId);
+    selectGroup(groupId);
   };
 
   // --- keyboard navigation --------------------------------------------------
@@ -421,7 +421,7 @@ export function SearchView() {
     }
     body.push(<GroupHead key="jump-head" label="Jump to" />);
     convIds.forEach((id) => {
-      const ch = channels[id];
+      const ch = groups[id];
       const idx = reg(() => openConv(id));
       body.push(
         <Row key={"j" + id} idx={idx} onClick={() => openConv(id)}>
@@ -463,13 +463,13 @@ export function SearchView() {
     if (showMsgs) {
       body.push(<GroupHead key="mh" label="Messages" count={hits.length} />);
       hits.forEach((hit) => {
-        const idx = reg(() => openHit(hit.channelId, hit.id, hit.parentId));
-        const ch = channels[hit.channelId];
+        const idx = reg(() => openHit(hit.groupId, hit.id, hit.parentId));
+        const ch = groups[hit.groupId];
         body.push(
           <Row
             key={"m" + hit.id}
             idx={idx}
-            onClick={() => openHit(hit.channelId, hit.id, hit.parentId)}
+            onClick={() => openHit(hit.groupId, hit.id, hit.parentId)}
             className="items-start"
           >
             {ch ? (
@@ -479,7 +479,7 @@ export function SearchView() {
             )}
             <span className="min-w-0 flex-1">
               <span className="flex items-baseline gap-2">
-                <span className="truncate font-semibold">{convTitle(hit.channelId)}</span>
+                <span className="truncate font-semibold">{convTitle(hit.groupId)}</span>
                 {hit.parentId && (
                   <span className="text-[12px] text-app-faint">in thread</span>
                 )}
@@ -509,12 +509,12 @@ export function SearchView() {
     if (showMedia) {
       body.push(<GroupHead key="mdh" label="Media" count={media.length} />);
       media.forEach((hit) => {
-        const idx = reg(() => openHit(hit.channelId, hit.id, hit.parentId));
+        const idx = reg(() => openHit(hit.groupId, hit.id, hit.parentId));
         body.push(
           <Row
             key={"md" + hit.id}
             idx={idx}
-            onClick={() => openHit(hit.channelId, hit.id, hit.parentId)}
+            onClick={() => openHit(hit.groupId, hit.id, hit.parentId)}
           >
             <MediaThumb a={hit.attachment} />
             <span className="min-w-0 flex-1 self-center">
@@ -522,7 +522,7 @@ export function SearchView() {
                 {highlight(hit.attachment.label || hit.attachment.name || "Attachment", q)}
               </span>
               <span className="block truncate text-[12.5px] text-app-muted">
-                {convTitle(hit.channelId)} · {hit.time}
+                {convTitle(hit.groupId)} · {hit.time}
               </span>
             </span>
           </Row>,

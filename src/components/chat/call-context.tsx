@@ -33,9 +33,9 @@ export type CallPhase = "outgoing" | "incoming" | "connecting" | "active";
 
 export type CallInfo = {
   callId: string;
-  /** The VIEWER's DM channel id for this conversation ("" if not resolvable —
+  /** The VIEWER's DM group id for this conversation ("" if not resolvable —
    *  display/navigation only, never used for signaling). */
-  channelId: string;
+  groupId: string;
   peerId: string;
   peer: User;
   video: boolean;
@@ -50,8 +50,8 @@ type CallContextValue = {
   remoteStream: MediaStream | null;
   micOn: boolean;
   camOn: boolean;
-  /** Ring the DM peer of `channelId`. `video` = camera call vs voice-only. */
-  startCall: (channelId: string, video: boolean) => Promise<void>;
+  /** Ring the DM peer of `groupId`. `video` = camera call vs voice-only. */
+  startCall: (groupId: string, video: boolean) => Promise<void>;
   acceptCall: () => Promise<void>;
   declineCall: () => void;
   /** Hang up (active) or cancel (still ringing). */
@@ -99,7 +99,7 @@ type SignalMsg =
 
 export function CallProvider({ children }: { children: React.ReactNode }) {
   const { socket, userId } = useSocket();
-  const { channels, workspaceMembers } = useChat();
+  const { groups, workspaceMembers } = useChat();
 
   const [call, setCall] = useState<CallInfo | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
@@ -115,12 +115,12 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   // ICE candidates that arrived before the remote description was set.
   const pendingIceRef = useRef<RTCIceCandidateInit[]>([]);
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const channelsRef = useRef(channels);
+  const groupsRef = useRef(groups);
   const membersRef = useRef(workspaceMembers);
   useEffect(() => {
-    channelsRef.current = channels;
+    groupsRef.current = groups;
     membersRef.current = workspaceMembers;
-  }, [channels, workspaceMembers]);
+  }, [groups, workspaceMembers]);
 
   const setCallBoth = useCallback((c: CallInfo | null) => {
     callRef.current = c;
@@ -130,16 +130,16 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   // Best display identity for a peer: their DM partner entry (profile name +
   // color), else the workspace roster, else derived from the id.
   const resolvePeer = useCallback((peerId: string): User => {
-    for (const ch of Object.values(channelsRef.current)) {
+    for (const ch of Object.values(groupsRef.current)) {
       if (ch.type === "dm" && ch.user?.id === peerId) return ch.user;
     }
     return membersRef.current.find((u) => u.id === peerId) ?? deriveUser(peerId);
   }, []);
 
-  /** The viewer's own DM channel with `peerId` (DM ids aren't symmetric, so
-   *  the caller's channelId is useless to the callee). */
-  const resolveOwnDmChannel = useCallback((peerId: string): string => {
-    for (const [id, ch] of Object.entries(channelsRef.current)) {
+  /** The viewer's own DM group with `peerId` (DM ids aren't symmetric, so
+   *  the caller's groupId is useless to the callee). */
+  const resolveOwnDmGroup = useCallback((peerId: string): string => {
+    for (const [id, ch] of Object.entries(groupsRef.current)) {
       if (ch.type === "dm" && ch.user?.id === peerId) return id;
     }
     return "";
@@ -229,14 +229,14 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   // --- caller side -----------------------------------------------------------
 
   const startCall = useCallback(
-    async (channelId: string, video: boolean) => {
+    async (groupId: string, video: boolean) => {
       if (callRef.current) {
         toast.error("You're already in a call");
         return;
       }
       if (!socket) return;
-      const ch = channelsRef.current[channelId];
-      const peerId = ch?.user?.id ?? channelId;
+      const ch = groupsRef.current[groupId];
+      const peerId = ch?.user?.id ?? groupId;
       const peer = ch?.user ?? resolvePeer(peerId);
       let stream: MediaStream;
       try {
@@ -254,14 +254,14 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       setLocalStream(stream);
       setCallBoth({
         callId,
-        channelId,
+        groupId,
         peerId,
         peer,
         video,
         phase: "outgoing",
         startedAt: null,
       });
-      socket.timeout(8000).emit("call:invite", { callId, channelId, video }, (err, res) => {
+      socket.timeout(8000).emit("call:invite", { callId, groupId, video }, (err, res) => {
         if (callRef.current?.callId !== callId) return;
         if (err || !res?.ok) {
           const reason = !err && res && !res.ok ? res.reason : "error";
@@ -332,7 +332,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       }
       setCallBoth({
         callId,
-        channelId: resolveOwnDmChannel(fromUserId),
+        groupId: resolveOwnDmGroup(fromUserId),
         peerId: fromUserId,
         peer: resolvePeer(fromUserId),
         video,
@@ -347,7 +347,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         }
       }, RING_TIMEOUT_MS);
     },
-    [socket, resolveOwnDmChannel, resolvePeer, setCallBoth, teardown],
+    [socket, resolveOwnDmGroup, resolvePeer, setCallBoth, teardown],
   );
 
   const acceptCall = useCallback(async () => {

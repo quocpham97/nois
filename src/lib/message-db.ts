@@ -14,8 +14,8 @@
 // callers (chat-context, key-backup) need no changes. Every export is async and
 // degrades to a no-op / empty result when Workers/OPFS are unavailable (SSR, or
 // an old browser). One record per message: top-level messages carry
-// conv_id = channelId (parent_id NULL); thread replies carry parent_id
-// (conv_id NULL) so they never leak into channel history. Ordering is by the
+// conv_id = groupId (parent_id NULL); thread replies carry parent_id
+// (conv_id NULL) so they never leak into group history. Ordering is by the
 // time-sortable message `id` (see store.newId).
 //
 // KNOWN LIMIT: the SAHPool VFS takes exclusive OPFS access handles, so the DB is
@@ -103,10 +103,10 @@ function clean(msg: Message): Message {
   return rest;
 }
 
-const UPSERT = `INSERT INTO messages (id, channel_id, conv_id, parent_id, data)
+const UPSERT = `INSERT INTO messages (id, group_id, conv_id, parent_id, data)
    VALUES (?, ?, ?, ?, ?)
    ON CONFLICT(id) DO UPDATE SET
-     channel_id=excluded.channel_id,
+     group_id=excluded.group_id,
      conv_id=excluded.conv_id,
      parent_id=excluded.parent_id,
      data=excluded.data`;
@@ -138,13 +138,13 @@ const sinkRows = (rows: BackupMessageRow[]) => {
 
 const toRow = (
   id: string,
-  channelId: string,
+  groupId: string,
   convId: string | null,
   parentId: string | null,
   msg: Message,
 ): BackupMessageRow => ({
   id,
-  channel_id: channelId,
+  group_id: groupId,
   conv_id: convId,
   parent_id: parentId,
   data: JSON.stringify(clean(msg)),
@@ -152,7 +152,7 @@ const toRow = (
 
 const upsertBind = (row: BackupMessageRow) => [
   row.id,
-  row.channel_id,
+  row.group_id,
   row.conv_id,
   row.parent_id,
   row.data,
@@ -164,32 +164,32 @@ const dec = (rows: Row[]) => rows.map((r) => JSON.parse(r.data) as Message);
  * Persist (or replace) a top-level message. Only acked messages (those carrying
  * a server `seq`) are stored — optimistic temps are skipped until reconciled.
  */
-export async function putMessage(channelId: string, msg: Message): Promise<void> {
+export async function putMessage(groupId: string, msg: Message): Promise<void> {
   if (msg.seq == null) return;
-  const row = toRow(msg.id, channelId, channelId, null, msg);
+  const row = toRow(msg.id, groupId, groupId, null, msg);
   await rpc({ op: "run", sql: UPSERT, bind: upsertBind(row) }, null);
   sinkRows([row]);
 }
 
 /** Persist (or replace) a thread reply under its parent. */
 export async function putReply(
-  channelId: string,
+  groupId: string,
   parentId: string,
   reply: Message,
 ): Promise<void> {
-  const row = toRow(reply.id, channelId, null, parentId, reply);
+  const row = toRow(reply.id, groupId, null, parentId, reply);
   await rpc({ op: "run", sql: UPSERT, bind: upsertBind(row) }, null);
   sinkRows([row]);
 }
 
 /** Bulk-persist top-level messages (each must carry seq). */
 export async function putMessages(
-  channelId: string,
+  groupId: string,
   msgs: Message[],
 ): Promise<void> {
   const rows = msgs
     .filter((m) => m.seq != null)
-    .map((m) => toRow(m.id, channelId, channelId, null, m));
+    .map((m) => toRow(m.id, groupId, groupId, null, m));
   if (!rows.length) return;
   await rpc(
     { op: "runBatch", items: rows.map((r) => ({ sql: UPSERT, bind: upsertBind(r) })) },
@@ -205,7 +205,7 @@ export async function putMessages(
  * locally). Ordering is by the time-sortable id, so it reflects send time.
  */
 export async function getTopPage(
-  channelId: string,
+  groupId: string,
   beforeId: string | null,
   limit: number,
 ): Promise<{ messages: Message[]; nextCursor: string | null }> {
@@ -215,12 +215,12 @@ export async function getTopPage(
       ? {
           op: "all",
           sql: `SELECT data FROM messages WHERE conv_id = ? AND id < ? ORDER BY id DESC LIMIT ?`,
-          bind: [channelId, beforeId, limit],
+          bind: [groupId, beforeId, limit],
         }
       : {
           op: "all",
           sql: `SELECT data FROM messages WHERE conv_id = ? ORDER BY id DESC LIMIT ?`,
-          bind: [channelId, limit],
+          bind: [groupId, limit],
         },
     [],
   );
@@ -239,7 +239,7 @@ export const SNIPPET_CLOSE = "";
 
 export type SearchHit = {
   id: string;
-  channelId: string;
+  groupId: string;
   /** Parent id when the hit is a thread reply (else null → top-level). */
   parentId: string | null;
   /** Matched text with terms wrapped in SNIPPET_OPEN/CLOSE. */
@@ -275,7 +275,7 @@ export async function searchMessages(
   const rows = await rpc<
     {
       msg_id: string;
-      channel_id: string;
+      group_id: string;
       parent_id: string | null;
       snip: string;
       time: string | null;
@@ -285,7 +285,7 @@ export async function searchMessages(
       op: "all",
       // The FTS rowid mirrors messages.rowid (see the db-worker triggers), so a
       // join recovers row fields the index doesn't carry — here the display time.
-      sql: `SELECT messages_fts.msg_id, messages_fts.channel_id, messages_fts.parent_id,
+      sql: `SELECT messages_fts.msg_id, messages_fts.group_id, messages_fts.parent_id,
               snippet(messages_fts, 0, char(1), char(2), '…', 12) AS snip,
               json_extract(m.data, '$.time') AS time
             FROM messages_fts
@@ -299,7 +299,7 @@ export async function searchMessages(
   );
   return rows.map((r) => ({
     id: r.msg_id,
-    channelId: r.channel_id,
+    groupId: r.group_id,
     parentId: r.parent_id ?? null,
     snippet: r.snip,
     time: r.time ?? undefined,
@@ -308,7 +308,7 @@ export async function searchMessages(
 
 export type MediaHit = {
   id: string;
-  channelId: string;
+  groupId: string;
   /** Parent id when the attachment lives on a thread reply (else null). */
   parentId: string | null;
   attachment: Attachment;
@@ -330,13 +330,13 @@ export type MediaHit = {
 export async function searchMedia(q: string, limit = 50): Promise<MediaHit[]> {
   const ql = q.trim().toLowerCase();
   const rows = await rpc<
-    { channel_id: string; parent_id: string | null; data: string }[]
+    { group_id: string; parent_id: string | null; data: string }[]
   >(
     {
       op: "all",
       // Over-fetch: the LIKE narrows to rows with an attachment, then JS filters
       // by the query and caps at `limit` (JSON-substring can't rank relevance).
-      sql: `SELECT channel_id, parent_id, data FROM messages
+      sql: `SELECT group_id, parent_id, data FROM messages
             WHERE data LIKE '%"attachment":{%' ORDER BY id DESC LIMIT ?`,
       bind: [Math.max(limit * 4, 200)],
     },
@@ -358,7 +358,7 @@ export async function searchMedia(q: string, limit = 50): Promise<MediaHit[]> {
     }
     out.push({
       id: m.id,
-      channelId: r.channel_id,
+      groupId: r.group_id,
       parentId: r.parent_id ?? null,
       attachment: a,
       text: m.text ?? "",
@@ -377,7 +377,7 @@ export async function searchMedia(q: string, limit = 50): Promise<MediaHit[]> {
  * id when more history exists above the window.
  */
 export async function getPageAround(
-  channelId: string,
+  groupId: string,
   msgId: string,
   radius = 20,
 ): Promise<{ messages: Message[]; nextCursor: string | null }> {
@@ -386,7 +386,7 @@ export async function getPageAround(
       {
         op: "all",
         sql: `SELECT data FROM messages WHERE conv_id = ? AND id < ? ORDER BY id DESC LIMIT ?`,
-        bind: [channelId, msgId, radius],
+        bind: [groupId, msgId, radius],
       },
       [],
     ),
@@ -394,7 +394,7 @@ export async function getPageAround(
       {
         op: "all",
         sql: `SELECT data FROM messages WHERE conv_id = ? AND id >= ? ORDER BY id ASC`,
-        bind: [channelId, msgId],
+        bind: [groupId, msgId],
       },
       [],
     ),
@@ -424,8 +424,8 @@ export async function getReplies(parentId: string): Promise<Message[]> {
  * recency ordering on boot — without loading each conversation's full history.
  * (conv_id is non-NULL only for top-level rows, so replies never win.)
  */
-export async function getLatestPerChannel(): Promise<
-  { channelId: string; message: Message }[]
+export async function getLatestPerGroup(): Promise<
+  { groupId: string; message: Message }[]
 > {
   const rows = await rpc<{ conv_id: string; data: string }[]>(
     {
@@ -437,7 +437,7 @@ export async function getLatestPerChannel(): Promise<
     [],
   );
   return rows.map((r) => ({
-    channelId: r.conv_id,
+    groupId: r.conv_id,
     message: JSON.parse(r.data) as Message,
   }));
 }
@@ -453,19 +453,19 @@ export async function getMessage(id: string): Promise<Message | undefined> {
 
 /**
  * A stored message plus the conversation it lives in (this device's view) —
- * used by the DM self-heal responder, which must know the channel (to derive
+ * used by the DM self-heal responder, which must know the group (to derive
  * the DM peer for the requester-is-a-participant authorization check). Returns
  * null when the message isn't stored locally.
  */
 export async function getMessageMeta(
   id: string,
-): Promise<{ message: Message; channelId: string } | null> {
-  const row = await rpc<{ channel_id: string; data: string } | null>(
-    { op: "one", sql: `SELECT channel_id, data FROM messages WHERE id = ?`, bind: [id] },
+): Promise<{ message: Message; groupId: string } | null> {
+  const row = await rpc<{ group_id: string; data: string } | null>(
+    { op: "one", sql: `SELECT group_id, data FROM messages WHERE id = ?`, bind: [id] },
     null,
   );
   if (!row) return null;
-  return { message: JSON.parse(row.data) as Message, channelId: row.channel_id };
+  return { message: JSON.parse(row.data) as Message, groupId: row.group_id };
 }
 
 /** Apply a partial update to a stored message (e.g. tombstone, threadCount). */
@@ -476,7 +476,7 @@ export async function patchMessage(
   const row = await rpc<BackupMessageRow | null>(
     {
       op: "one",
-      sql: `SELECT id, channel_id, conv_id, parent_id, data FROM messages WHERE id = ?`,
+      sql: `SELECT id, group_id, conv_id, parent_id, data FROM messages WHERE id = ?`,
       bind: [id],
     },
     null,
@@ -503,10 +503,10 @@ export async function clearAll(): Promise<void> {
   await rpc({ op: "run", sql: `DELETE FROM messages`, bind: [] }, null);
 }
 
-/** Drop every message belonging to a channel (e.g. on channel delete). */
-export async function removeChannel(channelId: string): Promise<void> {
+/** Drop every message belonging to a group (e.g. on group delete). */
+export async function removeGroup(groupId: string): Promise<void> {
   await rpc(
-    { op: "run", sql: `DELETE FROM messages WHERE channel_id = ?`, bind: [channelId] },
+    { op: "run", sql: `DELETE FROM messages WHERE group_id = ?`, bind: [groupId] },
     null,
   );
 }
@@ -521,7 +521,7 @@ export async function removeChannel(channelId: string): Promise<void> {
 /** A raw persisted message row — the exact tuple stored in the `messages` table. */
 export type BackupMessageRow = {
   id: string;
-  channel_id: string;
+  group_id: string;
   conv_id: string | null;
   parent_id: string | null;
   data: string; // JSON of the stored (decrypted-where-possible) Message
@@ -532,24 +532,41 @@ export async function exportBackupMessages(): Promise<BackupMessageRow[]> {
   return rpc<BackupMessageRow[]>(
     {
       op: "all",
-      sql: `SELECT id, channel_id, conv_id, parent_id, data FROM messages ORDER BY id`,
+      sql: `SELECT id, group_id, conv_id, parent_id, data FROM messages ORDER BY id`,
     },
     [],
   );
 }
 
 /**
+ * A pre-rename backup/history row (2026-07 and earlier), whose group column was
+ * named `channel_id`. importMessages still accepts these so already-encrypted
+ * backups and server-side history rows keep restoring after the on-device
+ * channel_id→group_id rename. New rows always carry `group_id`.
+ */
+type LegacyBackupMessageRow = Omit<BackupMessageRow, "group_id"> & {
+  group_id?: string;
+  channel_id?: string;
+};
+
+/**
  * Restore rows from a backup. Upserts by id, so a backup's decrypted plaintext
  * REPLACES a local 🔒 ciphertext row for the same message (the whole point of
  * recovery). On a fresh device the store is empty, so there's nothing to clobber.
  */
-export async function importMessages(rows: BackupMessageRow[]): Promise<void> {
+export async function importMessages(
+  rows: (BackupMessageRow | LegacyBackupMessageRow)[],
+): Promise<void> {
   const items = rows
     .filter((r) => r && r.id && typeof r.data === "string")
-    .map((r) => ({
-      sql: UPSERT,
-      bind: [r.id, r.channel_id, r.conv_id ?? null, r.parent_id ?? null, r.data],
-    }));
+    .map((r) => {
+      // Accept pre-rename rows that stored the group column as `channel_id`.
+      const gid = r.group_id ?? (r as LegacyBackupMessageRow).channel_id ?? "";
+      return {
+        sql: UPSERT,
+        bind: [r.id, gid, r.conv_id ?? null, r.parent_id ?? null, r.data],
+      };
+    });
   if (!items.length) return;
   await rpc({ op: "runBatch", items }, null);
 }

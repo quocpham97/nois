@@ -64,7 +64,7 @@ async function makeSk(): Promise<CryptoKey> {
     ["encrypt", "decrypt"],
   );
 }
-type Row = { id: string; channel_id: string; conv_id: string | null; parent_id: string | null; data: string };
+type Row = { id: string; group_id: string; conv_id: string | null; parent_id: string | null; data: string };
 type Wire = { msgId: string; iv: string; ct: string };
 async function encRow(sk: CryptoKey, row: Row): Promise<Wire> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -106,7 +106,7 @@ async function main() {
   // 1. Append three rows (ids time-sortable like store.newId).
   const mkRow = (n: number, text: string): Row => ({
     id: `2026-07-10T0${n}:00:00.000Z-test${n}`,
-    channel_id: "general",
+    group_id: "general",
     conv_id: "general",
     parent_id: null,
     data: JSON.stringify({ id: `t${n}`, text, time: "1:00 PM" }),

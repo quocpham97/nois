@@ -1,4 +1,4 @@
-// Group-channel encryption via sender keys (Phase 2 of the E2EE plan).
+// Group-group encryption via sender keys (Phase 2 of the E2EE plan).
 //
 // This is the scheme Signal and WhatsApp use for groups: instead of encrypting
 // every message once per recipient (O(N) per message), each sender device holds
@@ -15,7 +15,7 @@
 // from the chain at its index).
 //
 // DISTRIBUTION POLICY (chosen for this app — reliability over secrecy): a
-// sender keeps ONE stable seed (index 0) per channel and distributes THAT seed
+// sender keeps ONE stable seed (index 0) per group and distributes THAT seed
 // to every member device, re-distributing on membership change and on demand
 // when a member can't decrypt (pull-on-miss; see chat-context). A recipient
 // therefore decrypts every message from a sender by ratcheting a copy forward
@@ -24,8 +24,8 @@
 // and a key fetched late recovers the sender's whole history.
 //
 // TRADE-OFF (deliberate): this drops forward secrecy and removed-member
-// backward secrecy within a channel — anyone who ever holds a sender's seed can
-// read all of that sender's messages in that channel. The forward-secret
+// backward secrecy within a group — anyone who ever holds a sender's seed can
+// read all of that sender's messages in that group. The forward-secret
 // variant (rotate + discard + skipped-key cache) and MLS/TreeKEM (O(log N)
 // membership) remain droppable behind this same interface later.
 
@@ -59,7 +59,7 @@ export type GroupEnvelope = {
 /** Distribution payload (carried as plaintext inside a Phase 1 pairwise envelope). */
 export type SenderKeyDistribution = {
   skd: 1;
-  channelId: string;
+  groupId: string;
   sender: string;
   chainKey: string;
   index: number;

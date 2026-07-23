@@ -1,11 +1,11 @@
 "use client";
 
 import { AtSign, FileText, Trash2, X } from "lucide-react";
-import type { Channel, Message } from "@/lib/chat-data";
+import type { Group, Message } from "@/lib/chat-data";
 import { useChat } from "./chat-context";
 import { useSocket } from "./socket-context";
 
-const channelLabel = (ch: Channel) =>
+const groupLabel = (ch: Group) =>
   ch.type === "dm" ? "@" + (ch.user?.name ?? ch.name) : "#" + ch.name;
 
 /** Shared panel chrome: a titled header with a close button + a scroll body. */
@@ -53,16 +53,16 @@ function EmptyState({ icon, text }: { icon: React.ReactNode; text: string }) {
   );
 }
 
-/** A message row with author avatar, channel context, and text — like search. */
+/** A message row with author avatar, group context, and text — like search. */
 function MessageRow({
   msg,
-  channelName,
+  groupName,
   meta,
   onClick,
   action,
 }: {
   msg: Message;
-  channelName: string;
+  groupName: string;
   meta?: string;
   onClick: () => void;
   action?: React.ReactNode;
@@ -83,7 +83,7 @@ function MessageRow({
           <div className="mb-0.5 flex items-baseline gap-2">
             <span className="font-semibold">{msg.author.name}</span>
             <span className="text-[12px] text-app-muted">
-              in <span className="font-medium text-app-accent">{channelName}</span>
+              in <span className="font-medium text-app-accent">{groupName}</span>
             </span>
             <span className="ml-auto whitespace-nowrap font-mono text-[11px] text-app-faint">
               {meta ?? `${msg.date || "Today"} · ${msg.time}`}
@@ -100,11 +100,11 @@ function MessageRow({
 }
 
 export function MentionsView() {
-  const { channels, selectChannel, jumpToMessage } = useChat();
+  const { groups, selectGroup, jumpToMessage } = useChat();
   const { user } = useSocket();
   const me = user.name;
-  const rows: { chId: string; ch: Channel; msg: Message }[] = [];
-  Object.entries(channels).forEach(([chId, ch]) => {
+  const rows: { chId: string; ch: Group; msg: Message }[] = [];
+  Object.entries(groups).forEach(([chId, ch]) => {
     ch.messages.forEach((m) => {
       const mentioned =
         m.mentions?.includes(me) || (m.text?.includes("@" + me) ?? false);
@@ -128,9 +128,9 @@ export function MentionsView() {
           <MessageRow
             key={chId + msg.id}
             msg={msg}
-            channelName={channelLabel(ch)}
+            groupName={groupLabel(ch)}
             onClick={() => {
-              selectChannel(chId);
+              selectGroup(chId);
               jumpToMessage(chId, msg.id);
             }}
           />
@@ -141,7 +141,7 @@ export function MentionsView() {
 }
 
 export function DraftsView() {
-  const { channels, drafts, clearDraft, selectChannel } = useChat();
+  const { groups, drafts, clearDraft, selectGroup } = useChat();
   const entries = Object.entries(drafts);
 
   return (
@@ -153,19 +153,19 @@ export function DraftsView() {
       {entries.length === 0 ? (
         <EmptyState
           icon={<FileText size={32} strokeWidth={1.5} />}
-          text="No drafts. Unsent messages are saved here per channel."
+          text="No drafts. Unsent messages are saved here per group."
         />
       ) : (
         entries.map(([chId, draft]) => {
-          const ch = channels[chId];
-          const name = ch ? channelLabel(ch) : chId;
+          const ch = groups[chId];
+          const name = ch ? groupLabel(ch) : chId;
           return (
             <div
               key={chId}
               className="group relative flex items-start gap-3 px-6 py-3 hover:bg-[var(--app-hover)]"
             >
               <button
-                onClick={() => selectChannel(chId)}
+                onClick={() => selectGroup(chId)}
                 className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left"
               >
                 <span className="text-[12px] font-medium text-app-accent">

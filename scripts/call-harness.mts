@@ -74,7 +74,7 @@ function emitWithAck<T>(s: Socket, event: string, payload: unknown, ms = 4000): 
   });
 }
 
-type InviteRelay = { callId: string; channelId: string; fromUserId: string; video: boolean };
+type InviteRelay = { callId: string; groupId: string; fromUserId: string; video: boolean };
 type AnswerRelay = { callId: string; fromUserId: string; accept: boolean };
 type SignalRelay = { callId: string; fromUserId: string; data: string };
 type EndRelay = { callId: string; fromUserId: string; reason: string };
@@ -104,7 +104,7 @@ async function main() {
   // Non-member: Carol may not place a call on someone else's DM.
   const carolAck = await emitWithAck<InviteAck>(carol, "call:invite", {
     callId: "intruder-" + Date.now(),
-    channelId: dmId,
+    groupId: dmId,
     video: false,
   });
   check(
@@ -112,13 +112,13 @@ async function main() {
     "invite on a DM the caller doesn't belong to → unauthorized",
   );
 
-  // Non-DM channel id → unauthorized (calls are DM-only).
+  // Non-DM group id → unauthorized (calls are DM-only).
   const groupAck = await emitWithAck<InviteAck>(bob, "call:invite", {
     callId: "nogroup-" + Date.now(),
-    channelId: "not-a-dm-" + Date.now(),
+    groupId: "not-a-dm-" + Date.now(),
     video: false,
   });
-  check(groupAck?.ok === false, "invite on a non-DM channel id → rejected");
+  check(groupAck?.ok === false, "invite on a non-DM group id → rejected");
 
   // --- invite routing ----------------------------------------------------------
   const a1Inv = waitFor<InviteRelay>(aliceD1, "call:invite");
@@ -127,7 +127,7 @@ async function main() {
   const bobInv = waitFor<InviteRelay>(bob, "call:invite"); // caller: none
   const inviteAck = await emitWithAck<InviteAck>(bob, "call:invite", {
     callId,
-    channelId: dmId,
+    groupId: dmId,
     video: true,
   });
   check(inviteAck?.ok === true, "valid invite acks ok:true");
@@ -194,7 +194,7 @@ async function main() {
   await sleep(400);
   const offlineAck = await emitWithAck<InviteAck>(bob, "call:invite", {
     callId: "offline-" + Date.now(),
-    channelId: dmId,
+    groupId: dmId,
     video: false,
   });
   check(

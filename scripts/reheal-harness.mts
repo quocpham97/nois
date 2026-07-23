@@ -63,8 +63,8 @@ function waitFor<T>(s: Socket, event: string, ms = 1500): Promise<T | null> {
   });
 }
 
-type Req = { channelId: string; msgId: string; fromUserId: string };
-type Offer = { channelId: string; msgId: string; enc: string };
+type Req = { groupId: string; msgId: string; fromUserId: string };
+type Offer = { groupId: string; msgId: string; enc: string };
 
 async function main() {
   const aliceD1 = await connect(ALICE);
@@ -74,14 +74,14 @@ async function main() {
   await sleep(400); // let each socket join its user:<uid> room
 
   const msgId = "reheal-test-" + Date.now();
-  const channelId = "dm-" + BOB; // Alice's view of the DM with Bob
+  const groupId = "dm-" + BOB; // Alice's view of the DM with Bob
 
   // --- request routing ------------------------------------------------------
   const bobReq = waitFor<Req>(bob, "dm:reheal:request");
   const aliceD2Req = waitFor<Req>(aliceD2, "dm:reheal:request");
   const aliceD1Req = waitFor<Req>(aliceD1, "dm:reheal:request"); // sender: none
   const carolReq = waitFor<Req>(carol, "dm:reheal:request");
-  aliceD1.emit("dm:reheal:request", { channelId, msgId, peerId: BOB });
+  aliceD1.emit("dm:reheal:request", { groupId, msgId, peerId: BOB });
 
   const [rBob, rA2, rA1, rCarol] = await Promise.all([
     bobReq,
@@ -100,7 +100,7 @@ async function main() {
   const aliceD2Off = waitFor<Offer>(aliceD2, "dm:reheal:offer");
   const bobOff = waitFor<Offer>(bob, "dm:reheal:offer"); // responder: none
   const carolOff = waitFor<Offer>(carol, "dm:reheal:offer");
-  bob.emit("dm:reheal:offer", { channelId, msgId, toUserId: ALICE, enc });
+  bob.emit("dm:reheal:offer", { groupId, msgId, toUserId: ALICE, enc });
 
   const [oA1, oA2, oBob, oCarol] = await Promise.all([
     aliceD1Off,
@@ -115,11 +115,11 @@ async function main() {
 
   for (const s of [aliceD1, aliceD2, bob, carol]) s.disconnect();
 
-  // cleanup: connecting auto-joins default channels — drop the test users' rows.
+  // cleanup: connecting auto-joins default groups — drop the test users' rows.
   try {
     const pool = getPool();
     await pool.query(
-      `DELETE FROM channel_member WHERE user_id = ANY($1)`,
+      `DELETE FROM group_member WHERE user_id = ANY($1)`,
       [[ALICE, BOB, CAROL]],
     );
     await pool.query(

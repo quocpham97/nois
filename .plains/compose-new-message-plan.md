@@ -5,7 +5,7 @@ _Created 2026-06-15 · Product Owner plan_
 ## Finding: the non-working feature
 
 `chat-app` is a Slack-style client (Next.js + React, in-memory seed data). Most
-features work — channel messages, threads, reactions, search, theme switching,
+features work — group messages, threads, reactions, search, theme switching,
 settings toggles. **The Compose ("New message") flow is wired up visually but
 does nothing.**
 
@@ -40,7 +40,7 @@ A user can start a new conversation from "New message" and have it actually send
 ## Tasks (sequenced)
 
 1. **`sendCompose()` action + `composeText` state in ChatContext**
-   The missing core logic — find-or-create the DM channel, seed the typed
+   The missing core logic — find-or-create the DM group, seed the typed
    message, select it, reset compose. Mirrors the existing `sendMessage` pattern.
 
 2. **Wire the textarea + Send button in ComposeView**
@@ -52,7 +52,7 @@ A user can start a new conversation from "New message" and have it actually send
    won't render unless ordering becomes context-derived state.
 
 4. **Recipient scope, validation & group-DM naming**
-   Placeholder promises "name or channel" but only People work; define group-DM
+   Placeholder promises "name or group" but only People work; define group-DM
    display name, block dupes/self, add empty filter state.
 
 5. **Verify end-to-end in the running app**
@@ -65,7 +65,7 @@ A user can start a new conversation from "New message" and have it actually send
 - Clicking Send (or Enter) posts the message into the recipient's DM, closes
   Compose, and selects that DM.
 - Sending to someone with an existing DM appends to it rather than duplicating
-  the channel.
+  the group.
 - The DM is visible/selectable in the sidebar afterward.
 - Shift+Enter inserts a newline; empty/whitespace-only sends are ignored.
 
@@ -75,5 +75,5 @@ Scope of recipients:
 
 - **Lean:** people-only, 1:1 DMs (relabel the placeholder, reuse the
   `dm-<firstname>` convention).
-- **Full:** multi-recipient group DMs + selecting existing channels as a
+- **Full:** multi-recipient group DMs + selecting existing groups as a
   destination — needs a group-DM data shape and naming rule.

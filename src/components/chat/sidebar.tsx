@@ -15,16 +15,16 @@ import {
   SquarePen,
 } from "lucide-react";
 import {
-  channelMembers,
+  groupMembers,
   presenceColor,
   presenceLabel,
-  type Channel,
+  type Group,
   type Presence,
   type User,
 } from "@/lib/chat-data";
 import { useChat, type ChatFilter, type NavPanel } from "./chat-context";
 import { ConnectionStatus } from "./socket-context";
-import { Avatar, ChannelIcon, GroupAvatar } from "./bits";
+import { Avatar, GroupIcon, GroupAvatar } from "./bits";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -47,7 +47,7 @@ const FILTERS: { key: ChatFilter; label: string }[] = [
 // Last-message preview line for a conversation row, Messenger-style
 // ("You: Knew it 😄 …" / "Lena: Dropping the cover"). Encrypted messages that
 // haven't decrypted yet show a lock; attachment-only messages show a label.
-export function previewOf(ch: Channel): { text: string; time: string } | null {
+export function previewOf(ch: Group): { text: string; time: string } | null {
   const m = ch.messages[ch.messages.length - 1];
   if (!m) return null;
   const who = m.self
@@ -68,7 +68,7 @@ export function ConvAvatar({
   me,
   size = 40,
 }: {
-  ch: Channel;
+  ch: Group;
   me: User;
   size?: number;
 }) {
@@ -88,14 +88,14 @@ export function ConvAvatar({
       </span>
     );
   }
-  const others = channelMembers(ch, me).filter((u) => u.name !== me.name);
+  const others = groupMembers(ch, me).filter((u) => u.name !== me.name);
   if (others.length >= 2) return <GroupAvatar members={others} size={size} />;
   return (
     <span
       className="flex shrink-0 items-center justify-center rounded-full bg-panel"
       style={{ width: size, height: size }}
     >
-      <ChannelIcon channel={ch} color="var(--app-muted)" size={Math.round(size * 0.4)} />
+      <GroupIcon group={ch} color="var(--app-muted)" size={Math.round(size * 0.4)} />
     </span>
   );
 }
@@ -163,35 +163,35 @@ function PeopleSidebarBody() {
   const {
     workspaceMembers,
     myUser,
-    channels,
+    groups,
     dmOrder,
-    selectChannel,
+    selectGroup,
     openCompose,
     addRecipient,
   } = useChat();
   const [q, setQ] = useState("");
 
-  // Presence is tracked per DM channel, keyed by the partner's id; fold those
+  // Presence is tracked per DM group, keyed by the partner's id; fold those
   // into a lookup so a roster row shows live presence even without a DM open.
   const presenceOf = useMemo(() => {
     const map: Record<string, Presence> = {};
-    Object.values(channels).forEach((ch) => {
+    Object.values(groups).forEach((ch) => {
       if (ch.type === "dm" && ch.user?.id && ch.presence) {
         map[ch.user.id] = ch.presence;
       }
     });
     return (u: User) => (u.id ? map[u.id] : undefined);
-  }, [channels]);
+  }, [groups]);
 
   const dmFor = (name: string, id?: string) =>
     dmOrder.find((chId) => {
-      const u = channels[chId]?.user;
+      const u = groups[chId]?.user;
       return u && (u.id ? u.id === id : u.name === name);
     });
 
   const openPerson = (p: User) => {
     const dmId = dmFor(p.name, p.id);
-    if (dmId) selectChannel(dmId);
+    if (dmId) selectGroup(dmId);
     else {
       openCompose();
       addRecipient(p.name);
@@ -310,12 +310,12 @@ function PeopleSidebarBody() {
 
 /** Sidebar "Archived" mode: archived chats; unarchive or jump back in. */
 function ArchivedSidebarBody() {
-  const { channels, archivedIds, toggleArchived, selectChannel, myUser } =
+  const { groups, archivedIds, toggleArchived, selectGroup, myUser } =
     useChat();
   // Newest-archived first — toggleArchived appends, so reverse for recency.
   const rows = useMemo(
-    () => [...archivedIds].reverse().filter((id) => channels[id]),
-    [archivedIds, channels],
+    () => [...archivedIds].reverse().filter((id) => groups[id]),
+    [archivedIds, groups],
   );
 
   return (
@@ -330,7 +330,7 @@ function ArchivedSidebarBody() {
         </div>
       ) : (
         rows.map((id) => {
-          const ch = channels[id];
+          const ch = groups[id];
           const preview = previewOf(ch);
           return (
             <div
@@ -338,7 +338,7 @@ function ArchivedSidebarBody() {
               className="flex items-center gap-3 rounded-xl px-2.5 py-2 hover:bg-app-hover"
             >
               <button
-                onClick={() => selectChannel(id)}
+                onClick={() => selectGroup(id)}
                 className="flex min-w-0 flex-1 items-center gap-3 text-left"
               >
                 <ConvAvatar ch={ch} me={myUser} size={52} />
@@ -375,24 +375,24 @@ function ArchivedSidebarBody() {
 
 export function Sidebar() {
   const {
-    channels,
-    currentChannelId,
-    selectChannel,
+    groups,
+    currentGroupId,
+    selectGroup,
     settingsOpen,
     composeOpen,
     openCompose,
     openSearch,
-    openCreateChannel,
+    openCreateGroup,
     dmOrder,
-    channelOrder,
+    groupOrder,
     rosterLoaded,
     activePanel,
     openPanel,
-    createChannelOpen,
+    createGroupOpen,
     drafts,
     workspaceName,
     openWorkspace,
-    unreadByChannel,
+    unreadByGroup,
     myUser,
     profile,
     openStatus,
@@ -402,10 +402,10 @@ export function Sidebar() {
     toggleArchived,
   } = useChat();
 
-  // Live counts for the options-menu badges, from in-memory channel state.
+  // Live counts for the options-menu badges, from in-memory group state.
   let threadsCount = 0;
   let mentionsCount = 0;
-  Object.values(channels).forEach((ch) =>
+  Object.values(groups).forEach((ch) =>
     ch.messages.forEach((m) => {
       if ((m.threadCount ?? 0) > 0) threadsCount++;
       if (
@@ -424,23 +424,23 @@ export function Sidebar() {
 
   // Search is a modal overlay, so it doesn't clear the active row.
   const isActive = (id: string) =>
-    currentChannelId === id &&
+    currentGroupId === id &&
     !settingsOpen &&
     !composeOpen &&
     !activePanel &&
-    !createChannelOpen;
+    !createGroupOpen;
 
-  // One Messenger-style list: channels + DMs together, newest activity first,
+  // One Messenger-style list: groups + DMs together, newest activity first,
   // archived chats hidden (they live under the rail's Archived view).
   const lastTs = (id: string) => {
-    const msgs = channels[id]?.messages ?? [];
+    const msgs = groups[id]?.messages ?? [];
     return msgs.length ? (msgs[msgs.length - 1].ts ?? 0) : 0;
   };
-  let ids = [...channelOrder, ...dmOrder].filter(
-    (id) => channels[id] && !isArchived(id),
+  let ids = [...groupOrder, ...dmOrder].filter(
+    (id) => groups[id] && !isArchived(id),
   );
-  if (chatFilter === "unread") ids = ids.filter((id) => (unreadByChannel[id] ?? 0) > 0);
-  if (chatFilter === "groups") ids = ids.filter((id) => channels[id].type !== "dm");
+  if (chatFilter === "unread") ids = ids.filter((id) => (unreadByGroup[id] ?? 0) > 0);
+  if (chatFilter === "groups") ids = ids.filter((id) => groups[id].type !== "dm");
   ids.sort((a, b) => lastTs(b) - lastTs(a));
 
   // People & Archived are rail-level nav items that take over the sidebar
@@ -477,7 +477,7 @@ export function Sidebar() {
                 </DropdownMenuItem>
               ))}
               <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={openCreateChannel}>
+              <DropdownMenuItem onClick={openCreateGroup}>
                 <Plus />
                 Create a group
               </DropdownMenuItem>
@@ -536,14 +536,14 @@ export function Sidebar() {
       {/* Conversations */}
       <div className="app-scroll flex-1 overflow-y-auto px-2 pb-3 pt-1">
         {ids.map((id) => {
-          const ch = channels[id];
+          const ch = groups[id];
           const active = isActive(id);
-          const unread = unreadByChannel[id] ?? 0;
+          const unread = unreadByGroup[id] ?? 0;
           const preview = previewOf(ch);
           return (
             <div key={id} className="group relative">
               <button
-                onClick={() => selectChannel(id)}
+                onClick={() => selectGroup(id)}
                 title={unread ? `${unread} unread` : undefined}
                 className={`flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left transition-colors ${
                   active ? "bg-app-accent-soft" : "hover:bg-app-hover"
@@ -597,7 +597,7 @@ export function Sidebar() {
           );
         })}
         {ids.length === 0 &&
-          (!rosterLoaded && channelOrder.length === 0 && dmOrder.length === 0 ? (
+          (!rosterLoaded && groupOrder.length === 0 && dmOrder.length === 0 ? (
             <ConversationSkeleton />
           ) : (
             <div className="px-4 py-10 text-center text-[13.5px] text-app-muted">

@@ -569,7 +569,7 @@ function NotificationsPanel() {
       ))}
       {prefs.level === 1 && (
         <p className="mt-1 px-3 text-[12px] text-app-muted">
-          Mentions in end-to-end encrypted channels can’t be detected by the
+          Mentions in end-to-end encrypted groups can’t be detected by the
           server, so at this level only direct messages notify you.
         </p>
       )}
