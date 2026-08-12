@@ -23,6 +23,7 @@ import type {
   ServerToClientEvents,
 } from "./src/lib/socket-events";
 import { type Group, type User, deriveUser } from "./src/lib/chat-data";
+import { dmIdFor } from "./src/lib/dm-id";
 import * as store from "./src/server/store";
 import * as keyStore from "./src/server/key-store";
 import * as mlsDs from "./src/server/mls-ds";
@@ -464,9 +465,11 @@ app.prepare().then(async () => {
       const trimmed = (text || "").trim();
       const recipient = store.userByKey(recipientId);
       if ((!trimmed && !enc) || !recipient) return;
-      // The DM id is the recipient's bare key (no "dm-" prefix); the group's
-      // `type: "dm"` is what distinguishes it from a group.
-      const dmId = recipientId;
+      // The DM id is derived from BOTH participants (no "dm-" prefix); the
+      // group's `type: "dm"` is what distinguishes it from a group. Keying it
+      // by the recipient alone merged every sender who messaged the same
+      // person into one thread — see `dmIdFor`.
+      const dmId = dmIdFor(userId, recipientId);
       const isNew = !store.groupExists(dmId);
       store.ensureDm(dmId, recipient);
       // Both participants are members of the DM.
@@ -483,13 +486,15 @@ app.prepare().then(async () => {
       bumpUnread(dmId);
       maybePush(dmId, userId, me.name);
       if (isNew) {
-        const group = store.getGroup(dmId, userId);
         // Announce to both participants (any of their sockets), not the whole
-        // workspace — DMs are private.
-        if (group) {
-          io.to("user:" + userId)
-            .to("user:" + recipientId)
-            .emit("group:created", { group });
+        // workspace — DMs are private. A DM's meta is viewer-relative (`name`
+        // and `user` are *the other person*), so each side gets its own view:
+        // sending the creator's copy to the recipient made their sidebar entry
+        // name themselves as the peer, and their client then sealed to their own
+        // devices instead of the sender's.
+        for (const viewerId of new Set([userId, recipientId])) {
+          const group = store.getGroup(dmId, viewerId);
+          if (group) io.to("user:" + viewerId).emit("group:created", { group });
         }
       }
     });

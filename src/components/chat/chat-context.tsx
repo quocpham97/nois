@@ -27,6 +27,7 @@ import {
   messageExcerpt,
   nowTime,
 } from "@/lib/chat-data";
+import { dmIdFor } from "@/lib/dm-id";
 import { useSocket } from "./socket-context";
 import {
   consumeOneTimePreKey,
@@ -1010,13 +1011,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     [],
   );
 
-  // The DM peer's uid for a group, from its viewer-corrected partner (works
-  // for both participants, unlike the non-symmetric group id). The partner's
-  // `id` is the key their E2EE bundles are published under — derive it from
-  // there, never from the display name (real users are keyed by email). The id
-  // itself is the creator-side peer key, so it's the correct fallback.
+  // The DM peer's uid for a group, from its viewer-corrected partner. The
+  // partner's `id` is the key their E2EE bundles are published under — derive
+  // it from there, never from the display name (real users are keyed by email)
+  // and never from the group id, which is an opaque hash of the pair. Empty
+  // when the partner isn't known yet; callers treat that as "can't seal".
   const dmPeerId = useCallback((groupId: string): string => {
-    return groupsRef.current[groupId]?.user?.id ?? groupId;
+    return groupsRef.current[groupId]?.user?.id ?? "";
   }, []);
 
   // Fetch the prekey bundles of every device of every member of a group
@@ -3688,9 +3689,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     // DMs by and that their E2EE bundles are published under) — never guessed
     // from the display name, which fails for real users keyed by email.
     const recipientId = user.id;
-    // DM id == the peer's stable uid (no "dm-" prefix): the flat id space is
-    // shared with groups, and `type` distinguishes them.
-    const dmId = recipientId;
+    // DM id == an opaque hash of both participants' uids (no "dm-" prefix):
+    // the flat id space is shared with groups, and `type` distinguishes them.
+    // Must match the server's `dmIdFor` so our optimistic group is the same
+    // conversation the server acks into.
+    const dmId = dmIdFor(userId, recipientId);
     const clientId = "tmp-" + Date.now();
     const optimistic: Message = {
       id: clientId,
@@ -3748,7 +3751,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     } else {
       markFailed(clientId, "Not sent — encryption isn’t available on this device.");
     }
-  }, [composeText, composeRecipients, workspaceMembers, scrollToBottom, socket, myUser, armFailTimer, buildEnvelope, navigateTo, markFailed]);
+  }, [composeText, composeRecipients, workspaceMembers, scrollToBottom, socket, myUser, userId, armFailTimer, buildEnvelope, navigateTo, markFailed]);
 
   const openSearch = useCallback(() => {
     setSearchOpen(true);

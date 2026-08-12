@@ -94,8 +94,8 @@ const newId = () =>
     .padStart(4, "0")}-${randomBytes(3).toString("hex")}`;
 
 // Opaque group id: a random hex hash so the id (and thus the /<id> URL)
-// never leaks the group name. DMs share this flat id space but are keyed by
-// the peer's (non-hex) user key, so the two effectively never collide.
+// never leaks the group name. DMs share this flat id space but are keyed by a
+// 20-char hash of the participant pair (`dmIdFor`), so the two never collide.
 const newGroupId = () => randomBytes(8).toString("hex");
 
 /** Next per-group sequence for a top-level message. */
@@ -474,7 +474,7 @@ export function groupExists(groupId: string): boolean {
 }
 
 /** Whether a group is a 1:1 DM (vs a group). `type` is the sole
- *  discriminator — ids no longer carry a "dm-" prefix. */
+ *  discriminator — a DM id is an opaque pair hash, not a "dm-" prefix. */
 export function isDm(groupId: string): boolean {
   return groups.get(groupId)?.type === "dm";
 }
@@ -502,6 +502,16 @@ export function addMember(groupId: string, userId: string): boolean {
     members.set(groupId, set);
   }
   if (set.has(userId)) return false;
+  // A DM is 1:1 by construction — its id is derived from exactly two uids
+  // (`dmIdFor`), and `dmForViewer` picks "the other member" to name it. Refuse
+  // a third member rather than silently turning the thread into a group whose
+  // participants disagree about who they're talking to.
+  if (groups.get(groupId)?.type === "dm" && set.size >= 2) {
+    console.error(
+      `[store] refusing to add ${userId} to DM ${groupId} (already 1:1)`,
+    );
+    return false;
+  }
   set.add(userId);
   bg(
     getPool().query(
