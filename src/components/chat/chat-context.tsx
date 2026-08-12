@@ -214,13 +214,20 @@ function pathToId(pathname: string): string {
   return decodeURIComponent(seg);
 }
 
-// The server holds only pinned message ids; resolve each to a display snippet
-// from local IndexedDB (a pin whose message isn't stored locally is skipped).
-async function resolvePins(pinIds: string[]): Promise<Pinned[]> {
+// The server holds only pinned message ids; resolve each to a display snippet.
+// The local store comes first, then whatever the group has in memory: a client
+// whose store is unavailable (see message-db.ts) holds its messages only in
+// state, and store-only resolution left it with no pins at all. A message that
+// is still encrypted resolves to nothing so a later pass can pick it up once
+// the decrypt effect has run.
+async function resolvePins(
+  pinIds: string[],
+  lookup?: (id: string) => Message | undefined,
+): Promise<Pinned[]> {
   const out: Pinned[] = [];
   for (const id of pinIds) {
-    const m = await msgdb.getMessage(id);
-    if (m) out.push({ id, author: m.author, text: m.text });
+    const m = (await msgdb.getMessage(id)) ?? lookup?.(id);
+    if (m && (m.text || !m.enc)) out.push({ id, author: m.author, text: m.text });
   }
   return out;
 }
@@ -557,13 +564,33 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     [myUser.name],
   );
 
-  // Resolve pin ids → snippets from IndexedDB and merge into a group's state.
+  // Resolve pin ids → snippets (local store, else the group's in-memory
+  // messages) and merge into a group's state.
   const applyResolvedPins = useCallback(
     async (groupId: string, pinIds: string[]) => {
-      const pinned = await resolvePins(pinIds);
+      const pinned = await resolvePins(pinIds, (id) => {
+        const ch = groupsRef.current[groupId];
+        if (!ch) return undefined;
+        for (const m of ch.messages) {
+          if (m.id === id) return m;
+          const reply = m.threadReplies?.find((r) => r.id === id);
+          if (reply) return reply;
+        }
+        return undefined;
+      });
       setGroups((s) => {
         const ch = s[groupId];
         if (!ch) return s;
+        // Nothing new resolved — hand back the identical state so the retry
+        // effect can't spin on a pin no copy of which has arrived yet.
+        const same =
+          ch.pinIds?.length === pinIds.length &&
+          ch.pinIds.every((id, i) => id === pinIds[i]) &&
+          ch.pinned.length === pinned.length &&
+          pinned.every(
+            (p, i) => p.id === ch.pinned[i].id && p.text === ch.pinned[i].text,
+          );
+        if (same) return s;
         return { ...s, [groupId]: { ...ch, pinIds, pinned } };
       });
     },
@@ -771,6 +798,20 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     groupsRef.current = groups;
   }, [groups]);
+
+  // A pin can only be rendered once this device has the message it points at,
+  // and those arrive after the roster does (server replay, local page load, or
+  // the decrypt pass). Retry any group whose pins aren't fully resolved yet
+  // whenever its messages change; applyResolvedPins returns the state unchanged
+  // when nothing new resolves, so this settles instead of looping.
+  useEffect(() => {
+    for (const [groupId, ch] of Object.entries(groups)) {
+      const want = ch.pinIds?.length ?? 0;
+      if (want && ch.pinned.length < want) {
+        void applyResolvedPins(groupId, ch.pinIds!);
+      }
+    }
+  }, [groups, applyResolvedPins]);
 
   // Mark an optimistic message failed if it isn't acked within the timeout.
   // A late ack (e.g. a resend on reconnect) still reconciles it.
