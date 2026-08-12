@@ -609,6 +609,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           pinned: [],
           messages: [],
         };
+        // An empty local page must never wipe what's already on screen: when the
+        // store is unavailable every read comes back empty (message-db.ts
+        // degrades rather than throwing), and live + replayed messages in state
+        // are then the only copy this client has.
+        if (!loaded.length && ch.messages.length) return s;
         // Keep trailing un-acked optimistic messages across the (re)load.
         const pendingTail = ch.messages.filter(
           (m) => (m.pending || m.failed) && !loadedIds.has(m.id),
@@ -1690,7 +1695,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       });
     };
 
-    // Authorized roster from the server — drives the sidebar lists.
     // Append any messages held for `groupId` that `messages` doesn't have yet.
     // Called from inside a setGroups updater, so it must be idempotent: React
     // can invoke an updater twice (StrictMode), hence the entry is dropped in a
@@ -1703,6 +1707,63 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       return [...messages, ...held.filter((m) => !have.has(m.id)).map(withSelf)];
     };
 
+    // Merge server-replayed history straight into live state.
+    //
+    // The local SQLite/OPFS store is the durable home for message bodies, but it
+    // is unavailable in some clients — it's effectively single-tab, so a second
+    // tab's worker init fails and every msgdb call then resolves to an empty
+    // result instead of throwing (see message-db.ts). Such a client used to show
+    // every conversation as empty even though the server had just replayed it,
+    // because replay only ever landed in the store.
+    const mergeReplayed = (
+      groupId: string,
+      messages: Message[],
+      replies: { parentId: string; reply: Message }[],
+    ) => {
+      if (!messages.length && !replies.length) return;
+      setGroups((s) => {
+        const ch = s[groupId];
+        if (!ch) {
+          // Meta hasn't arrived yet — same holding pen as live arrivals.
+          const held = pendingMessagesRef.current.get(groupId) ?? [];
+          for (const m of messages) {
+            if (!held.some((h) => h.id === m.id)) held.push(m);
+          }
+          pendingMessagesRef.current.set(groupId, held);
+          return s;
+        }
+        const have = new Set(ch.messages.map((m) => m.id));
+        const fresh = messages.filter((m) => !have.has(m.id));
+        const byParent = new Map<string, Message[]>();
+        for (const { parentId, reply } of replies) {
+          byParent.set(parentId, [...(byParent.get(parentId) ?? []), reply]);
+        }
+        if (!fresh.length && !byParent.size) return s;
+        // Message ids are time-sortable (store.newId), so sorting by id restores
+        // send order; optimistic "tmp-" ids sort last and stay at the bottom.
+        const merged = [...ch.messages, ...fresh.map(withSelf)].sort((a, b) =>
+          a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+        );
+        return {
+          ...s,
+          [groupId]: {
+            ...ch,
+            messages: merged.map((m) => {
+              const add = byParent.get(m.id);
+              if (!add) return m;
+              const existing = m.threadReplies ?? [];
+              const seen = new Set(existing.map((r) => r.id));
+              const extra = add.filter((r) => !seen.has(r.id)).map(withSelf);
+              return extra.length
+                ? { ...m, threadReplies: [...existing, ...extra] }
+                : m;
+            }),
+          },
+        };
+      });
+    };
+
+    // Authorized roster from the server — drives the sidebar lists.
     const onGroupsList = ({ groups: roster }: { groups: Group[] }) => {
       setGroups((s) => {
         const next = { ...s };
@@ -1807,6 +1868,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           added = true;
         }
       }
+      // State, not just the store: a client whose store is unavailable has
+      // nowhere else to get this from, and loadLocalHistory would read back an
+      // empty page for it.
+      mergeReplayed(groupId, messages, replies);
       if (added && groupId === currentGroupIdRef.current) {
         void loadLocalHistory(groupId);
       }
