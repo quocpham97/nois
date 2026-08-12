@@ -465,8 +465,11 @@ export function GroupView({ ch }: { ch: Group }) {
     // send button, audio player) reads --sent-grad. Falls back to the viewer's
     // default chat color when this conversation hasn't set one. The app mark is
     // on --brand-grad and deliberately unaffected.
+    // min-h-0 is load-bearing: this wrapper is a flex child, and without it a
+    // flex item refuses to shrink below its content, so the message list grows
+    // past the viewport and its overflow-y-auto never scrolls.
     <div
-      className="flex min-w-0 flex-1 flex-col"
+      className="flex min-h-0 min-w-0 flex-1 flex-col"
       style={
         {
           "--sent-grad": gradientFor(ch.bubbleTheme ?? bubbleTheme),
