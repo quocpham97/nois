@@ -667,6 +667,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // both here (if the roster is already present) and synchronously in
   // onGroupsList from this ref; opening a conversation replaces it in full.
   const latestByGroupRef = useRef<Map<string, Message>>(new Map());
+  // Live messages that arrived for a conversation whose meta hadn't landed yet
+  // (a brand-new DM's first message racing its group:created). Filled by onNew,
+  // drained by onGroupCreated/onGroupsList — without this they'd only reappear
+  // from local history on the next reload.
+  const pendingMessagesRef = useRef<Map<string, Message[]>>(new Map());
   useEffect(() => {
     let cancelled = false;
     void msgdb.getLatestPerGroup().then((list) => {
@@ -1570,7 +1575,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       void msgdb.putMessage(groupId, message);
       setGroups((s) => {
         const ch = s[groupId];
-        if (!ch || ch.messages.some((m) => m.id === message.id)) return s;
+        // A message for a conversation whose meta hasn't arrived yet: hold it
+        // instead of dropping it (it's already in local history, but live state
+        // would stay empty until a reload). onGroupCreated/onGroupsList flush
+        // it as soon as the meta lands.
+        if (!ch) {
+          const held = pendingMessagesRef.current.get(groupId) ?? [];
+          if (!held.some((m) => m.id === message.id)) held.push(message);
+          pendingMessagesRef.current.set(groupId, held);
+          return s;
+        }
+        if (ch.messages.some((m) => m.id === message.id)) return s;
         return {
           ...s,
           [groupId]: { ...ch, messages: [...ch.messages, withSelf(message)] },
@@ -1676,6 +1691,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     };
 
     // Authorized roster from the server — drives the sidebar lists.
+    // Append any messages held for `groupId` that `messages` doesn't have yet.
+    // Called from inside a setGroups updater, so it must be idempotent: React
+    // can invoke an updater twice (StrictMode), hence the entry is dropped in a
+    // microtask instead of here.
+    const withHeld = (groupId: string, messages: Message[]): Message[] => {
+      const held = pendingMessagesRef.current.get(groupId);
+      if (!held?.length) return messages;
+      queueMicrotask(() => pendingMessagesRef.current.delete(groupId));
+      const have = new Set(messages.map((m) => m.id));
+      return [...messages, ...held.filter((m) => !have.has(m.id)).map(withSelf)];
+    };
+
     const onGroupsList = ({ groups: roster }: { groups: Group[] }) => {
       setGroups((s) => {
         const next = { ...s };
@@ -1689,8 +1716,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           const seed = latestByGroupRef.current.get(c.id);
           next[c.id] = {
             ...c,
-            messages:
+            messages: withHeld(
+              c.id,
               loaded?.length ? loaded : seed ? [withSelf(seed)] : loaded ?? [],
+            ),
           };
         }
         return next;
@@ -1790,7 +1819,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           ? s
           : {
               ...s,
-              [group.id]: { ...group, messages: group.messages.map(withSelf) },
+              [group.id]: {
+                ...group,
+                messages: withHeld(group.id, group.messages.map(withSelf)),
+              },
             },
       );
       const setOrder = group.type === "dm" ? setDmOrder : setGroupOrder;

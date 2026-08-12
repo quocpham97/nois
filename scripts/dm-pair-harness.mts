@@ -55,11 +55,20 @@ async function main() {
   const c = await connect(C);
   await sleep(400); // let each socket join its user:<uid> room
 
-  // Everything A is told about, from the moment both senders start.
+  // Everything A is told about, from the moment both senders start — in arrival
+  // order, which matters: the client can only file a message into a
+  // conversation it already knows about.
   const aMsgs: Msg[] = [];
   const aGroups: Group["group"][] = [];
-  a.on("message:new", (p: Msg) => aMsgs.push(p));
-  a.on("group:created", (p: Group) => aGroups.push(p.group));
+  const aLog: string[] = [];
+  a.on("message:new", (p: Msg) => {
+    aMsgs.push(p);
+    aLog.push(`message:new ${p.groupId}`);
+  });
+  a.on("group:created", (p: Group) => {
+    aGroups.push(p.group);
+    aLog.push(`group:created ${p.group.id}`);
+  });
 
   const stamp = Date.now();
   b.emit("dm:create", { recipientId: A, text: `from-b-${stamp}`, clientId: "b1" });
@@ -87,6 +96,17 @@ async function main() {
   const gAC = aGroups.find((g) => g.id === dmAC);
   check(gAB?.user?.id === B, "A's A↔B roster entry names B as the peer");
   check(gAC?.user?.id === C, "A's A↔C roster entry names C as the peer");
+
+  // A brand-new DM must be announced BEFORE its first message: group:created
+  // carries no bodies, so a message that arrives first has no conversation to
+  // land in and the sidebar shows the empty-DM placeholder instead of the text.
+  for (const [dm, label] of [[dmAB, "A↔B"], [dmAC, "A↔C"]] as const) {
+    check(
+      aLog.indexOf(`group:created ${dm}`) >= 0 &&
+        aLog.indexOf(`group:created ${dm}`) < aLog.indexOf(`message:new ${dm}`),
+      `the ${label} DM is announced before its first message arrives`,
+    );
+  }
 
   // Symmetry: A replying by composing a *new* DM to B must reuse the same
   // conversation, not open a second half-thread keyed the other way.

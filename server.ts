@@ -480,11 +480,6 @@ app.prepare().then(async () => {
       if (!message) return;
       store.markRead(dmId, userId);
       socket.emit("message:ack", { clientId, message });
-      // Deliver to both participants' user rooms (not just the DM room) so the
-      // recipient receives it even while viewing another conversation.
-      socket.to(memberRooms(dmId)).emit("message:new", { groupId: dmId, message });
-      bumpUnread(dmId);
-      maybePush(dmId, userId, me.name);
       if (isNew) {
         // Announce to both participants (any of their sockets), not the whole
         // workspace — DMs are private. A DM's meta is viewer-relative (`name`
@@ -492,11 +487,21 @@ app.prepare().then(async () => {
         // sending the creator's copy to the recipient made their sidebar entry
         // name themselves as the peer, and their client then sealed to their own
         // devices instead of the sender's.
+        //
+        // This MUST precede the message: `group:created` carries no bodies, and
+        // a client drops message:new for a conversation it doesn't have yet — so
+        // announcing afterwards left the recipient with an empty DM ("Say hi 👋"
+        // in the sidebar) until they reloaded.
         for (const viewerId of new Set([userId, recipientId])) {
           const group = store.getGroup(dmId, viewerId);
           if (group) io.to("user:" + viewerId).emit("group:created", { group });
         }
       }
+      // Deliver to both participants' user rooms (not just the DM room) so the
+      // recipient receives it even while viewing another conversation.
+      socket.to(memberRooms(dmId)).emit("message:new", { groupId: dmId, message });
+      bumpUnread(dmId);
+      maybePush(dmId, userId, me.name);
     });
 
     // Create a group. Public groups are announced to the whole workspace so
