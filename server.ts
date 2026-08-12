@@ -22,7 +22,12 @@ import type {
   ClientToServerEvents,
   ServerToClientEvents,
 } from "./src/lib/socket-events";
-import { type Group, type User, deriveUser } from "./src/lib/chat-data";
+import {
+  type Group,
+  type User,
+  deriveUser,
+  CHAT_GRADIENTS,
+} from "./src/lib/chat-data";
 import { dmIdFor } from "./src/lib/dm-id";
 import * as store from "./src/server/store";
 import * as keyStore from "./src/server/key-store";
@@ -665,6 +670,17 @@ app.prepare().then(async () => {
       const pinIds = store.togglePin(groupId, msgId, userId);
       if (pinIds === null) return;
       groupAudience(groupId)?.emit("pins:updated", { groupId, pinIds });
+    });
+
+    // Chat color is a property of the CONVERSATION, not of the person who set
+    // it: every member's bubbles follow it. Allowed for DMs too (group:update,
+    // which only handles name/topic, refuses those).
+    socket.on("group:setTheme", ({ groupId, theme }) => {
+      if (!authorized(groupId)) return;
+      if (theme !== null && !(theme in CHAT_GRADIENTS)) return;
+      if (!store.setGroupTheme(groupId, theme)) return;
+      const group = store.getGroup(groupId, userId);
+      if (group) emitGroupUpdated(group);
     });
 
     // Unpin everything in one shot — the pinned bar's dismiss clears the bar for

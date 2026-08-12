@@ -102,6 +102,8 @@ export type TypingPayload = { groupId: string };
 
 export type PinTogglePayload = { groupId: string; msgId: string };
 export type PinsClearPayload = { groupId: string };
+/** theme = a CHAT_GRADIENTS key, or null to fall back to each member's default. */
+export type GroupThemePayload = { groupId: string; theme: string | null };
 
 // E2EE key distribution (Phase 0). Devices publish public key bundles and
 // fetch peers' prekey bundles to bootstrap sessions. Public material only —
@@ -535,6 +537,8 @@ export type ClientToServerEvents = {
   "pin:toggle": (payload: PinTogglePayload) => void;
   /** Unpin everything in a group (the pinned bar's dismiss, for everyone). */
   "pins:clear": (payload: PinsClearPayload) => void;
+  /** Set this conversation's chat color for every member. */
+  "group:setTheme": (payload: GroupThemePayload) => void;
   "keys:publish": (payload: KeysPublishPayload) => void;
   "keys:supplement": (payload: KeysSupplementPayload) => void;
   "keys:fetch": (

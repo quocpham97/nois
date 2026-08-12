@@ -3,6 +3,7 @@
 import { ChevronLeft, Info, Phone, Video } from "lucide-react";
 import {
   type Group,
+  gradientFor,
   groupMembers,
   presenceColor,
   presenceLabel,
@@ -21,7 +22,7 @@ import { KeyChangeBanner, RecoveryWaitingBanner } from "../chat/key-backup";
 // real <Composer>, so E2EE decrypt, reactions, replies, edits and drafts are
 // exactly the desktop behavior — nothing about messaging is re-implemented.
 export function ConversationScreen({ ch }: { ch: Group }) {
-  const { selectGroup, toggleGroupInfo, scrollRef } = useChat();
+  const { selectGroup, toggleGroupInfo, scrollRef, bubbleTheme } = useChat();
   const { user: me } = useSocket();
   const { startCall, call } = useCall();
 
@@ -35,7 +36,13 @@ export function ConversationScreen({ ch }: { ch: Group }) {
     : `${members.length} members`;
 
   return (
-    <div className="flex h-full flex-col bg-app-bg">
+    // Same conversation-scoped chat color as the desktop GroupView.
+    <div
+      className="flex h-full flex-col bg-app-bg"
+      style={
+        { "--sent-grad": gradientFor(ch.bubbleTheme ?? bubbleTheme) } as React.CSSProperties
+      }
+    >
       {/* header */}
       <div className="flex shrink-0 items-center gap-2.5 border-b border-app-border px-3 pb-2.5 pt-1">
         <button

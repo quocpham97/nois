@@ -95,8 +95,7 @@ export function GroupInfoPanel() {
     removeGroupMember,
     myUser: me,
     workspaceMembers,
-    bubbleTheme,
-    setBubbleTheme,
+    setGroupTheme,
     likeEmoji,
     setLikeEmoji,
     openSearch,
@@ -214,24 +213,37 @@ export function GroupInfoPanel() {
 
         {/* Customize chat */}
         <Section label="Customize chat">
-          <div className="mb-2 text-[12.5px] text-app-muted">Chat color</div>
-          <div className="mb-4 flex gap-2.5">
+          {/* This sets the color for the CONVERSATION — every member sees it.
+              The per-user fallback lives in Settings → "Default chat color". */}
+          <div className="mb-2 text-[12.5px] text-app-muted">
+            Chat color · everyone in this chat
+          </div>
+          <div className="mb-1.5 flex items-center gap-2.5">
             {Object.entries(CHAT_GRADIENTS).map(([key, grad]) => (
               <button
                 key={key}
                 title={key}
-                onClick={() => setBubbleTheme(key)}
+                onClick={() => setGroupTheme(ch.id, key)}
                 className="size-8 rounded-full"
                 style={{
                   background: grad,
                   boxShadow:
-                    bubbleTheme === key
+                    ch.bubbleTheme === key
                       ? "0 0 0 2px var(--app-bg), 0 0 0 4px var(--app-accent)"
                       : "none",
                 }}
               />
             ))}
           </div>
+          <button
+            onClick={() => setGroupTheme(ch.id, null)}
+            disabled={!ch.bubbleTheme}
+            className="mb-4 text-[12px] font-medium text-app-accent hover:underline disabled:opacity-40 disabled:hover:no-underline"
+          >
+            {ch.bubbleTheme
+              ? "Reset to each member's default"
+              : "Using each member's default color"}
+          </button>
           <div className="mb-2 text-[12.5px] text-app-muted">Quick emoji</div>
           <div className="flex gap-2">
             {QUICK_EMOJI.map((e) => (

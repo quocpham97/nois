@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Info, Phone, Pin, Search, Video, X } from "lucide-react";
 import {
+  gradientFor,
   type Group,
   type Message as Msg,
   groupMembers,
@@ -406,8 +407,14 @@ function EmptyState({ ch }: { ch: Group }) {
 }
 
 export function GroupView({ ch }: { ch: Group }) {
-  const { scrollRef, historyCursor, loadOlder, highlightMsgId, clearHighlight } =
-    useChat();
+  const {
+    scrollRef,
+    historyCursor,
+    loadOlder,
+    highlightMsgId,
+    clearHighlight,
+    bubbleTheme,
+  } = useChat();
   const empty = ch.messages.length === 0;
   const hasOlder = historyCursor[ch.id] != null;
 
@@ -454,7 +461,18 @@ export function GroupView({ ch }: { ch: Group }) {
   });
 
   return (
-    <>
+    // The conversation's own chat color, scoped: everything inside (bubbles,
+    // send button, audio player) reads --sent-grad. Falls back to the viewer's
+    // default chat color when this conversation hasn't set one. The app mark is
+    // on --brand-grad and deliberately unaffected.
+    <div
+      className="flex min-w-0 flex-1 flex-col"
+      style={
+        {
+          "--sent-grad": gradientFor(ch.bubbleTheme ?? bubbleTheme),
+        } as React.CSSProperties
+      }
+    >
       <GroupHeader ch={ch} />
       <PinnedBar ch={ch} />
       <div
@@ -491,6 +509,6 @@ export function GroupView({ ch }: { ch: Group }) {
       </div>
       {!empty && <TypingIndicator ch={ch} />}
       <Composer group={ch} inThread={false} />
-    </>
+    </div>
   );
 }

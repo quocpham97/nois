@@ -168,6 +168,11 @@ export type Group = {
    * client resolves each id to a `Pinned` snippet from its local IndexedDB.
    */
   pinIds?: string[];
+  /** This conversation's chat color (a CHAT_GRADIENTS key), shared by every
+   *  member. null/unset means "use the viewer's own default chat color". Sent as
+   *  an explicit null when cleared: the client merges group meta by spreading,
+   *  and an absent key can't unset a previous value. */
+  bubbleTheme?: string | null;
   pinned: Pinned[];
   messages: Message[];
 };

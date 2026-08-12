@@ -45,12 +45,14 @@ export function WorkspaceRail() {
     // overlay this corner in the Electron shell; app-drag makes the rail the
     // window's grab area.
     <aside className="app-drag flex w-[68px] shrink-0 flex-col items-center gap-2 border-r border-app-border bg-rail py-3.5 desktop:pt-12">
-      {/* Nois "Bubble N" app mark — white bubble + gradient N on the gradient
-          tile (same mark as the login page); click returns to Chats */}
+      {/* Nois "Bubble N" app mark — white bubble + gradient N on the brand
+          tile (same mark as the login page); click returns to Chats. Uses
+          --brand-grad, not the chat color: the logo is product identity, not a
+          per-user preference. */}
       <button
         title={workspaceName}
         onClick={closePanel}
-        className="sent-grad mb-1 flex size-10 items-center justify-center rounded-full text-white"
+        className="brand-grad mb-1 flex size-10 items-center justify-center rounded-full text-white"
       >
         <svg width="24" height="24" viewBox="0 0 60 60" fill="none" aria-hidden>
           <path

@@ -95,6 +95,10 @@ export function ensureSchema(): Promise<void> {
            created_at timestamptz NOT NULL DEFAULT now()
          )`,
       );
+      // Existing deployments: add the conversation chat color.
+      await pool.query(
+        `ALTER TABLE "group" ADD COLUMN IF NOT EXISTS bubble_theme text`,
+      );
       await pool.query(
         `CREATE TABLE IF NOT EXISTS group_member (
            group_id text NOT NULL,

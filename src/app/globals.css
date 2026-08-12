@@ -161,6 +161,9 @@
   --recv-bubble: #EFEFF3;
   --recv-text: #1C1C1E;
   --sent-grad: linear-gradient(150deg, #14A3FF 0%, #2E7BFF 55%, #6A5CFF 100%);
+  /* The app mark's own gradient. Deliberately NOT --sent-grad: picking a chat
+     color must not restyle the product's logo. */
+  --brand-grad: linear-gradient(150deg, #14A3FF 0%, #2E7BFF 55%, #6A5CFF 100%);
   --app-shadow-lg: 0 12px 40px -8px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.08);
   --app-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.1);
   --app-shadow-pop: 0 4px 16px rgba(0, 0, 0, 0.16);
@@ -225,6 +228,9 @@
   --recv-bubble: #303032;
   --recv-text: #E4E6EB;
   --sent-grad: linear-gradient(150deg, #14A3FF 0%, #2E7BFF 55%, #6A5CFF 100%);
+  /* The app mark's own gradient. Deliberately NOT --sent-grad: picking a chat
+     color must not restyle the product's logo. */
+  --brand-grad: linear-gradient(150deg, #14A3FF 0%, #2E7BFF 55%, #6A5CFF 100%);
   --app-shadow-lg: 0 12px 40px -8px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
   --app-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
   --app-shadow-pop: 0 4px 16px rgba(0, 0, 0, 0.5);
@@ -245,6 +251,9 @@
 /* ---- Messenger — surfaces, scrollbars & keyframes ---- */
 .sent-grad {
   background: var(--sent-grad);
+}
+.brand-grad {
+  background: var(--brand-grad);
 }
 .app-scroll::-webkit-scrollbar {
   width: 8px;

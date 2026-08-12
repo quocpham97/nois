@@ -437,7 +437,10 @@ type ChatContextValue = {
   setChatFilter: (f: ChatFilter) => void;
 
   /** Messenger customization (persisted in the profile). */
+  /** The viewer's own default chat color (used where no conversation applies). */
   bubbleTheme: string;
+  /** This conversation's chat color, for every member. null → each member's own default. */
+  setGroupTheme: (groupId: string, theme: string | null) => void;
   setBubbleTheme: (t: string) => void;
   likeEmoji: string;
   setLikeEmoji: (e: string) => void;
@@ -3719,6 +3722,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     (t: string) => updateProfile({ bubbleTheme: t }),
     [updateProfile],
   );
+  // A conversation's chat color is shared: the server stores it on the group and
+  // broadcasts group:updated to every member, so all of them re-render. No
+  // optimistic write — the broadcast comes back to us too.
+  const setGroupTheme = useCallback(
+    (groupId: string, theme: string | null) => {
+      socket?.emit("group:setTheme", { groupId, theme });
+    },
+    [socket],
+  );
   const setLikeEmoji = useCallback(
     (e: string) => updateProfile({ likeEmoji: e }),
     [updateProfile],
@@ -4024,6 +4036,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       chatFilter,
       setChatFilter,
       bubbleTheme,
+      setGroupTheme,
       setBubbleTheme,
       likeEmoji,
       setLikeEmoji,
@@ -4140,6 +4153,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       removeWorkspaceMember,
       chatFilter,
       bubbleTheme,
+      setGroupTheme,
       setBubbleTheme,
       likeEmoji,
       setLikeEmoji,

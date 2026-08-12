@@ -134,7 +134,7 @@ function BrandPanel() {
       <div className="absolute -bottom-40 left-[120px] hidden size-[420px] rounded-full dark:block dark:[background:radial-gradient(circle,rgba(106,92,255,0.28),transparent_68%)]" />
 
       <div className="relative flex items-center gap-3">
-        <span className="flex size-10 items-center justify-center rounded-xl bg-white/20 backdrop-blur-sm dark:bg-[image:var(--sent-grad)]">
+        <span className="flex size-10 items-center justify-center rounded-xl bg-white/20 backdrop-blur-sm dark:bg-[image:var(--brand-grad)]">
           <NoisMark />
         </span>
         <span className="text-[24px] font-extrabold tracking-[-0.02em] text-white">Nois</span>
@@ -212,7 +212,7 @@ function LoginCard() {
       <div className="flex flex-1 items-center justify-center p-8 sm:p-14">
         <div className="flex w-[380px] max-w-full flex-col">
           {/* On small screens the brand panel is hidden — show the mark here. */}
-          <span className="sent-grad mb-8 flex size-10 items-center justify-center rounded-xl lg:hidden">
+          <span className="brand-grad mb-8 flex size-10 items-center justify-center rounded-xl lg:hidden">
             <NoisMark size={22} />
           </span>
 

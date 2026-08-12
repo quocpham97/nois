@@ -119,11 +119,12 @@ function bg(p: Promise<unknown>): void {
 function persistGroup(m: GroupMeta): void {
   bg(
     getPool().query(
-      `INSERT INTO "group" (id, type, name, icon, topic, private, dm_user)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)
+      `INSERT INTO "group" (id, type, name, icon, topic, private, dm_user, bubble_theme)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
        ON CONFLICT (id) DO UPDATE SET
          type=EXCLUDED.type, name=EXCLUDED.name, icon=EXCLUDED.icon,
-         topic=EXCLUDED.topic, private=EXCLUDED.private, dm_user=EXCLUDED.dm_user`,
+         topic=EXCLUDED.topic, private=EXCLUDED.private, dm_user=EXCLUDED.dm_user,
+         bubble_theme=EXCLUDED.bubble_theme`,
       [
         m.id,
         m.type,
@@ -132,6 +133,7 @@ function persistGroup(m: GroupMeta): void {
         m.topic ?? null,
         !!m.private,
         m.user ? JSON.stringify(m.user) : null,
+        m.bubbleTheme ?? null,
       ],
     ),
   );
@@ -164,7 +166,7 @@ function persistMessage(
 async function loadFromDb(): Promise<void> {
   const pool = getPool();
   const ch = await pool.query(
-    `SELECT id, type, name, icon, topic, private, dm_user FROM "group"`,
+    `SELECT id, type, name, icon, topic, private, dm_user, bubble_theme FROM "group"`,
   );
   for (const r of ch.rows) {
     groups.set(r.id, {
@@ -175,6 +177,7 @@ async function loadFromDb(): Promise<void> {
       ...(r.topic ? { topic: r.topic } : {}),
       ...(r.private ? { private: true } : {}),
       ...(r.dm_user ? { user: r.dm_user as User, presence: "active" } : {}),
+      ...(r.bubble_theme ? { bubbleTheme: r.bubble_theme as string } : {}),
     } as GroupMeta);
   }
   const mem = await pool.query("SELECT group_id, user_id FROM group_member");
@@ -552,6 +555,8 @@ export function listPins(groupId: string): string[] {
 function toGroup(meta: GroupMeta, viewerId: string): Group {
   return {
     ...dmForViewer(meta, viewerId),
+    // Always present, explicitly null when unset — see Group.bubbleTheme.
+    bubbleTheme: meta.bubbleTheme ?? null,
     pinIds: listPins(meta.id),
     pinned: [],
     memberList: listMembers(meta.id),
@@ -576,6 +581,22 @@ export function getGroup(
 ): Group | undefined {
   const meta = groups.get(groupId);
   return meta ? toGroup(meta, viewerId) : undefined;
+}
+
+/**
+ * Set a conversation's chat color — a shared property of the conversation, so
+ * every member sees the same bubbles (unlike the per-user default in a profile).
+ * Works for DMs too, which `updateGroup` deliberately refuses. `null` clears it
+ * back to each viewer's own default. Returns false for an unknown group.
+ */
+export function setGroupTheme(groupId: string, theme: string | null): boolean {
+  const meta = groups.get(groupId);
+  if (!meta) return false;
+  if (theme) meta.bubbleTheme = theme;
+  else delete meta.bubbleTheme;
+  groups.set(groupId, meta);
+  persistGroup(meta);
+  return true;
 }
 
 /** Remove every pin in a group at once (the pinned bar's "unpin all"). Returns
