@@ -578,6 +578,15 @@ export function getGroup(
   return meta ? toGroup(meta, viewerId) : undefined;
 }
 
+/** Remove every pin in a group at once (the pinned bar's "unpin all"). Returns
+ *  the new — empty — list, or null for an unknown group. */
+export function clearPins(groupId: string): string[] | null {
+  if (!groupExists(groupId)) return null;
+  pins.set(groupId, []);
+  bg(getPool().query("DELETE FROM pin WHERE group_id=$1", [groupId]));
+  return [];
+}
+
 /** Toggle a message's pinned state in a group; returns the new pin id list. */
 export function togglePin(
   groupId: string,

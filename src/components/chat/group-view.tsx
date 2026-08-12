@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Info, Phone, Pin, Search, Video, X } from "lucide-react";
 import {
   type Group,
@@ -229,10 +229,44 @@ function GroupHeader({ ch }: { ch: Group }) {
 }
 
 function PinnedBar({ ch }: { ch: Group }) {
-  const { pinnedBarHidden, hidePinnedBar, jumpToMessage } = useChat();
-  if (!ch.pinned || ch.pinned.length === 0 || pinnedBarHidden[ch.id])
-    return null;
-  const p = ch.pinned[0];
+  const { clearPins, jumpToMessage } = useChat();
+  const pins = ch.pinned ?? [];
+  // Dismissing unpins for the whole group, so it confirms first — the same
+  // two-step inline pattern as deleting a group. The confirm is keyed to this
+  // group's current pin set, so switching conversation or any pin change drops
+  // it rather than leaving a stale confirm over fresh pins.
+  const [confirmFor, setConfirmFor] = useState<string | null>(null);
+  const pinKey = `${ch.id}:${pins.length}:${pins[0]?.id ?? ""}`;
+  const confirming = confirmFor === pinKey;
+  if (!pins.length) return null;
+  const p = pins[0];
+
+  if (confirming)
+    return (
+      <div className="flex items-center gap-2.5 border-b border-app-border bg-panel px-4 py-2 text-[13px]">
+        <span className="flex text-app-accent">
+          <Pin size={14} strokeWidth={1.8} />
+        </span>
+        <span className="min-w-0 flex-1 text-app-text">
+          Unpin {pins.length === 1 ? "this message" : `all ${pins.length}`} for
+          everyone in {ch.type === "dm" ? "this chat" : ch.name}?
+        </span>
+        <button
+          onClick={() => clearPins(ch.id)}
+          className="shrink-0 rounded-full px-3 py-1 text-[12.5px] font-semibold text-white"
+          style={{ background: "var(--app-red)" }}
+        >
+          Unpin all
+        </button>
+        <button
+          onClick={() => setConfirmFor(null)}
+          className="shrink-0 rounded-full bg-panel-2 px-3 py-1 text-[12.5px] font-semibold text-app-muted hover:bg-panel-hover"
+        >
+          Cancel
+        </button>
+      </div>
+    );
+
   return (
     <div className="flex items-center gap-2.5 border-b border-app-border bg-panel px-4 py-2 text-[13px]">
       <span className="flex text-app-accent">
@@ -243,9 +277,7 @@ function PinnedBar({ ch }: { ch: Group }) {
         title="Jump to pinned message"
         className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
       >
-        <span className="font-medium text-app-muted">
-          {ch.pinned.length} pinned
-        </span>
+        <span className="font-medium text-app-muted">{pins.length} pinned</span>
         <span className="text-app-faint">·</span>
         <span className="flex-1 truncate text-app-text">
           <span className="font-semibold">{p.author.name}: </span>
@@ -253,8 +285,8 @@ function PinnedBar({ ch }: { ch: Group }) {
         </span>
       </button>
       <button
-        onClick={() => hidePinnedBar(ch.id)}
-        title="Hide"
+        onClick={() => setConfirmFor(pinKey)}
+        title="Unpin all for everyone"
         className="flex text-app-faint hover:text-app-text"
       >
         <X size={14} strokeWidth={2} />

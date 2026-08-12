@@ -326,8 +326,8 @@ type ChatContextValue = {
   toggleReaction: (msgId: string, emoji: string) => void;
 
   /** Per-group dismissal of the pinned bar (id → hidden). */
-  pinnedBarHidden: Record<string, boolean>;
-  hidePinnedBar: (groupId: string) => void;
+  /** Unpin every message in a group — clears the pinned bar for everyone. */
+  clearPins: (groupId: string) => void;
   /** Which group's pinned-list popover is open (header button). */
   pinnedPanelFor: string | null;
   togglePinnedPanel: (groupId: string) => void;
@@ -477,9 +477,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const [hoverMsgId, setHoverMsgId] = useState<string | null>(null);
   const [pickerOpenFor, setPickerOpenFor] = useState<string | null>(null);
   const [moreOpenFor, setMoreOpenFor] = useState<string | null>(null);
-  const [pinnedBarHidden, setPinnedBarHidden] = useState<
-    Record<string, boolean>
-  >({});
   const [pinnedPanelFor, setPinnedPanelFor] = useState<string | null>(null);
   const [highlightMsgId, setHighlightMsgId] = useState<string | null>(null);
   // When a jump-to-message is loading a window around a target, the group-join
@@ -3535,10 +3532,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   }, []);
   const closeGroupInfo = useCallback(() => setGroupInfoOpen(false), []);
 
-  const hidePinnedBar = useCallback(
-    (groupId: string) =>
-      setPinnedBarHidden((s) => ({ ...s, [groupId]: true })),
-    [],
+  // Dismissing the pinned bar unpins everything for the whole group. The
+  // server's pins:updated comes back to us too, so state isn't touched here.
+  const clearPins = useCallback(
+    (groupId: string) => {
+      socket?.emit("pins:clear", { groupId });
+    },
+    [socket],
   );
   const togglePinnedPanel = useCallback(
     (groupId: string) =>
@@ -3956,8 +3956,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       toggleMore,
       closeMore,
       toggleReaction,
-      pinnedBarHidden,
-      hidePinnedBar,
+      clearPins,
       pinnedPanelFor,
       togglePinnedPanel,
       togglePin,
@@ -4081,8 +4080,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       toggleMore,
       closeMore,
       toggleReaction,
-      pinnedBarHidden,
-      hidePinnedBar,
+      clearPins,
       pinnedPanelFor,
       togglePinnedPanel,
       togglePin,

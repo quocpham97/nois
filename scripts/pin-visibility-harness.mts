@@ -128,13 +128,30 @@ async function main() {
     `pinned bar shows the message text${barText ? ` (got: ${barText.trim()})` : ""}`,
   );
 
-  // Unpinning must clear it back out for the same viewer.
-  pinner.emit("pin:toggle", { groupId, msgId });
+  // Dismissing the bar in the UI unpins for everyone: it confirms first, and
+  // the pinner (who never opened a browser) must see the pin list empty out.
+  const pinsAfterClear = new Promise<string[]>((resolve) => {
+    pinner.on("pins:updated", (p: { groupId: string; pinIds: string[] }) => {
+      if (p.groupId === groupId) resolve(p.pinIds);
+    });
+  });
+  await page.getByTitle("Unpin all for everyone").first().click();
+  const confirmVisible = await page
+    .waitForSelector("text=Unpin this message for everyone", { timeout: 5000 })
+    .then(() => true)
+    .catch(() => false);
+  check(confirmVisible, "dismissing the bar asks for confirmation first");
+  await page.getByRole("button", { name: "Unpin all" }).first().click();
+
+  check(
+    (await Promise.race([pinsAfterClear, sleep(8000).then(() => null)]))?.length === 0,
+    "confirming unpins for everyone, not just the viewer",
+  );
   const cleared = await page
     .waitForSelector("text=1 pinned", { state: "detached", timeout: 15000 })
     .then(() => true)
     .catch(() => false);
-  check(cleared, "unpinning clears the viewer's pinned bar");
+  check(cleared, "the viewer's own pinned bar goes away");
 
   console.log("\n" + results.join("\n"));
   const failed = results.filter((r) => r.startsWith("FAIL")).length;

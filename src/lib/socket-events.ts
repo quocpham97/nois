@@ -101,6 +101,7 @@ export type GroupOpResult = { ok: true } | { ok: false; error: string };
 export type TypingPayload = { groupId: string };
 
 export type PinTogglePayload = { groupId: string; msgId: string };
+export type PinsClearPayload = { groupId: string };
 
 // E2EE key distribution (Phase 0). Devices publish public key bundles and
 // fetch peers' prekey bundles to bootstrap sessions. Public material only —
@@ -532,6 +533,8 @@ export type ClientToServerEvents = {
   "typing:start": (payload: TypingPayload) => void;
   "typing:stop": (payload: TypingPayload) => void;
   "pin:toggle": (payload: PinTogglePayload) => void;
+  /** Unpin everything in a group (the pinned bar's dismiss, for everyone). */
+  "pins:clear": (payload: PinsClearPayload) => void;
   "keys:publish": (payload: KeysPublishPayload) => void;
   "keys:supplement": (payload: KeysSupplementPayload) => void;
   "keys:fetch": (

@@ -179,6 +179,21 @@ app.prepare().then(async () => {
   const memberRooms = (groupId: string) =>
     store.listMemberIds(groupId).map((id) => "user:" + id);
 
+  // Audience for a group's *durable* state — pins, reactions, roster changes,
+  // deletion. Same rule as messages: everyone who can see the group, not just
+  // the sockets currently in its room. A member reading another conversation
+  // still holds this group in memory, and a room-only broadcast left them with
+  // stale pins/reactions until they reloaded.
+  //
+  // Public groups go to the whole workspace (anyone may open one, so anyone may
+  // be showing its state); private groups and DMs go to their members' user
+  // rooms. Null when a private group has no members to notify — `io.to([])`
+  // would broadcast to EVERY socket, not none.
+  const groupAudience = (groupId: string, rooms = memberRooms(groupId)) => {
+    if (store.isPublicGroup(groupId)) return io;
+    return rooms.length ? io.to(rooms) : null;
+  };
+
   // --- Web Push (Phase 6) ----------------------------------------------------
   const pushReady = !!(
     process.env.VAPID_PUBLIC_KEY &&
@@ -306,13 +321,23 @@ app.prepare().then(async () => {
     const authorized = (groupId: string) => store.canAccess(groupId, userId);
 
     // Broadcast a group's updated meta/roster: to the whole workspace for
-    // public groups (everyone can see them), or to its room for private ones.
+    // public groups (everyone can see them), else to each member individually.
+    // Strip messages throughout — recipients keep their own viewer-correct
+    // history; this only carries meta + roster.
     const emitGroupUpdated = (group: Group) => {
-      const target =
-        group.type === "group" && !group.private ? io : io.to(group.id);
-      // Strip messages — recipients keep their own viewer-correct history; this
-      // only carries meta + roster.
-      target.emit("group:updated", { group: { ...group, messages: [] } });
+      if (group.type === "group" && !group.private) {
+        io.emit("group:updated", { group: { ...group, messages: [] } });
+        return;
+      }
+      // Private group or DM: every member, not just the sockets currently in the
+      // room — and each gets its OWN view, since a DM's `name`/`user` are the
+      // other participant and the client merges this over its roster entry.
+      for (const memberId of store.listMemberIds(group.id)) {
+        const view = store.getGroup(group.id, memberId) ?? group;
+        io.to("user:" + memberId).emit("group:updated", {
+          group: { ...view, messages: [] },
+        });
+      }
     };
 
     // The workspace (name + roster) is shared by everyone — broadcast to all.
@@ -406,7 +431,7 @@ app.prepare().then(async () => {
         msgId,
         parentId: parentId ?? null,
       });
-      io.to(groupId).emit("pins:updated", {
+      groupAudience(groupId)?.emit("pins:updated", {
         groupId,
         pinIds: store.listPins(groupId),
       });
@@ -456,7 +481,7 @@ app.prepare().then(async () => {
       if (!authorized(groupId)) return;
       const reactions = store.toggleReaction(groupId, msgId, emoji, userId);
       if (reactions === null) return;
-      io.to(groupId).emit("reaction:updated", { groupId, msgId, reactions });
+      groupAudience(groupId)?.emit("reaction:updated", { groupId, msgId, reactions });
     });
 
     // Compose a new 1:1 DM (or post into an existing one). Announces brand-new
@@ -550,9 +575,13 @@ app.prepare().then(async () => {
         return;
       }
       const isPublic = !group.private;
+      // Capture the roster BEFORE deleting — afterwards there are no members
+      // left to address, and a private group's removal has to reach members who
+      // aren't currently viewing it.
+      const rooms = memberRooms(groupId);
       store.deleteGroup(groupId);
       if (isPublic) io.emit("group:deleted", { groupId });
-      else io.to(groupId).emit("group:deleted", { groupId });
+      else groupAudience(groupId, rooms)?.emit("group:deleted", { groupId });
       ack?.({ ok: true });
     });
 
@@ -635,7 +664,16 @@ app.prepare().then(async () => {
       if (!authorized(groupId)) return;
       const pinIds = store.togglePin(groupId, msgId, userId);
       if (pinIds === null) return;
-      io.to(groupId).emit("pins:updated", { groupId, pinIds });
+      groupAudience(groupId)?.emit("pins:updated", { groupId, pinIds });
+    });
+
+    // Unpin everything in one shot — the pinned bar's dismiss clears the bar for
+    // the whole group, so it can't be a per-message loop that races itself.
+    socket.on("pins:clear", ({ groupId }) => {
+      if (!authorized(groupId)) return;
+      const pinIds = store.clearPins(groupId);
+      if (pinIds === null) return;
+      groupAudience(groupId)?.emit("pins:updated", { groupId, pinIds });
     });
 
     // E2EE key distribution (Phase 0). The server is a public-key directory: it
