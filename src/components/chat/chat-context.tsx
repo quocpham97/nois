@@ -1211,9 +1211,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       if (cached) return cached;
       const b64 = await groupGet<string>(userId, `mls2:${groupId}`);
       if (!b64) return null;
-      const state = (await loadMls()).mlsDeserializeState(b64);
-      mlsStatesRef.current.set(groupId, state);
-      return state;
+      try {
+        const state = (await loadMls()).mlsDeserializeState(b64);
+        mlsStatesRef.current.set(groupId, state);
+        return state;
+      } catch (err) {
+        // A state we can't read is worse than no state at all: every send would
+        // keep throwing through the MLS path. Clear it (an empty value reads as
+        // absent above) so ensureMlsGroup can re-establish, or re-join when a
+        // Welcome arrives.
+        console.warn("[mls] discarding unreadable state", groupId, err);
+        await groupPut(userId, `mls2:${groupId}`, "");
+        return null;
+      }
     },
     [userId],
   );
@@ -1523,15 +1533,32 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     async (groupId: string, content: MessageContent): Promise<string | null> => {
       if (isDm(groupId)) return null;
       if (MLS_ENABLED) {
-        const mlsEnc = await buildMlsEnc(groupId, content);
-        if (mlsEnc) return mlsEnc;
-        // No MLS group possible yet → sender-keys below keeps the group E2EE.
+        try {
+          const mlsEnc = await buildMlsEnc(groupId, content);
+          if (mlsEnc) return mlsEnc;
+          // No MLS group possible yet → sender-keys below keeps the group E2EE.
+        } catch (err) {
+          // MLS is the preferred scheme, not the only one, and this fallback is
+          // the whole point of the two coexisting. An exception here — a commit
+          // rejected while membership churns, an unreadable state, a ts-mls edge
+          // case — used to propagate out and FAIL THE MESSAGE ("encryption isn't
+          // available here yet"), which is a far worse outcome than sending under
+          // the older scheme. Membership changes are exactly when this path does
+          // its most failure-prone work, so it must not be load-bearing.
+          console.warn("[mls] encrypt failed; falling back to sender-keys", groupId, err);
+        }
       }
       const secrets = await getSecrets();
       if (!secrets || !socket) return null;
       const members = await fetchGroupBundles(groupId);
-      const others = members.filter((b) => b.deviceId !== secrets.deviceId);
-      if (!others.length) return null; // no real co-member devices → plaintext
+      // No co-member device has published keys yet (e.g. everyone else was just
+      // added and hasn't signed in). Encrypt anyway rather than refusing: our
+      // sender-key seed is deliberately STABLE and re-distributed whenever the
+      // member-device set changes (see ensureSenderKeyDistributed), so this
+      // message becomes readable the moment someone sets their keys up — either
+      // via that redistribution or via their pull-on-miss request. Refusing was a
+      // leftover from when returning null here meant "send it in plaintext";
+      // under default-E2EE it just loses the message.
       await ensureSenderKeyDistributed(groupId, members, secrets);
       const wire = await groupGet<SenderKeyWire>(userId, `send:${groupId}`);
       if (!wire) return null;
@@ -3212,8 +3239,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       // Default-E2EE: the server only ever sees ciphertext. If we can't encrypt
       // (no recipient has published keys, or WebCrypto is unavailable) we FAIL
       // the message with a reason — never fall back to plaintext.
-      const NO_KEYS =
-        "Not sent — end-to-end encryption isn’t available here yet (the other side hasn’t set up their keys).";
+      // "The other side" is only meaningful in a DM; in a group the same failure
+      // means nobody else has published keys yet.
+      const NO_KEYS = isDm(groupId)
+        ? "Not sent — end-to-end encryption isn’t available here yet (the other side hasn’t set up their keys)."
+        : "Not sent — no other member of this group has set up encryption keys yet.";
       if (cryptoAvailable() && socket) {
         // The preview travels ONLY inside the envelope — never a wire field.
         const build = isDm(groupId)
