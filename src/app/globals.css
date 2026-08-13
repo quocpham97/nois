@@ -297,6 +297,39 @@
     transform: none;
   }
 }
+/* Call surface (see the comp's renderCallOverlay): the overlay fades in, an
+   unanswered call pulses expanding rings behind the avatar, and a connected
+   voice call shows a small equalizer so silence still looks alive. */
+@keyframes callIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes callRing {
+  0% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(2.1);
+    opacity: 0;
+  }
+}
+@keyframes barsPulse {
+  0%,
+  100% {
+    transform: scaleY(0.4);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+.animate-call-in {
+  animation: callIn 0.25s ease-out;
+}
 .animate-fade-in {
   animation: fadeIn 0.12s ease-out;
 }

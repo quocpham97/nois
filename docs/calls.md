@@ -90,6 +90,37 @@ sibling device is also ringing, knows the `callId`, and would act on an offer
 meant for its peer. Clients announce their device id on connect
 (`device:announce` → a `device:<id>` room).
 
+### The call surface
+
+`call-view.tsx` follows the comp's `renderCallOverlay`: a full-screen overlay
+(fade-in, radial backdrop that lifts once video is up), the conversation title,
+self picture-in-picture at 150×200, and 58px translucent controls floating at the
+bottom (hang-up bigger and red). An unanswered call pulses three expanding rings
+behind the avatar; a connected voice call shows a small equalizer so silence still
+looks live. Those three animations are CSS keyframes in `globals.css`
+(`callIn`, `callRing`, `barsPulse`).
+
+The comp only draws a 1:1 call, so the mesh **extends** that language rather than
+replacing it: one peer keeps the comp's centred layout (their video full-bleed
+when it's a video call), and two or more become a grid of 4:3 tiles with the same
+rounded corners, name labels and backdrop. Every layout that shows a remote
+participant marks itself `data-participant`/`data-connected`, so "who is on
+screen" is answerable without knowing which layout is in play.
+
+Two deliberate departures from the comp:
+
+- **No speaker toggle.** The comp has one, but it's a mobile idiom — the web has
+  no earpiece/speaker concept, only `setSinkId` device selection. A control that
+  did nothing would be worse than its absence.
+- **The overlay is modal.** The comp gives it `z-index: 300` over everything with
+  no minimize, so a call takes the whole window and you can't read the
+  conversation while you're in one. Worth revisiting with a design pass if
+  multitasking during calls matters.
+
+The incoming-call card is not from the comp (the mock has no incoming state) — it
+stays a non-blocking card in the top-right so a ringing call doesn't seize the UI
+before you've accepted it.
+
 ### Multi-device
 
 An invite rings **every** device of the invitee; whichever one answers or declines

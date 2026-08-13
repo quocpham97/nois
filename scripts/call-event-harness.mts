@@ -21,11 +21,14 @@ import { dmIdFor } from "../src/lib/dm-id.ts";
 import { getPool } from "../src/lib/db.ts";
 
 const URL = "http://localhost:4000";
-const CALLER = "callev-bob@test";
-const CALLEE = "callev-alice@test";
+// Ids chosen so the derived initials DIFFER (initialsOf splits on @ and .):
+// "bob@ring.test" → BR, "ana@pick.test" → AP. That makes it possible to assert
+// WHOSE avatar the call surface is showing, which is not otherwise visible.
+const CALLER = "bob@ring.test";
+const CALLEE = "ana@pick.test";
 // Rings the callee while they're already on a call, to exercise the busy
 // auto-decline (their client turns the call down without ever ringing).
-const INTERLOPER = "callev-carol@test";
+const INTERLOPER = "cai@busy.test";
 const HEADED = process.argv.includes("--headed");
 
 const results: string[] = [];
@@ -182,6 +185,18 @@ async function main() {
   await click(callerPage, '[title="Start a video call"]');
   await calleePage.waitForSelector("text=Accept", { timeout: 15000 });
   await sleep(700);
+  // The call surface shows the CONVERSATION, not the caller: while we're ringing
+  // someone, their avatar belongs on screen, not our own.
+  const ringingFace = await callerPage.evaluate(() => {
+    const el = [...document.querySelectorAll("span")].find(
+      (s) => (s as HTMLElement).style.width === "150px",
+    );
+    return (el?.textContent ?? "").trim();
+  });
+  check(
+    ringingFace === "AP",
+    `the outgoing call shows the person being called, not us (saw "${ringingFace}")`,
+  );
   await click(callerPage, '[title="End call"]'); // caller gives up
   await waitForRows(callerPage, 2);
   await waitForRows(calleePage, 2);

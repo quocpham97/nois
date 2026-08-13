@@ -198,6 +198,20 @@ async function main() {
 
   // --- 1. A starts, C accepts, B declines --------------------------------------
   await click(pageA, '[title="Start a voice call"]');
+  // The ringing state's pulse rings are CSS-keyframe driven, which fails
+  // silently if a keyframe is renamed or dropped from globals.css — assert the
+  // animation is actually running rather than just present in the markup.
+  await sleep(1200);
+  const ringing = await pageA.evaluate(() =>
+    [...document.querySelectorAll("span")].filter((el) =>
+      getComputedStyle(el).animationName.includes("callRing"),
+    ).length,
+  );
+  check(ringing === 3, `the outgoing call pulses (${ringing} rings animating)`);
+  if (process.argv.includes("--shots")) {
+    await pageA.screenshot({ path: "/tmp/call-ringing.png" });
+    await pageC.screenshot({ path: "/tmp/call-incoming.png" });
+  }
   await click(pageC, "text=Accept");
   await click(pageB, "text=Decline");
   await waitForTiles(pageA, 1);
@@ -306,10 +320,11 @@ async function main() {
   await click(pageB, "text=Accept");
   await waitForTiles(pageB, 1);
   await sleep(3500);
-  const videoTiles = await pageB
-    .locator("[data-participant] video")
-    .count();
-  check(videoTiles >= 1, `a group video call renders video tiles (${videoTiles})`);
+  const videoTiles = await pageB.locator("[data-participant] video").count();
+  check(
+    videoTiles >= 1,
+    `a group video call renders the peer's video (${videoTiles} element(s))`,
+  );
   const vBytes = await inboundBytes(pageB);
   check(
     vBytes.length >= 1 && vBytes.every((b) => b > 0),

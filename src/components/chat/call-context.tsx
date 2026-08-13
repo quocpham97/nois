@@ -72,6 +72,10 @@ export type CallInfo = {
   /** Who placed the call — drives who writes the thread record. */
   starterId: string;
   starter: User;
+  /** The DM partner, or null in a group. The call UI shows the CONVERSATION, not
+   *  the caller: on an outgoing DM call the starter is us, and our own face is
+   *  not what you want to look at while you wait for someone to pick up. */
+  peer: User | null;
   video: boolean;
   phase: CallPhase;
   /** True when WE placed this call (`starterId === us`), so this device owns the
@@ -546,6 +550,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
             title: titleFor(groupId, userId),
             starterId: userId,
             starter: me,
+            peer: ch?.type === "dm" ? (ch.user ?? null) : null,
             video: res.video,
             phase: "outgoing",
             outgoing: true,
@@ -633,6 +638,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
           title: titleFor(groupId, starterId),
           starterId,
           starter: resolveUser(starterId),
+          peer: ch?.type === "dm" ? (ch.user ?? resolveUser(starterId)) : null,
           video: res.video && video,
           phase: "connecting",
           // Derived from the id, not from who clicked: a starter who migrates
@@ -734,6 +740,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         title: titleFor(groupId, fromUserId),
         starterId: fromUserId,
         starter,
+        peer: ch?.type === "group" ? null : (ch?.user ?? starter),
         video,
         phase: "incoming",
         outgoing: false,
