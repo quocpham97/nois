@@ -8,6 +8,7 @@
 //   - answered   → both sides show one "Voice call" row, with a talk time
 //   - cancelled  → caller "No answer", callee "Missed video call" (same row)
 //   - declined   → both sides show "Call declined"
+//   - busy       → the automatic decline reads as declined, not as a no-answer
 //   - exactly one row per call (both ends observe the hang-up; only one logs)
 //
 // Needs the dev server on :4000. Run:
@@ -22,6 +23,9 @@ import { getPool } from "../src/lib/db.ts";
 const URL = "http://localhost:4000";
 const CALLER = "callev-bob@test";
 const CALLEE = "callev-alice@test";
+// Rings the callee while they're already on a call, to exercise the busy
+// auto-decline (their client turns the call down without ever ringing).
+const INTERLOPER = "callev-carol@test";
 const HEADED = process.argv.includes("--headed");
 
 const results: string[] = [];
@@ -94,16 +98,24 @@ async function waitForRows(page: Page, n: number, ms = 15000): Promise<void> {
 async function main() {
   // Establish the DM (call:invite validates DM membership server-side).
   const seed = await connect(CALLER);
+  const seed2 = await connect(INTERLOPER);
   await sleep(300);
   seed.emit("dm:create", {
     recipientId: CALLEE,
     text: "call-event harness setup",
     clientId: "callev-" + Date.now(),
   });
-  await sleep(1200);
+  seed2.emit("dm:create", {
+    recipientId: CALLEE,
+    text: "call-event harness setup (busy)",
+    clientId: "callev-busy-" + Date.now(),
+  });
+  await sleep(1500);
   seed.disconnect();
+  seed2.disconnect();
 
   const dmId = dmIdFor(CALLER, CALLEE);
+  const busyDmId = dmIdFor(INTERLOPER, CALLEE);
 
   const browser = await chromium.launch({
     headless: !HEADED,
@@ -114,7 +126,7 @@ async function main() {
     ],
   });
 
-  const openAs = async (uid: string): Promise<Page> => {
+  const openAs = async (uid: string, groupId = dmId): Promise<Page> => {
     const ctx = await browser.newContext({
       viewport: { width: 1280, height: 800 },
       permissions: ["microphone", "camera"],
@@ -130,7 +142,7 @@ async function main() {
       },
     ]);
     const page = await ctx.newPage();
-    await page.goto(`${URL}/${dmId}`, { waitUntil: "domcontentloaded" });
+    await page.goto(`${URL}/${groupId}`, { waitUntil: "domcontentloaded" });
     await page.waitForSelector("text=Connected", { timeout: 30000 });
     await dismissDialogs(page);
     return page;
@@ -205,6 +217,45 @@ async function main() {
     `callee sees the declined row too ("${calleeRows[2]?.text ?? "—"}")`,
   );
 
+  // --- 4. busy: the callee's client declines automatically -----------------------
+  // Bob and Alice go on a call; Carol rings Alice mid-call. Alice's client turns
+  // it down without ringing, so Carol must be told so live AND end up with a
+  // declined row — not the "No answer" of a call that rang out.
+  const interloperPage = await openAs(INTERLOPER, busyDmId);
+  await sleep(2500); // key bundles for the Carol↔Alice DM
+
+  await click(callerPage, '[title="Start a voice call"]');
+  await click(calleePage, "text=Accept");
+  await sleep(3000); // Alice is now busy
+
+  await click(interloperPage, '[title="Start a voice call"]');
+  await sleep(2500);
+  const busyToast = ((await interloperPage.textContent("body")) ?? "").replace(/\s+/g, " ");
+  check(
+    /is on another call/.test(busyToast),
+    "busy: the interloper is told live that the callee is on another call",
+  );
+  await waitForRows(interloperPage, 1);
+  const busyRows = await callRows(interloperPage);
+  check(
+    busyRows.length === 1 && busyRows[0]?.status === "declined",
+    `busy: the resting record says declined, not "No answer" ("${busyRows[0]?.text ?? "—"}")`,
+  );
+  // The call Bob is still on must not have been logged yet, and must log once.
+  await click(callerPage, '[title="End call"]');
+  await waitForRows(callerPage, 4);
+  callerRows = await callRows(callerPage);
+  check(
+    callerRows.length === 4 && callerRows[3]?.status === "answered",
+    `busy: the unrelated in-progress call logs once, on hang-up (caller rows: ${callerRows.length})`,
+  );
+  await waitForRows(calleePage, 4);
+  const calleeBusyRows = await callRows(calleePage);
+  check(
+    calleeBusyRows.length === 4,
+    `busy: the refused call stays in its own DM — the callee's thread with the caller has 4 rows (${calleeBusyRows.length})`,
+  );
+
   // The server must never see what these rows say — it only relayed ciphertext.
   // (Sanity: the sidebar preview reads the call row, not an empty message.)
   // asides in DOM order: the workspace rail, then the conversation list.
@@ -223,6 +274,7 @@ async function main() {
   if (process.argv.includes("--shots")) {
     await callerPage.screenshot({ path: "/tmp/call-rows-caller.png" });
     await calleePage.screenshot({ path: "/tmp/call-rows-callee.png" });
+    await interloperPage.screenshot({ path: "/tmp/call-rows-busy.png" });
   }
 
   if (HEADED) await sleep(4000);
@@ -230,14 +282,13 @@ async function main() {
 
   try {
     const pool = getPool();
-    await pool.query(`DELETE FROM message WHERE group_id = $1`, [dmId]);
-    await pool.query(`DELETE FROM group_member WHERE user_id = ANY($1)`, [
-      [CALLER, CALLEE],
+    const users = [CALLER, CALLEE, INTERLOPER];
+    await pool.query(`DELETE FROM message WHERE group_id = ANY($1)`, [
+      [dmId, busyDmId],
     ]);
-    await pool.query(`DELETE FROM read_cursor WHERE user_id = ANY($1)`, [
-      [CALLER, CALLEE],
-    ]);
-    await pool.query(`DELETE FROM "group" WHERE id = $1`, [dmId]);
+    await pool.query(`DELETE FROM group_member WHERE user_id = ANY($1)`, [users]);
+    await pool.query(`DELETE FROM read_cursor WHERE user_id = ANY($1)`, [users]);
+    await pool.query(`DELETE FROM "group" WHERE id = ANY($1)`, [[dmId, busyDmId]]);
     await pool.end();
   } catch (e) {
     console.warn("cleanup skipped:", (e as Error).message);

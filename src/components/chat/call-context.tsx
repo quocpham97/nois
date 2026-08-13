@@ -505,9 +505,20 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       } else if (reason === "ended" && (c.phase === "active" || c.phase === "connecting")) {
         toast("Call ended");
       }
-      // The peer hung up / was busy. recordCall no-ops unless we placed the call
-      // (on an incoming one, the caller writes the row).
-      recordCall(c, c.phase === "active" ? "answered" : "unanswered");
+      // The peer hung up, or their client turned the call down for them. "busy"
+      // is an automatic DECLINE, not a no-answer: it never rang on their side,
+      // so recording "No answer" would both read as a 45s ring that never
+      // happened and contradict the "is on another call" we just showed.
+      // recordCall no-ops unless we placed the call (on an incoming one, the
+      // caller writes the row).
+      recordCall(
+        c,
+        reason === "busy"
+          ? "declined"
+          : c.phase === "active"
+            ? "answered"
+            : "unanswered",
+      );
       teardown();
     },
     [userId, recordCall, teardown],
