@@ -551,17 +551,21 @@ export function Message({ msg }: { msg: Msg }) {
     return <CallEventRow msg={msg} />;
   }
 
-  // Tombstone for soft-deleted messages — no content/actions.
+  // Tombstone for soft-deleted messages — no content/actions. It stands in for a
+  // bubble, so it keeps that bubble's side: your own deletions stay on the right.
   if (msg.deleted) {
     return (
-      <div data-mid={msg.id} className="flex items-center gap-3 px-4 py-1.5">
+      <div
+        data-mid={msg.id}
+        className={`flex items-center gap-3 px-4 py-1.5 ${
+          me ? "flex-row-reverse" : ""
+        }`}
+      >
         <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-panel text-app-muted">
           <Trash2 size={15} strokeWidth={1.8} />
         </span>
-        <div className="min-w-0">
-          <div className="text-[13.5px] italic text-app-muted">
-            This message was deleted.
-          </div>
+        <div className="min-w-0 text-[13.5px] italic text-app-muted">
+          This message was deleted.
         </div>
       </div>
     );
