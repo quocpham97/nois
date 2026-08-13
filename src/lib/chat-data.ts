@@ -82,6 +82,48 @@ export type ReplyRef = {
   text: string;
 };
 
+/**
+ * A finished 1:1 call, recorded in the thread as a message (Messenger-style).
+ *
+ * The CALLER owns the record: whichever side placed the call seals one of these
+ * into a normal E2EE message when the call terminates, so both sides (and every
+ * device of both sides) get the same row through the ordinary message path — no
+ * server-side call log, and nothing to reconstruct after a reload.
+ *
+ * `status` is stored from the caller's point of view; `callEventTitle` maps it to
+ * the viewer's wording ("No answer" for the caller, "Missed voice call" for the
+ * side that didn't pick up).
+ */
+export type CallEvent = {
+  mode: "voice" | "video";
+  /** answered = media connected; declined = the callee said no; unanswered =
+   *  rang out, was cancelled, or the callee was busy on another call. */
+  status: "answered" | "declined" | "unanswered";
+  /** Talk time as "m:ss"/"h:mm:ss" — answered calls only. */
+  duration?: string;
+};
+
+/** Viewer-relative title for a call row. `mine` = the viewer placed the call. */
+export function callEventTitle(call: CallEvent, mine?: boolean): string {
+  const video = call.mode === "video";
+  if (call.status === "answered") return video ? "Video call" : "Voice call";
+  if (call.status === "declined")
+    return video ? "Video call declined" : "Call declined";
+  // Unanswered reads differently on each side: the caller got no answer, the
+  // other side missed it.
+  if (mine) return "No answer";
+  return video ? "Missed video call" : "Missed voice call";
+}
+
+/** Talk time from a call's elapsed seconds: "0:42", "11:42", "1:02:07". */
+export function formatCallDuration(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  const mm = Math.floor(s / 60) % 60;
+  const ss = String(s % 60).padStart(2, "0");
+  const hh = Math.floor(s / 3600);
+  return hh ? `${hh}:${String(mm).padStart(2, "0")}:${ss}` : `${mm}:${ss}`;
+}
+
 export type Message = {
   id: string;
   /**
@@ -140,6 +182,10 @@ export type Message = {
   /** True when this message was forwarded from another conversation (shows a
    *  "Forwarded" marker above the bubble). */
   forwarded?: boolean;
+  /** Call event (a finished voice/video call) — renders as a call card instead
+   *  of a bubble. Rides the E2EE envelope like every other body field, so the
+   *  server never learns that a call happened, let alone how long it ran. */
+  call?: CallEvent;
 };
 
 export type Pinned = {
@@ -308,7 +354,10 @@ export function groupMembers(ch: Group, me: User): User[] {
 export function messageExcerpt(m: {
   text?: string;
   attachment?: Attachment;
+  call?: CallEvent;
+  self?: boolean;
 }): string {
+  if (m.call) return "📞 " + callEventTitle(m.call, m.self);
   const t = m.text?.trim();
   if (t) return t;
   const a = m.attachment;

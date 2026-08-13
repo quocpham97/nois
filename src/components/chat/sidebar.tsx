@@ -15,6 +15,7 @@ import {
   SquarePen,
 } from "lucide-react";
 import {
+  callEventTitle,
   groupMembers,
   presenceColor,
   presenceLabel,
@@ -50,6 +51,11 @@ const FILTERS: { key: ChatFilter; label: string }[] = [
 export function previewOf(ch: Group): { text: string; time: string } | null {
   const m = ch.messages[ch.messages.length - 1];
   if (!m) return null;
+  // A call event reads as its own line ("Missed voice call") — no "You:" prefix,
+  // which would make the caller's own row say "You: No answer".
+  if (m.call) {
+    return { text: callEventTitle(m.call, m.self), time: m.time };
+  }
   const who = m.self
     ? "You: "
     : ch.type === "dm"

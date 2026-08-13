@@ -2,6 +2,8 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  ArrowDownLeft,
+  ArrowUpRight,
   Copy,
   Download,
   Forward,
@@ -9,13 +11,16 @@ import {
   Lock,
   MoreHorizontal,
   Pencil,
+  Phone,
   Pin,
   Reply,
   Smile,
   Trash2,
+  Video,
 } from "lucide-react";
 import type { Attachment, Message as Msg, ReplyRef } from "@/lib/chat-data";
-import { formatMsgTime } from "@/lib/chat-data";
+import { callEventTitle, formatMsgTime } from "@/lib/chat-data";
+import { useCall } from "./call-context";
 import { decryptToBlob } from "@/lib/crypto/attachment";
 import { renderRichText } from "@/lib/rich-text";
 import { EmojiPickerPopup } from "./emoji-picker";
@@ -372,6 +377,123 @@ function AttachmentBlock({ a }: { a: Attachment }) {
   return <FileCard a={a} href={a.url} />;
 }
 
+/**
+ * A finished call, in the thread. Not a bubble: a tappable card that redials the
+ * same kind of call, with the direction arrow, time and (for answered calls)
+ * talk time on its second line. Answered calls read neutral; missed and declined
+ * ones are tinted red, Messenger-style.
+ */
+function CallEventRow({ msg }: { msg: Msg }) {
+  const { currentGroupId, groups, retrySend } = useChat();
+  const { startCall, call: activeCall } = useCall();
+  const [hovered, setHovered] = useState(false);
+  const call = msg.call!;
+  const me = msg.self;
+  const answered = call.status === "answered";
+  const video = call.mode === "video";
+  const title = callEventTitle(call, me);
+  const tint = answered ? "var(--app-accent)" : "var(--app-red)";
+  const CallIcon = video ? Video : Phone;
+  const DirIcon = me ? ArrowUpRight : ArrowDownLeft;
+  // A group call can't be placed (calls are 1:1), so only offer the redial on a
+  // DM — and never while another call is up.
+  const redialable = groups[currentGroupId]?.type === "dm" && !activeCall;
+  const detail = [msg.ts ? formatMsgTime(msg.ts) : msg.time, call.duration]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <div
+      data-mid={msg.id}
+      data-call-status={call.status}
+      className={`relative flex items-end gap-2 ${me ? "flex-row-reverse" : ""}`}
+      style={{ padding: "10px 16px 1px", opacity: msg.pending ? 0.55 : 1 }}
+    >
+      {!me && (
+        <div className="w-7 shrink-0">
+          <Avatar
+            initials={msg.author.initials}
+            bg={msg.author.bg}
+            src={msg.author.avatar}
+            size={28}
+            radius={999}
+          />
+        </div>
+      )}
+      <div className={`flex min-w-0 flex-col ${me ? "items-end" : "items-start"}`}>
+        <button
+          type="button"
+          disabled={!redialable}
+          onClick={() => void startCall(currentGroupId, video)}
+          onMouseEnter={() => setHovered(true)}
+          onMouseLeave={() => setHovered(false)}
+          title={
+            redialable
+              ? answered
+                ? "Call again"
+                : "Call back"
+              : title
+          }
+          className={`flex items-center gap-[11px] rounded-[20px] border px-[9px] py-2 text-left transition-[box-shadow,transform] ${
+            answered
+              ? "border-border-strong bg-panel"
+              : "border-transparent bg-app-red-soft"
+          } ${hovered && redialable ? "-translate-y-px shadow-[var(--app-shadow-sm)]" : ""}`}
+        >
+          <span
+            className="flex size-9 shrink-0 items-center justify-center rounded-full"
+            style={{
+              background: answered
+                ? "var(--app-accent-soft)"
+                : "color-mix(in oklab, var(--app-red) 16%, transparent)",
+              color: tint,
+            }}
+          >
+            <CallIcon size={18} strokeWidth={1.9} />
+          </span>
+          <span className="flex min-w-0 flex-col gap-0.5 pr-1">
+            <span
+              className="whitespace-nowrap text-[14.5px] font-semibold"
+              style={{ color: answered ? "var(--app-text)" : tint }}
+            >
+              {title}
+            </span>
+            <span className="flex items-center gap-1.5 whitespace-nowrap text-[12.5px] text-app-faint">
+              <DirIcon size={11} strokeWidth={2.4} className="shrink-0" />
+              {detail}
+            </span>
+          </span>
+          {redialable && (
+            <span
+              className="flex size-[34px] shrink-0 items-center justify-center rounded-full transition-colors"
+              style={{
+                background: hovered ? tint : "transparent",
+                color: hovered ? "var(--on-accent)" : tint,
+              }}
+            >
+              <CallIcon size={17} strokeWidth={1.9} />
+            </span>
+          )}
+        </button>
+        {msg.failed && (
+          <div
+            className="mt-0.5 flex items-center gap-1.5 text-[11px]"
+            style={{ color: "var(--app-red)" }}
+          >
+            <span>Call record not delivered.</span>
+            <button
+              onClick={() => retrySend(currentGroupId, msg.id)}
+              className="font-semibold underline hover:no-underline"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function Message({ msg }: { msg: Msg }) {
   const {
     hoverMsgId,
@@ -423,6 +545,11 @@ export function Message({ msg }: { msg: Msg }) {
   // Keep the hover toolbar (which hosts the popover triggers) mounted while a
   // popover is open, even after the pointer leaves the message row.
   const showToolbar = hovered || pickerOpen || moreOpen;
+
+  // Call events render as their own card (no bubble, reactions, or edit tools).
+  if (msg.call && !msg.deleted) {
+    return <CallEventRow msg={msg} />;
+  }
 
   // Tombstone for soft-deleted messages — no content/actions.
   if (msg.deleted) {

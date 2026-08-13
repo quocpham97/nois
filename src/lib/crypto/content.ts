@@ -18,6 +18,7 @@ export function encodeContent(c: MessageContent): Uint8Array<ArrayBuffer> {
       preview: c.preview ?? null,
       replyTo: c.replyTo ?? null,
       forwarded: c.forwarded ?? null,
+      call: c.call ?? null,
     }),
   );
 }
@@ -33,5 +34,6 @@ export function decodeContent(pt: ArrayBuffer | Uint8Array): MessageContent {
     preview: (obj.preview as MessageContent["preview"]) ?? undefined,
     replyTo: (obj.replyTo as MessageContent["replyTo"]) ?? undefined,
     forwarded: typeof obj.forwarded === "boolean" ? obj.forwarded : undefined,
+    call: (obj.call as MessageContent["call"]) ?? undefined,
   };
 }

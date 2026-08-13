@@ -11,7 +11,7 @@
 // @wireapp/core-crypto), the published artifact becomes an MLS KeyPackage, but
 // the publish/fetch transport and the device registry below are unchanged.
 
-import type { LinkPreview, ReplyRef } from "../chat-data";
+import type { CallEvent, LinkPreview, ReplyRef } from "../chat-data";
 
 /**
  * The plaintext content sealed inside every E2EE envelope (DM pairwise, group
@@ -33,6 +33,9 @@ export type MessageContent = {
   replyTo?: ReplyRef | null;
   /** Marks a forwarded message so the recipient shows a "Forwarded" label. */
   forwarded?: boolean | null;
+  /** Finished-call record (see chat-data CallEvent). Sealed like any other body
+   *  field, so call timing/duration never reach the server. */
+  call?: CallEvent | null;
 };
 
 /** A bare ECDH public prekey: `pub` is the base64 of the raw P-256 public key. */

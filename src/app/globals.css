@@ -99,6 +99,7 @@
   --color-app-green: var(--app-green);
   --color-app-yellow: var(--app-yellow);
   --color-app-red: var(--app-red);
+  --color-app-red-soft: var(--app-red-soft);
 }
 
 :root {
@@ -157,6 +158,8 @@
   --app-hover-strong: #E8E8ED;
   --app-green: #31A24C;
   --app-red: oklch(0.6 0.2 25);
+  /* Tinted surface behind a missed/declined call card. */
+  --app-red-soft: #FFECEE;
   --app-yellow: #F0B429;
   --recv-bubble: #EFEFF3;
   --recv-text: #1C1C1E;
@@ -224,6 +227,7 @@
   --app-hover-strong: #38383A;
   --app-green: #31A24C;
   --app-red: oklch(0.7 0.18 25);
+  --app-red-soft: #3B2226;
   --app-yellow: #F0B429;
   --recv-bubble: #303032;
   --recv-text: #E4E6EB;

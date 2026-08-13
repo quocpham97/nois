@@ -15,6 +15,7 @@ import { getShellBridge } from "@/lib/shell";
 import { toast } from "sonner";
 import {
   type Attachment,
+  type CallEvent,
   type Group,
   type GroupMap,
   type Message,
@@ -23,6 +24,7 @@ import {
   type ReplyRef,
   type User,
   type UserProfile,
+  callEventTitle,
   gradientFor,
   messageExcerpt,
   nowTime,
@@ -287,6 +289,9 @@ type ChatContextValue = {
   setComposerAttachment: (a: Attachment | null) => void;
   sendMessage: (text: string, rich?: string, preview?: LinkPreview) => void;
   retrySend: (groupId: string, msgId: string) => void;
+  /** Append a finished call to a conversation as an E2EE message. Caller-side
+   *  only — CallProvider owns when this fires (one row per call). */
+  logCallEvent: (groupId: string, call: CallEvent) => void;
   deleteMessage: (groupId: string, msgId: string) => void;
 
   /** Message-edit mode: the composer edits this message instead of sending. */
@@ -916,6 +921,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         preview?: LinkPreview;
         replyTo?: ReplyRef;
         forwarded?: boolean;
+        call?: CallEvent;
       }
     >
   >(new Map());
@@ -1580,6 +1586,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               preview: cached.preview,
               replyTo: cached.replyTo,
               forwarded: cached.forwarded,
+              call: cached.call,
               enc: undefined,
               // The acked attachment came back with key/iv stripped (they rode
               // in the envelope); restore them locally so our own image decrypts.
@@ -2812,6 +2819,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
               preview: res.preview ?? undefined,
               replyTo: res.replyTo ?? undefined,
               forwarded: res.forwarded ?? undefined,
+              call: res.call ?? undefined,
               enc: undefined,
               att: res.att ?? undefined,
             };
@@ -2867,6 +2875,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           preview: res.preview ?? undefined,
           replyTo: res.replyTo ?? undefined,
           forwarded: res.forwarded ?? undefined,
+          call: res.call ?? undefined,
           enc: undefined,
           att: res.att ?? undefined,
         };
@@ -2898,6 +2907,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         text: res.text,
         rich: res.rich ?? undefined,
         preview: res.preview ?? undefined,
+        call: res.call ?? undefined,
         enc: undefined,
         att: res.att ?? undefined,
       };
@@ -3164,11 +3174,17 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       clientId: string,
       text: string,
       attachment?: Attachment | null,
-      rich?: string,
-      preview?: LinkPreview,
-      replyTo?: ReplyRef,
-      forwarded?: boolean,
+      // Everything else the envelope carries. Grouped so a new body field
+      // (preview, replyTo, call, …) doesn't grow the positional argument list.
+      body: {
+        rich?: string;
+        preview?: LinkPreview;
+        replyTo?: ReplyRef;
+        forwarded?: boolean;
+        call?: CallEvent;
+      } = {},
     ) => {
+      const { rich, preview, replyTo, forwarded, call } = body;
       armFailTimer(clientId);
       // An encrypted attachment's key/iv travel inside the message envelope, so
       // strip them from the wire attachment (the server only ever gets ciphertext
@@ -3201,8 +3217,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       if (cryptoAvailable() && socket) {
         // The preview travels ONLY inside the envelope — never a wire field.
         const build = isDm(groupId)
-          ? buildEnvelope(dmPeerId(groupId), { text, rich, att, preview, replyTo, forwarded })
-          : buildGroupEnc(groupId, { text, rich, att, preview, replyTo, forwarded });
+          ? buildEnvelope(dmPeerId(groupId), { text, rich, att, preview, replyTo, forwarded, call })
+          : buildGroupEnc(groupId, { text, rich, att, preview, replyTo, forwarded, call });
         build
           .then((enc) => (enc ? sendEnc(enc) : markFailed(clientId, NO_KEYS)))
           .catch(() => markFailed(clientId, NO_KEYS));
@@ -3266,7 +3282,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           : {}),
       });
       setReplyingTo(null);
-      emitSend(currentGroupId, clientId, trimmed, attachment, rich, preview, replyTo);
+      emitSend(currentGroupId, clientId, trimmed, attachment, { rich, preview, replyTo });
     },
     [
       composerAttachment,
@@ -3277,6 +3293,44 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       stopTyping,
       emitSend,
     ],
+  );
+
+  /**
+   * Record a finished call in its conversation. Called by CallProvider on the
+   * CALLER's side only (see call-context) — one row per call, sealed like any
+   * other message, so it reaches every device on both sides through the normal
+   * delivery + local-history path.
+   *
+   * `text` carries a readable rendering of the same thing: it's what a client
+   * too old to know about `call` shows, and it's what full-text search indexes.
+   */
+  const logCallEvent = useCallback(
+    (groupId: string, call: CallEvent) => {
+      if (!groupsRef.current[groupId]) return; // unresolvable conversation
+      const title = callEventTitle(call, false);
+      const text = call.duration ? `${title} · ${call.duration}` : title;
+      const clientId = "tmp-call-" + Date.now();
+      const optimistic: Message = {
+        id: clientId,
+        author: myUser,
+        self: true,
+        time: nowTime(),
+        ts: Date.now(),
+        text,
+        call,
+        reactions: [],
+        pending: true,
+      };
+      setGroups((s) => {
+        const ch = s[groupId];
+        if (!ch) return s;
+        return { ...s, [groupId]: { ...ch, messages: [...ch.messages, optimistic] } };
+      });
+      if (groupId === currentGroupId) requestAnimationFrame(scrollToBottom);
+      sentPlaintextRef.current.set(clientId, { text, call });
+      emitSend(groupId, clientId, text, null, { call });
+    },
+    [currentGroupId, emitSend, myUser, scrollToBottom],
   );
 
   const retrySend = useCallback(
@@ -3291,16 +3345,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         );
         return { ...s, [groupId]: { ...ch, messages: msgs } };
       });
-      emitSend(
-        groupId,
-        msgId,
-        msg.text,
-        msg.attachment,
-        msg.rich,
-        msg.preview,
-        msg.replyTo,
-        msg.forwarded,
-      );
+      emitSend(groupId, msgId, msg.text, msg.attachment, {
+        rich: msg.rich,
+        preview: msg.preview,
+        replyTo: msg.replyTo,
+        forwarded: msg.forwarded,
+        call: msg.call,
+      });
     },
     [groups, emitSend],
   );
@@ -3466,7 +3517,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             ? { att: { key: src.attachment.key, iv: src.attachment.iv } }
             : {}),
         });
-        emitSend(toId, clientId, src.text, src.attachment, src.rich, undefined, undefined, true);
+        emitSend(toId, clientId, src.text, src.attachment, {
+          rich: src.rich,
+          forwarded: true,
+        });
       });
       setForwardSource(null);
       if (toGroupIds.length === 1) {
@@ -3943,6 +3997,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       setComposerAttachment,
       sendMessage,
       retrySend,
+      logCallEvent,
       deleteMessage,
       editing,
       editingMessage,
@@ -4069,6 +4124,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       composerAttachment,
       sendMessage,
       retrySend,
+      logCallEvent,
       deleteMessage,
       editing,
       editingMessage,

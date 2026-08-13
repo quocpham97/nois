@@ -17,7 +17,12 @@ import {
   useState,
 } from "react";
 import { toast } from "sonner";
-import { type User, deriveUser } from "@/lib/chat-data";
+import {
+  type CallEvent,
+  type User,
+  deriveUser,
+  formatCallDuration,
+} from "@/lib/chat-data";
 import type {
   CallAnswerRelay,
   CallEndRelay,
@@ -39,6 +44,9 @@ export type CallInfo = {
   peerId: string;
   peer: User;
   video: boolean;
+  /** True when WE placed this call. The caller owns the thread's call record
+   *  (and the phase alone can't tell you the direction once it's connected). */
+  outgoing: boolean;
   phase: CallPhase;
   /** Epoch-ms when the connection came up; drives the in-call timer. */
   startedAt: number | null;
@@ -99,7 +107,7 @@ type SignalMsg =
 
 export function CallProvider({ children }: { children: React.ReactNode }) {
   const { socket, userId } = useSocket();
-  const { groups, workspaceMembers } = useChat();
+  const { groups, workspaceMembers, logCallEvent } = useChat();
 
   const [call, setCall] = useState<CallInfo | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
@@ -152,6 +160,42 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  // --- thread call log --------------------------------------------------------
+  // Every finished call leaves one row in its conversation, written by the side
+  // that PLACED the call and delivered to the other side as an ordinary E2EE
+  // message. Doing it caller-only keeps it to exactly one row even though both
+  // ends observe the same hang-up, and means a call missed while the callee was
+  // offline still shows up for them on their next connect.
+  const loggedCallsRef = useRef<Set<string>>(new Set());
+
+  const recordCall = useCallback(
+    (c: CallInfo, status: CallEvent["status"]) => {
+      // No group id → the DM isn't in our roster, so there's nowhere to seal it
+      // to (display-only fallback; see CallInfo.groupId).
+      if (!c.outgoing || !c.groupId) return;
+      if (loggedCallsRef.current.has(c.callId)) return;
+      loggedCallsRef.current.add(c.callId);
+      const mode = c.video ? "video" : "voice";
+      // "answered" means media actually came up: an invite the peer accepted but
+      // that never connected is a no-answer, not a 0:00 conversation.
+      const startedAt = c.startedAt;
+      if (status === "answered" && startedAt !== null) {
+        const secs = (Date.now() - startedAt) / 1000;
+        logCallEvent(c.groupId, {
+          mode,
+          status: "answered",
+          duration: formatCallDuration(secs),
+        });
+        return;
+      }
+      logCallEvent(c.groupId, {
+        mode,
+        status: status === "declined" ? "declined" : "unanswered",
+      });
+    },
+    [logCallEvent],
+  );
+
   const teardown = useCallback(() => {
     clearRingTimer();
     pcRef.current?.close();
@@ -186,8 +230,9 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       reason: c.phase === "outgoing" ? "cancelled" : "ended",
     });
     if (c.phase === "active") toast("Call ended");
+    recordCall(c, c.phase === "active" ? "answered" : "unanswered");
     teardown();
-  }, [socket, teardown]);
+  }, [socket, recordCall, teardown]);
   const endCallRef = useRef(endCall);
 
   const createPeer = useCallback(
@@ -258,6 +303,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         peerId,
         peer,
         video,
+        outgoing: true,
         phase: "outgoing",
         startedAt: null,
       });
@@ -278,11 +324,12 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         if (c?.callId === callId && c.phase === "outgoing") {
           socket.emit("call:end", { callId, toUserId: peerId, reason: "timeout" });
           toast(`${peer.name} didn't answer`);
+          recordCall(c, "unanswered");
           teardown();
         }
       }, RING_TIMEOUT_MS);
     },
-    [socket, resolvePeer, setCallBoth, teardown],
+    [socket, resolvePeer, recordCall, setCallBoth, teardown],
   );
 
   // Peer accepted or declined our ringing invite.
@@ -299,6 +346,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       clearRingTimer();
       if (!accept) {
         toast(`${c.peer.name} declined the call`);
+        recordCall(c, "declined");
         teardown();
         return;
       }
@@ -315,7 +363,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         endCallRef.current();
       }
     },
-    [clearRingTimer, createPeer, sendSignal, setCallBoth, teardown],
+    [clearRingTimer, createPeer, recordCall, sendSignal, setCallBoth, teardown],
   );
 
   // --- callee side -----------------------------------------------------------
@@ -336,6 +384,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         peerId: fromUserId,
         peer: resolvePeer(fromUserId),
         video,
+        outgoing: false,
         phase: "incoming",
         startedAt: null,
       });
@@ -456,9 +505,12 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       } else if (reason === "ended" && (c.phase === "active" || c.phase === "connecting")) {
         toast("Call ended");
       }
+      // The peer hung up / was busy. recordCall no-ops unless we placed the call
+      // (on an incoming one, the caller writes the row).
+      recordCall(c, c.phase === "active" ? "answered" : "unanswered");
       teardown();
     },
-    [userId, teardown],
+    [userId, recordCall, teardown],
   );
 
   // --- controls ---------------------------------------------------------------
