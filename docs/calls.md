@@ -1,10 +1,13 @@
 # Voice & video calls
 
-1:1 calls between DM counterparts. Media is peer-to-peer WebRTC (DTLS-SRTP) and
-never touches the server; the server only relays signaling blobs it can't read.
-A finished call leaves a record in the conversation.
+Calls in DMs and groups. Media is a peer-to-peer WebRTC **mesh** (DTLS-SRTP) and
+never touches the server; the server relays signaling blobs it can't read and
+owns nothing but the participant roster. A finished call leaves a record in the
+conversation.
 
-Calls are **DM-only** — group calls would need an SFU (see [Not built](#not-built)).
+A DM call is a mesh of one peer — there is a single engine, not a 1:1 path plus a
+group path. The sizing rules below and the reasoning behind them are in
+[group-calls-plan.md](./group-calls-plan.md).
 
 | | |
 | --- | --- |
@@ -13,74 +16,124 @@ Calls are **DM-only** — group calls would need an SFU (see [Not built](#not-bu
 | Thread record | `src/components/chat/message.tsx` (`CallEventRow`), `src/lib/chat-data.ts` (`CallEvent`) |
 | Server relay | `server.ts`, the `call:*` handlers |
 | Wire types | `src/lib/socket-events.ts` (`Call*Payload` / `Call*Relay`) |
-| Tests | `scripts/call-harness.mts` (relay), `scripts/call-event-harness.mts` (calls end-to-end in two browsers) |
+| Tests | `scripts/call-harness.mts` (server rules), `scripts/call-event-harness.mts` (1:1 in two browsers), `scripts/group-call-harness.mts` (3-way mesh in three browsers) |
+
+## Limits
+
+| | |
+| --- | --- |
+| Participants | 6 voice, 4 video |
+| Rings | private groups of ≤6 members (a DM is 2) |
+| Huddle — no ring, joinable from the conversation | private groups of 7+, and **every** public group at any size |
+| Video offered | only when the whole group is ≤4 members, so a call can't outgrow the cap mid-session and degrade someone already talking |
+| Devices per user per call | 1 — a second device displaces the first |
 
 ## The call state machine
 
-One call at a time per client. Roles are fixed at setup: the **caller** creates
-the offer, the **callee** answers. `CallInfo.phase` is the whole lifecycle:
+One call at a time per client. `CallInfo.phase` is the whole lifecycle:
 
 ```
-        startCall()                    peer accepts              ICE connects
-outgoing ──────────► (ringing) ──────────────────────► connecting ──────────► active
-                                                            ▲                    │
-incoming ──────────────────────────► acceptCall() ───────────┘                    ▼
-   ▲                                                                          teardown()
-   └── call:invite relay                     declineCall / timeout / hang-up ─────┘
+        startCall()                  someone joins             media connects
+outgoing ──────────► (ringing) ─────────────────────► connecting ──────────► active
+                                                           ▲                    │
+incoming ─────────────────────────►  acceptCall()  ─────────┘                    ▼
+   ▲                                 joinOngoing()                          teardown()
+   └── call:invite relay                    declineCall / timeout / hang-up ─────┘
 ```
 
-`CallInfo.outgoing` records who placed the call — the phase alone can't tell you
-once a call is connected, and the thread record depends on it.
+`CallInfo.outgoing` is derived from `starterId === us` rather than from who
+clicked, so a starter who migrates devices keeps ownership of the thread record.
 
-Both sides ring for `RING_TIMEOUT_MS` (45s) before giving up. Mic/camera toggles
-flip `track.enabled`, so tracks are fixed at setup and **no renegotiation ever
-happens**. Handlers read live state through `callRef`/`handlersRef` so the socket
-listeners (registered once per socket) never close over stale state.
+Ringing lasts `RING_TIMEOUT_MS` (45s). Mic/camera toggles flip `track.enabled`,
+so every peer's tracks are fixed at setup and **no renegotiation ever happens**.
+Handlers read live state through `callRef`/`handlersRef` so the socket listeners
+(registered once per socket) never close over stale state.
+
+### The mesh
+
+One `RTCPeerConnection` per remote **device**, held in `peersRef` keyed by
+deviceId. Exactly one side of each pair offers: **whoever is already in the call
+offers to a joiner, and the joiner only ever answers.** That single rule keeps the
+mesh glare-free with no tie-breaking. A leg that fails is dropped on its own; the
+call ends only when the last peer goes.
 
 ### Signaling
 
-Trickle ICE, relayed as opaque JSON strings through Socket.IO:
+A call *is* a socket room, `call:<groupId>:<callId>`. The room is the roster, so
+there is **no per-call server state** to keep consistent: `fetchSockets()` on it
+is adapter-aware (correct across nodes behind the Redis adapter), the groupId is
+recoverable from the room name, and a crashed participant leaves automatically.
 
 | Event | Direction | Server does |
 | --- | --- | --- |
-| `call:invite` | caller → callee (all their devices) | **validates** (below), acks `ok` / `offline` / `unauthorized` / `error` |
-| `call:answer` | callee → caller | relays; also fans `call:end{reason:"handled"}` to the answerer's *other* devices so they stop ringing |
-| `call:signal` | both ways | relays blobs ≤256 KiB (SDP offer/answer, one ICE candidate per event) |
-| `call:end` | both ways | relays; unknown `reason` sanitized to `"ended"` |
+| `call:start` | starter → server | **validates membership**, opens the room, rings if eligible, acks `{callId, video, ringing}` or `offline`/`unauthorized` |
+| `call:invite` | server → members' devices | rings (ring-eligible groups only) |
+| `call:join` | joiner → server | validates membership, refuses `full`/`gone`, displaces the joiner's own other device, acks the current roster |
+| `call:joined` / `call:left` | server → the room | roster changes, per device |
+| `call:decline` | invitee → server | relays `call:declined` into the room (`declined` or `busy`) |
+| `call:handled` | server → the actor's other devices | this ring was handled here, stop |
+| `call:kicked` | server → displaced device | the same user joined elsewhere |
+| `call:ongoing` / `call:over` | server → conversation | drives the "Ongoing call · Join" bar |
+| `call:signal` | device → device | relays blobs ≤256 KiB to `device:<toDeviceId>` |
 
-The **invite is the only server-validated step**: the group must be a DM the
-caller belongs to, and the callee is derived from the DM roster server-side,
-never client-claimed — so a call can only ring an actual DM counterpart. The
-online check uses `fetchSockets()` (adapter-aware, so it works across nodes
-behind the Redis adapter) and fast-fails with `offline` instead of ringing an
-empty room. Everything after the invite routes by `callId` + `toUserId` and is
-dropped client-side for unknown `callId`s.
+`call:start` and `call:join` are the server-validated steps — they create UI out
+of nothing — and both check **membership**, never `canAccess`: read access to a
+public group must not be enough to place a call in it. The online check uses
+`fetchSockets()` and fast-fails `offline` rather than ringing an empty room;
+huddles skip it, since starting one alone and waiting for people is the point.
+Everything after routes by `callId` and is dropped client-side for ids a client
+doesn't recognize.
 
-`call:end` reasons: `ended` (hang-up), `cancelled` (caller gave up while
-ringing), `timeout` (rang out), `busy` (callee already on a call), `handled`
-(server-generated, to the answerer's own other devices).
+Signaling is addressed **per device**. Routing by user would deliver a peer's
+offer to every device that person has online, which is unsound in a mesh: a
+sibling device is also ringing, knows the `callId`, and would act on an offer
+meant for its peer. Clients announce their device id on connect
+(`device:announce` → a `device:<id>` room).
 
 ### Multi-device
 
-An invite rings **every** device of the callee. Whichever one answers or declines
-wins; the rest get `reason: "handled"` and stop ringing. A device that's already
-in a call auto-declines a second invite with `reason: "busy"`.
+An invite rings **every** device of the invitee; whichever one answers or declines
+wins, and the rest get `call:handled`. A device already in a call auto-declines a
+second invite as `busy`.
+
+Joining from a second device **displaces** the first (`call:kicked`), because two
+live devices for one user would feed back acoustically. The displacement is
+ordered ahead of the new device's announcement — the old socket leaves the room
+and its `call:left` is broadcast first — so incumbents never hold legs to both
+devices and no audio is ever negotiated for the second one.
+`scripts/call-harness.mts` asserts that ordering, not just the end state.
 
 ## The thread record
 
 A finished call leaves one row in the conversation — the Messenger-style call
 card, not a bubble.
 
-**The caller writes it.** `recordCall` (call-context) hands the outcome to
+**The starter writes it.** `recordCall` (call-context) hands the outcome to
 `logCallEvent` (chat-context), which seals it into an ordinary E2EE message
-carrying `MessageContent.call`. Caller-only is deliberate: both ends observe the
-same hang-up, so letting each side log its own row would double it. Going
+carrying `MessageContent.call`. Starter-only is deliberate: everyone observes the
+same hang-up, so letting each participant log its own row would multiply it. Going
 through the message path — rather than generating a card locally the way the
-comp's single-user mock does — means the row is persisted, reaches every device
-of both parties, and reaches a callee who was offline when the call came in.
+comp's single-user mock does — means the row is persisted, reaches every device of
+everyone in the conversation, and reaches someone who was offline when the call
+came in.
 
-The server never learns a call happened, let alone how long it ran: `call` rides
-inside the envelope like `text`, so all it ever stores is ciphertext.
+In a group the row therefore describes the call **as the starter experienced it**:
+they were present from `t0`, so duration and the peak participant count are exact,
+but if they leave while others carry on, the row stops there. The alternative —
+having the last participant out write it — needs the call's start time and peak
+count to be shared state, which the room model deliberately doesn't have (a
+node-local map would be wrong the moment participants land on different nodes
+behind the Redis adapter).
+
+Group rows carry `joined` (peak simultaneous participants → "4 on the call") and
+render a "<Name> started a call" label above the card. A DM's "2 on the call" says
+nothing, so it's omitted.
+
+The server never learns what a DM call's row says: `call` rides inside the
+envelope like `text`, so all it stores is ciphertext. For group calls it does know
+the roster and duration, because it manages join/leave — see
+[the privacy note](./group-calls-plan.md#the-thread-record), disclosed in
+Settings → Privacy.
 
 ### Statuses
 
@@ -136,28 +189,38 @@ Media capture needs platform permission plumbing, not just browser permission:
 | --- | --- |
 | Browser | works (getUserMedia prompt) |
 | Desktop (Electron) | works — `media` in `ALLOWED_PERMISSIONS` (`desktop/src/main.ts`), mic + camera entitlements in `desktop/build/entitlements.mac.plist`, usage strings in `desktop/electron-builder.yml` |
-| iOS (Capacitor) | **calls will fail** — `mobile/ios/App/App/Info.plist` has no `NSMicrophoneUsageDescription`/`NSCameraUsageDescription`, so iOS denies capture |
+| iOS (Capacitor) | permission strings are in place (`NSMicrophoneUsageDescription`/`NSCameraUsageDescription` in `mobile/ios/App/App/Info.plist`); not yet exercised on a device |
 
 ## Testing
 
 ```bash
-# server relay: invite authorization, ring fanout, signal/end routing (18 checks)
+# server rules: membership, ring vs huddle, video gate, capacity, per-device
+# signal routing, ordered device migration, crash-leave (36 checks)
 npx tsx --env-file=.env.local scripts/call-harness.mts
 
-# real calls in two browsers with fake capture devices, then reads the thread
-# on each side: answered / cancelled / declined / busy (15 checks)
-# needs the dev server on :4000
+# 1:1 in two browsers, then reads the thread on each side:
+# answered / cancelled / declined / busy (15 checks)
 npx tsx --env-file=.env.local scripts/call-event-harness.mts [--headed] [--shots]
+
+# a real 3-way mesh in three browsers: decline → join from the banner → late
+# joiner fully meshed, media flowing on every leg, one thread row (19 checks)
+npx tsx --env-file=.env.local scripts/group-call-harness.mts [--headed] [--shots]
 ```
 
-`call-event-harness.mts` launches Chromium with
-`--use-fake-device-for-media-stream`, so it exercises the actual WebRTC path —
-ICE, DTLS, media — not a mock. `--shots` writes both threads to `/tmp` for a
-visual check against the design comp.
+The browser harnesses launch Chromium with
+`--use-fake-device-for-media-stream`, so they exercise the actual WebRTC path —
+ICE, DTLS, media — not a mock. Both need the dev server on :4000. `--shots` writes
+screenshots to `/tmp` for a visual check against the design comp.
+
+`group-call-harness.mts` measures **inbound RTP bytes per peer connection**, which
+is the check that matters for a mesh: connections can reach `connected` while no
+media flows. It collects the connections by wrapping `RTCPeerConnection` in a
+page init script, so nothing in the app has to expose them for testing.
 
 ## Not built
 
-- **TURN is unset** (see above). This is the production blocker.
+- **TURN is unset** (see above). This is the production blocker, and it matters
+  more now than it did for 1:1: a mesh multiplies the NAT failure modes.
 - **Signaling isn't E2EE-sealed.** SDP (including DTLS fingerprints) transits
   the server in plaintext, so a malicious *server* could MITM media. The fix is
   to seal `call:signal` blobs in the existing envelope crypto — see the E2EE
@@ -165,7 +228,16 @@ visual check against the design comp.
 - **No push/wake for incoming calls.** `call:invite` fast-fails `offline` when
   the callee has no connected socket, and unlike `message:send` it sends no web
   push — so a closed or backgrounded app can't be rung at all.
-- **Group calls.** Would need an SFU; the current design is strictly pairwise.
+- **More than 6 participants.** Would need an SFU (see
+  [the plan](./group-calls-plan.md#why-not-an-sfu-first)); capacity refusals are
+  counted server-side as the trigger to reconsider.
+- **Huddle discovery is start-time only.** `call:ongoing` reaches members' user
+  rooms for ring-eligible groups, but for a huddle it only reaches the group room
+  — whoever has the conversation open. Someone who opens a big group *after* a
+  huddle started sees no Join bar until the next call event. Fixing it needs
+  shared state (or a room scan) rather than a derived rule.
 - **The mobile Calls tab isn't a call log.** `calls-screen.tsx` is a "start a
-  call" contact list. It predates the thread record, and call history now exists,
-  so backing that tab with real history is a straightforward follow-up.
+  call" contact list. Call history now exists as thread rows, so backing that tab
+  with real history is a straightforward follow-up.
+- **The join bar has no design.** The comp has no state for an ongoing call, so
+  `OngoingCallBar` is modelled on the pinned bar and should get a design pass.

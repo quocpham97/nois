@@ -326,6 +326,16 @@ function SecurityCard() {
           </>
         )}
       </div>
+      {/* Calls are E2EE end to end, but the server manages the participant
+          roster, so it necessarily sees who was on a call and for how long.
+          Disclosed here rather than only in docs/group-calls-plan.md. */}
+      <div className="mt-3 rounded-lg border border-app-border bg-panel-2 px-3 py-3">
+        <div className="text-[13.5px] font-medium">Calls</div>
+        <div className="mt-1.5 text-[12.5px] text-app-muted">
+          Call metadata (participants &amp; duration) is processed by the server;
+          voice and video remain end-to-end encrypted.
+        </div>
+      </div>
       <div className="mt-3">
         <BackupPanel />
       </div>

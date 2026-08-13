@@ -1,8 +1,29 @@
 # Plan: group voice & video calls
 
-Status: **agreed plan, nothing built yet.** The four design questions are settled
-— see [Decisions](#decisions-settled-2026-08-13). Extends the 1:1 feature
-documented in [calls.md](./calls.md).
+Status: **implemented 2026-08-13** (Phases 0–3). This file is kept as the design
+record — the rationale, the decisions and the trade-offs behind what shipped; for
+how the built system behaves, see [calls.md](./calls.md).
+
+Deviations from the plan as written, and why:
+
+- **The starter writes the thread record, not the last participant to leave.** The
+  plan had the server tell the last leaver via `call:ended {startedAt, peak}`, but
+  those two values are per-call *state* — and a node-local map for them is wrong
+  the moment participants land on different nodes behind the Redis adapter. The
+  room model's whole point is that every rule is derived, so the record is written
+  by the one client guaranteed to have been present from `t0`. Cost: a group call
+  that continues after the starter leaves is recorded as the starter's
+  participation.
+- **Huddle discovery is start-time only.** `call:ongoing` reaches members' user
+  rooms for ring-eligible groups, but a huddle's announcement only reaches the
+  group room (whoever has the conversation open). Opening a big group *after* a
+  huddle starts shows no Join bar. Fixing it needs shared state, which is the same
+  trade-off as above.
+- **The video cap is enforced structurally**, by only offering video when the whole
+  group is ≤4 members, so the participant cap the server counts is just the voice
+  cap of 6. Same guarantee, no extra state.
+- **TURN is still unset** — configuration, not code, and still the production
+  blocker (prerequisite 2).
 
 ## Recommendation in one paragraph
 
@@ -41,9 +62,9 @@ Cap rejections are only a usable trigger if they're counted, so Phase 1 must log
 one server-side counter when a join is refused for being at capacity. Without it
 this decision has no feedback loop.
 
-## Prerequisites (must land first)
+## Prerequisites
 
-1. **Per-device signal routing.** `call:signal` currently relays to
+1. **Per-device signal routing.** ✅ done. `call:signal` used to relay to
    `user:<uid>` — *every* device of that user. In a 1:1 call that's harmless
    (non-participating devices drop unknown `callId`s, and the `handled` fanout
    tears them down), but it is unsound for a mesh: a second device of the same
@@ -54,9 +75,9 @@ this decision has no feedback loop.
    its own merits — it removes a latent race in the existing 1:1 path.
 2. **TURN must be configured.** Mesh multiplies NAT failure modes; a call that
    half-connects is worse than one that fails. Already a 1:1 production blocker.
-3. **iOS media permissions.** `mobile/ios/App/App/Info.plist` still has no
-   `NSMicrophoneUsageDescription`/`NSCameraUsageDescription`, so calls can't work
-   in the iOS shell at all.
+3. **iOS media permissions.** ✅ done — `NSMicrophoneUsageDescription` and
+   `NSCameraUsageDescription` are in `mobile/ios/App/App/Info.plist`. Not yet
+   exercised on a device.
 
 ## Protocol
 
@@ -70,7 +91,7 @@ is needed, and socket.io removes a crashed participant automatically.
 | --- | --- | --- |
 | `call:start {groupId, video}` | starter | validate **membership** (`isMember`, not `canAccess` — see below), join starter to the room, ring members iff the group qualifies (below), ack `{callId, participants}` |
 | `call:join {callId}` | invitee / late joiner | validate membership of the room's group; refuse at capacity (and count it); **displace the joiner's own other device** (below); join, broadcast `call:joined {userId, deviceId}` to the room |
-| `call:leave {callId}` | participant | leave, broadcast `call:left {deviceId}`; if the room is now empty, emit `call:ended {startedAt, peak}` to the leaver |
+| `call:leave {callId}` | participant | leave, broadcast `call:left {deviceId}`; if the room is now empty, tell the conversation the call is over (shipped as `call:over`, not the planned `call:ended {startedAt, peak}` — see the deviations at the top) |
 | `call:kicked {reason}` | server → displaced device | sent when the same user joins from another device |
 | `call:signal` | participants | relay to `device:<toDeviceId>` (unchanged otherwise) |
 

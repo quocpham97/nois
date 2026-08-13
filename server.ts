@@ -6,7 +6,7 @@
 // Phase A: connection lifecycle + an `echo` health-check round-trip only.
 
 import { createServer } from "node:http";
-import { timingSafeEqual } from "node:crypto";
+import { timingSafeEqual, randomUUID } from "node:crypto";
 import { parse } from "node:url";
 import { loadEnvConfig } from "@next/env";
 import next from "next";
@@ -18,7 +18,6 @@ import webpush from "web-push";
 // process — Next does this for its own runtime, but we read them here too.
 loadEnvConfig(process.cwd());
 import type {
-  CallEndReason,
   ClientToServerEvents,
   ServerToClientEvents,
 } from "./src/lib/socket-events";
@@ -45,6 +44,18 @@ import {
 
 const dev = process.env.NODE_ENV !== "production";
 const port = Number(process.env.PORT) || 4000;
+
+// Call limits (see docs/group-calls-plan.md). Media is a full mesh, so every
+// participant uploads N−1 streams: the caps are about uplink and CPU, not policy.
+// CALL_MAX_VIDEO is enforced structurally rather than by counting participants —
+// video is only offered when the whole GROUP fits under it, so a call can never
+// grow past the cap and degrade someone already talking.
+const CALL_MAX_VOICE = 6;
+const CALL_MAX_VIDEO = 4;
+/** Largest private group whose members' devices ring; above this it's a huddle. */
+const CALL_RING_MAX = 6;
+/** Joins refused for being at capacity — the agreed trigger for building an SFU. */
+let callCapRejections = 0;
 
 const app = next({ dev });
 const handle = app.getRequestHandler();
@@ -287,6 +298,14 @@ app.prepare().then(async () => {
     // Per-user room so we can notify a user (e.g. a new DM) on any of their
     // sockets even before they've joined the relevant group room.
     socket.join("user:" + userId);
+
+    // This browser's E2EE device id, announced on every connect. Call signaling
+    // is addressed per DEVICE (`device:<id>`), never per user — see call:signal.
+    socket.on("device:announce", ({ deviceId }) => {
+      if (typeof deviceId !== "string" || !deviceId) return;
+      socket.data.deviceId = deviceId;
+      socket.join("device:" + deviceId);
+    });
 
     // Replay a group's durable state to THIS socket: missed messages/replies
     // (from the read cursor) plus every stored sender-key envelope, so a member
@@ -786,78 +805,194 @@ app.prepare().then(async () => {
       socket.to("user:" + toUserId).emit("dm:reheal:offer", { groupId, msgId, enc });
     });
 
-    // 1:1 calls — signaling relay only. SDP/ICE blobs stay opaque and the
-    // media itself is peer-to-peer (DTLS-SRTP), so it never touches the
-    // server. The INVITE is the one server-validated step: the group must
-    // be a DM the caller belongs to, and the callee is derived from the DM
-    // roster (never client-claimed), so a call can only ring an actual DM
-    // counterpart. Everything after routes by callId + toUserId and is
-    // dropped client-side for unknown callIds.
-    socket.on("call:invite", async ({ callId, groupId, video }, ack) => {
+    // Calls — roster + signaling relay only. SDP/ICE blobs stay opaque and the
+    // media is a peer-to-peer mesh (DTLS-SRTP), so it never touches the server.
+    //
+    // A call IS a socket room, `call:<groupId>:<callId>`: the room is the
+    // participant list, `fetchSockets` on it is adapter-aware (correct across
+    // nodes behind the Redis adapter), the groupId is recoverable from the name,
+    // and a crashed participant leaves it automatically. That leaves NO per-call
+    // server state to keep consistent — every rule below is derived from the
+    // group's roster or the room's current occupancy.
+    //
+    // `call:start` and `call:join` are the server-validated steps (they create
+    // UI out of nothing); everything after is dropped client-side for callIds a
+    // client doesn't recognize.
+    const callRoom = (groupId: string, callId: string) =>
+      `call:${groupId}:${callId}`;
+
+    // Who may be rung: private groups of at most CALL_RING_MAX members. A public
+    // group NEVER rings at any size — `group:join` records anyone who so much as
+    // opens one as a member (E2EE sender keys target the explicit roster), so a
+    // public roster is a list of people who once looked, not people who agreed
+    // to be reachable. Above the cap, and for every public group, the call is a
+    // huddle: joinable from the conversation, nobody's device rings.
+    const ringEligible = (groupId: string) =>
+      !store.isPublicGroup(groupId) &&
+      store.listMemberIds(groupId).length <= CALL_RING_MAX;
+    // Video needs the whole group to fit under the video cap, so a call can
+    // never grow past it mid-session and degrade someone already talking.
+    const videoEligible = (groupId: string) =>
+      store.listMemberIds(groupId).length <= CALL_MAX_VIDEO;
+
+    // Conversation-level liveness for the "Ongoing call · Join" affordance. For
+    // ring-eligible groups (≤6 members) every member's own room gets it, so a
+    // declined ring can still be joined later; for a huddle it goes to the group
+    // room only — whoever has the conversation open — rather than fanning out to
+    // a 500-member roster.
+    const notifyCallLive = (
+      groupId: string,
+      payload: { callId: string; video: boolean; starterId: string },
+    ) => {
+      if (ringEligible(groupId)) {
+        for (const id of store.listMemberIds(groupId)) {
+          io.to("user:" + id).emit("call:ongoing", { groupId, ...payload });
+        }
+      } else {
+        io.to(groupId).emit("call:ongoing", { groupId, ...payload });
+      }
+    };
+    const notifyCallOver = (groupId: string, callId: string) => {
+      if (ringEligible(groupId)) {
+        for (const id of store.listMemberIds(groupId)) {
+          io.to("user:" + id).emit("call:over", { groupId, callId });
+        }
+      } else {
+        io.to(groupId).emit("call:over", { groupId, callId });
+      }
+    };
+
+    socket.on("call:start", async ({ groupId, video }, ack) => {
       const reply = (r: Parameters<typeof ack>[0]) => {
         if (typeof ack === "function") ack(r);
       };
-      if (typeof callId !== "string" || !callId) {
-        return reply({ ok: false, reason: "error" });
-      }
-      if (!store.isDm(groupId) || !authorized(groupId)) {
+      // Membership, not `canAccess`: read access to a public group must not be
+      // enough to place a call in it.
+      if (typeof groupId !== "string" || !store.isMember(groupId, userId)) {
         return reply({ ok: false, reason: "unauthorized" });
       }
-      const peerId = store
-        .listMemberIds(groupId)
-        .find((id) => id !== userId);
-      if (!peerId) return reply({ ok: false, reason: "error" });
-      // Adapter-aware online check (works across nodes with the Redis
-      // adapter) so the caller gets instant "unavailable" feedback instead of
-      // ringing an empty room.
-      const peerSockets = await io.in("user:" + peerId).fetchSockets();
-      if (peerSockets.length === 0) return reply({ ok: false, reason: "offline" });
-      socket.to("user:" + peerId).emit("call:invite", {
+      const callId = randomUUID();
+      const effectiveVideo = !!video && videoEligible(groupId);
+      const others = store.listMemberIds(groupId).filter((id) => id !== userId);
+      const ringing = ringEligible(groupId) && others.length > 0;
+      if (ringing) {
+        // Adapter-aware online check so the starter gets instant "unavailable"
+        // feedback instead of ringing an empty room. Huddles skip it: starting
+        // one alone and waiting for people to join is the whole point.
+        const online = await Promise.all(
+          others.map(async (id) => (await io.in("user:" + id).fetchSockets()).length > 0),
+        );
+        if (!online.some(Boolean)) return reply({ ok: false, reason: "offline" });
+      }
+      socket.join(callRoom(groupId, callId));
+      if (ringing) {
+        for (const id of others) {
+          io.to("user:" + id).emit("call:invite", {
+            callId,
+            groupId,
+            fromUserId: userId,
+            video: effectiveVideo,
+          });
+        }
+      }
+      notifyCallLive(groupId, {
         callId,
-        groupId,
-        fromUserId: userId,
-        video: !!video,
+        video: effectiveVideo,
+        starterId: userId,
       });
-      reply({ ok: true });
+      reply({ ok: true, callId, video: effectiveVideo, ringing });
     });
-    socket.on("call:answer", ({ callId, toUserId, accept }) => {
-      if (!callId || !toUserId) return;
-      socket.to("user:" + toUserId).emit("call:answer", {
-        callId,
-        fromUserId: userId,
-        accept: !!accept,
-      });
-      // The invite rang on ALL of the answerer's devices — tell their OWN
-      // other devices it was handled here so they stop ringing.
-      socket.to("user:" + userId).emit("call:end", {
-        callId,
-        fromUserId: userId,
-        reason: "handled",
+
+    socket.on("call:join", async ({ callId, groupId }, ack) => {
+      const reply = (r: Parameters<typeof ack>[0]) => {
+        if (typeof ack === "function") ack(r);
+      };
+      if (typeof callId !== "string" || !callId || typeof groupId !== "string") {
+        return reply({ ok: false, reason: "error" });
+      }
+      if (!store.isMember(groupId, userId)) {
+        return reply({ ok: false, reason: "unauthorized" });
+      }
+      const room = callRoom(groupId, callId);
+      const present = await io.in(room).fetchSockets();
+      if (present.length === 0) return reply({ ok: false, reason: "gone" });
+      // One device per user per call, newest wins: two live devices would feed
+      // back acoustically. ORDER IS THE GUARANTEE — the displaced device is out
+      // of the room and its `call:left` is broadcast BEFORE this device is
+      // announced, so incumbents never hold live legs to both and no audio is
+      // ever negotiated for the second one.
+      const displaced = present.filter((s) => s.data.userId === userId);
+      for (const old of displaced) {
+        old.leave(room);
+        old.emit("call:kicked", { callId, reason: "joined_on_another_device" });
+        io.to(room).emit("call:left", {
+          callId,
+          userId,
+          deviceId: (old.data.deviceId as string | undefined) ?? "",
+        });
+      }
+      const remaining = present.filter((s) => s.data.userId !== userId);
+      if (remaining.length >= CALL_MAX_VOICE) {
+        // Counted, not just refused: "frequent cap rejections" is the agreed
+        // trigger for building an SFU, and a trigger nobody can observe is not
+        // a trigger (see docs/group-calls-plan.md).
+        callCapRejections += 1;
+        console.log(
+          `[call] capacity reject group=${groupId} call=${callId} user=${userId} (total ${callCapRejections})`,
+        );
+        return reply({ ok: false, reason: "full" });
+      }
+      socket.join(room);
+      const deviceId = (socket.data.deviceId as string | undefined) ?? "";
+      socket.to(room).emit("call:joined", { callId, userId, deviceId });
+      // This ring was handled here — stop our own other devices ringing.
+      socket.to("user:" + userId).emit("call:handled", { callId });
+      reply({
+        ok: true,
+        video: videoEligible(groupId),
+        participants: remaining.map((s) => ({
+          userId: s.data.userId as string,
+          deviceId: (s.data.deviceId as string | undefined) ?? "",
+        })),
       });
     });
-    const CALL_END_REASONS: CallEndReason[] = [
-      "ended",
-      "cancelled",
-      "busy",
-      "timeout",
-      "handled",
-    ];
-    socket.on("call:end", ({ callId, toUserId, reason }) => {
-      if (!callId || !toUserId) return;
-      socket.to("user:" + toUserId).emit("call:end", {
+
+    socket.on("call:decline", ({ callId, groupId, reason }) => {
+      if (!callId || typeof groupId !== "string") return;
+      io.to(callRoom(groupId, callId)).emit("call:declined", {
         callId,
-        fromUserId: userId,
-        reason: CALL_END_REASONS.includes(reason) ? reason : "ended",
+        userId,
+        reason: reason === "busy" ? "busy" : "declined",
       });
+      socket.to("user:" + userId).emit("call:handled", { callId });
     });
-    socket.on("call:signal", ({ callId, toUserId, data }) => {
-      if (!callId || !toUserId) return;
+
+    socket.on("call:leave", async ({ callId, groupId }) => {
+      if (!callId || typeof groupId !== "string") return;
+      const room = callRoom(groupId, callId);
+      socket.leave(room);
+      io.to(room).emit("call:left", {
+        callId,
+        userId,
+        deviceId: (socket.data.deviceId as string | undefined) ?? "",
+      });
+      const left = await io.in(room).fetchSockets();
+      if (left.length === 0) notifyCallOver(groupId, callId);
+    });
+
+    socket.on("call:signal", ({ callId, toDeviceId, data }) => {
+      if (!callId || !toDeviceId) return;
       // SDP + one ICE candidate per event — 256 KiB is far above any real
       // payload; the cap just keeps the relay from being a byte cannon.
       if (typeof data !== "string" || !data || data.length > 256 * 1024) return;
-      socket.to("user:" + toUserId).emit("call:signal", {
+      // Addressed to ONE device. Routing by user would deliver a peer's offer to
+      // every device that person has online, which is unsound in a mesh: a
+      // sibling device is also ringing, knows the callId, and would act on an
+      // offer meant for its peer.
+      socket.to("device:" + toDeviceId).emit("call:signal", {
         callId,
         fromUserId: userId,
+        fromDeviceId: (socket.data.deviceId as string | undefined) ?? "",
         data,
       });
     });
@@ -1114,6 +1249,31 @@ app.prepare().then(async () => {
       } catch (e) {
         console.error("[history] fetch failed:", (e as Error).message);
         ack({ rows: [], nextCursor: null });
+      }
+    });
+
+    // Leaving a call by crashing/closing the tab must look like leaving it
+    // normally. `disconnecting` still has the socket's rooms, so the call rooms
+    // are recoverable here (in `disconnect` they're already gone).
+    socket.on("disconnecting", () => {
+      for (const room of socket.rooms) {
+        if (!room.startsWith("call:")) continue;
+        const rest = room.slice("call:".length);
+        const cut = rest.lastIndexOf(":");
+        if (cut <= 0) continue;
+        const groupId = rest.slice(0, cut);
+        const callId = rest.slice(cut + 1);
+        socket.to(room).emit("call:left", {
+          callId,
+          userId,
+          deviceId: (socket.data.deviceId as string | undefined) ?? "",
+        });
+        void (async () => {
+          const left = (await io.in(room).fetchSockets()).filter(
+            (s) => s.id !== socket.id,
+          );
+          if (left.length === 0) notifyCallOver(groupId, callId);
+        })();
       }
     });
 

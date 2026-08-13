@@ -8,7 +8,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Mic, MicOff, Phone, PhoneOff, Video, VideoOff } from "lucide-react";
 import { type User } from "@/lib/chat-data";
-import { useCall, type CallInfo } from "./call-context";
+import {
+  useCall,
+  type CallInfo,
+  type CallParticipant,
+} from "./call-context";
 
 /** Attach a MediaStream to a <video>. `mirror` for the self-view. */
 function StreamVideo({
@@ -164,17 +168,21 @@ function ControlButton({
 function IncomingCallCard({ call }: { call: CallInfo }) {
   const { acceptCall, declineCall } = useCall();
   useRingTone("incoming");
+  // In a group the caller and the conversation are different things, and you
+  // need both to decide whether to pick up.
+  const subtitle =
+    call.kind === "group"
+      ? `${call.starter.name} · ${call.video ? "video" : "voice"} call`
+      : `Incoming ${call.video ? "video" : "voice"} call…`;
   return (
     <div className="animate-fade-in fixed right-5 top-5 z-50 w-[320px] rounded-2xl border border-app-border bg-panel-2 p-4 shadow-[var(--app-shadow-lg)]">
       <div className="flex items-center gap-3">
-        <PeerAvatar user={call.peer} size={44} />
+        <PeerAvatar user={call.starter} size={44} />
         <div className="min-w-0">
           <div className="truncate text-[15px] font-bold text-app-text">
-            {call.peer.name}
+            {call.title}
           </div>
-          <div className="text-[12.5px] text-app-muted">
-            Incoming {call.video ? "video" : "voice"} call…
-          </div>
+          <div className="truncate text-[12.5px] text-app-muted">{subtitle}</div>
         </div>
       </div>
       <div className="mt-4 flex gap-2">
@@ -197,28 +205,54 @@ function IncomingCallCard({ call }: { call: CallInfo }) {
   );
 }
 
+/** One remote participant: their video if it's a video call, else their avatar. */
+function ParticipantTile({
+  p,
+  video,
+}: {
+  p: CallParticipant;
+  video: boolean;
+}) {
+  return (
+    <div
+      data-participant={p.deviceId}
+      data-connected={p.connected ? "1" : "0"}
+      className="relative overflow-hidden rounded-xl bg-black/60"
+      style={{ aspectRatio: "4 / 3" }}
+    >
+      {video && p.stream && p.connected ? (
+        // Not muted: in a video call the remote audio rides these elements.
+        <StreamVideo stream={p.stream} className="absolute inset-0 size-full object-cover" />
+      ) : (
+        <div className="absolute inset-0 flex items-center justify-center">
+          <PeerAvatar user={p.user} size={44} />
+          {/* Voice call (or video not up yet) — the audio sink lives here. */}
+          {!video && <StreamAudio stream={p.stream} />}
+        </div>
+      )}
+      <div className="absolute bottom-1.5 left-1.5 max-w-[calc(100%-12px)] truncate rounded-full bg-black/55 px-2 py-0.5 text-[11.5px] font-semibold text-white">
+        {p.user.name.split(" ")[0]}
+        {!p.connected && <span className="ml-1.5 font-normal text-white/60">connecting…</span>}
+      </div>
+    </div>
+  );
+}
+
 function CallPanel({ call }: { call: CallInfo }) {
-  const {
-    localStream,
-    remoteStream,
-    micOn,
-    camOn,
-    endCall,
-    toggleMic,
-    toggleCam,
-  } = useCall();
+  const { localStream, micOn, camOn, endCall, toggleMic, toggleCam } = useCall();
   const ringing = call.phase === "outgoing";
   useRingTone(ringing ? "outgoing" : null);
+  const peers = call.participants;
   const status =
-    call.phase === "outgoing" ? (
-      "Ringing…"
-    ) : call.phase === "connecting" ? (
-      "Connecting…"
-    ) : call.startedAt ? (
-      <CallTimer startedAt={call.startedAt} />
-    ) : (
-      ""
-    );
+    call.phase === "outgoing"
+      ? call.kind === "group"
+        ? "Waiting for others…"
+        : "Ringing…"
+      : call.phase === "connecting"
+        ? "Connecting…"
+        : call.startedAt
+          ? undefined // the timer renders instead
+          : "";
 
   const controls = (
     <div className="flex items-center justify-center gap-3">
@@ -244,47 +278,61 @@ function CallPanel({ call }: { call: CallInfo }) {
     </div>
   );
 
-  if (call.video) {
-    return (
-      <div className="animate-fade-in fixed bottom-5 right-5 z-50 w-[400px] overflow-hidden rounded-2xl border border-app-border bg-black shadow-[var(--app-shadow-lg)]">
-        <div className="relative aspect-video">
-          {remoteStream && call.phase === "active" ? (
-            <StreamVideo
-              stream={remoteStream}
-              className="absolute inset-0 size-full object-cover"
-            />
-          ) : (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
-              <PeerAvatar user={call.peer} size={64} />
-            </div>
-          )}
-          <StreamVideo
-            stream={localStream}
-            muted
-            mirror
-            className="absolute bottom-3 right-3 w-[104px] rounded-lg border border-white/20 object-cover"
-          />
-          <div className="absolute left-3 top-3 rounded-full bg-black/50 px-3 py-1 text-[12.5px] font-semibold text-white">
-            {call.peer.name}
-            <span className="ml-2 font-normal text-white/70">{status}</span>
-          </div>
-        </div>
-        <div className="bg-black/90 py-3">{controls}</div>
-      </div>
-    );
-  }
+  // The panel is a floating card, so it grows with the mesh rather than shrinking
+  // everyone to thumbnails: one column for a 1:1, two or three for a group.
+  const cols = peers.length <= 1 ? 1 : peers.length <= 4 ? 2 : 3;
+  const width = peers.length <= 1 ? 400 : peers.length <= 4 ? 520 : 620;
+  const headline = (
+    <div className="flex min-w-0 items-baseline gap-2">
+      <span className="truncate text-[13px] font-semibold text-white">{call.title}</span>
+      <span className="shrink-0 text-[12px] font-normal text-white/70">
+        {status ?? (call.startedAt ? <CallTimer startedAt={call.startedAt} /> : null)}
+      </span>
+      {call.kind === "group" && peers.length > 0 && (
+        <span className="shrink-0 text-[12px] font-normal text-white/70">
+          · {peers.length + 1} on the call
+        </span>
+      )}
+    </div>
+  );
 
   return (
-    <div className="animate-fade-in fixed bottom-5 right-5 z-50 w-[300px] rounded-2xl border border-app-border p-5 shadow-[var(--app-shadow-lg)]"
-      style={{ background: "#1c1e21" }}
+    <div
+      className="animate-fade-in fixed bottom-5 right-5 z-50 max-w-[calc(100vw-40px)] overflow-hidden rounded-2xl border border-app-border shadow-[var(--app-shadow-lg)]"
+      style={{ width, background: "#1c1e21" }}
     >
-      <StreamAudio stream={remoteStream} />
-      <div className="flex flex-col items-center gap-2 pb-5 pt-2">
-        <PeerAvatar user={call.peer} size={72} />
-        <div className="text-[16px] font-bold text-white">{call.peer.name}</div>
-        <div className="text-[13px] text-white/60">{status}</div>
+      <div className="px-4 pb-1 pt-3">{headline}</div>
+      <div className="p-3">
+        {peers.length === 0 ? (
+          <div className="flex flex-col items-center gap-2 py-6">
+            <PeerAvatar user={call.kind === "dm" ? call.starter : call.starter} size={72} />
+            <div className="text-[13px] text-white/60">
+              {ringing
+                ? call.kind === "group"
+                  ? "Nobody has joined yet"
+                  : "Ringing…"
+                : "Connecting…"}
+            </div>
+          </div>
+        ) : (
+          <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+            {peers.map((p) => (
+              <ParticipantTile key={p.deviceId} p={p} video={call.video} />
+            ))}
+          </div>
+        )}
+        {call.video && (
+          <div className="mt-2 flex justify-end">
+            <StreamVideo
+              stream={localStream}
+              muted
+              mirror
+              className="w-[104px] rounded-lg border border-white/20 object-cover"
+            />
+          </div>
+        )}
       </div>
-      {controls}
+      <div className="bg-black/40 py-3">{controls}</div>
     </div>
   );
 }

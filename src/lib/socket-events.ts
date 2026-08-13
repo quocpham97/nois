@@ -244,55 +244,97 @@ export type DmRehealOfferPayload = {
 };
 export type DmRehealOfferRelay = { groupId: string; msgId: string; enc: string };
 
-// 1:1 voice/video calls (DMs only). The server relays call signaling (SDP
-// offers/answers + trickle ICE, opaque `data` strings) between the two DM
-// parties; the media itself flows peer-to-peer over DTLS-SRTP and never
-// touches the server. `callId` is a caller-generated UUID — every event
-// carries it and clients drop events for ids they don't recognize, so only
-// the invite (which creates UI out of nothing) is server-validated: the
-// group must be a DM the caller belongs to, and the server derives the
-// callee from the DM roster rather than trusting a client-claimed peer.
-export type CallInvitePayload = {
-  callId: string;
-  groupId: string;
-  /** Camera call (true) vs voice-only (false). */
-  video: boolean;
-};
-/** Ack for call:invite — `offline` means the callee has no connected device. */
-export type CallInviteResult =
-  | { ok: true }
+// Voice/video calls. Media is a peer-to-peer mesh (DTLS-SRTP) and never touches
+// the server; the server relays signaling (SDP + trickle ICE as opaque `data`
+// strings) and owns nothing but the participant roster — which is literally a
+// socket room, `call:<groupId>:<callId>`, so there is no per-call server state to
+// keep consistent across nodes. See docs/calls.md + docs/group-calls-plan.md.
+//
+// Every event carries `callId` and clients drop events for ids they don't
+// recognize. The two events that create UI out of nothing (`call:start` and
+// `call:join`) are server-validated against the group's *member* roster.
+
+/** A device in a call. Signaling is addressed per device, never per user: two
+ *  devices of one user must never both be treated as "the peer". */
+export type CallPeer = { userId: string; deviceId: string };
+
+/** Announce this browser's E2EE device id so the server can route signaling to
+ *  it (`device:<deviceId>` room). Emitted on every connect. */
+export type DeviceAnnouncePayload = { deviceId: string };
+
+export type CallStartPayload = { groupId: string; video: boolean };
+/** `video` in the ack is the EFFECTIVE mode: the server downgrades a video
+ *  request to voice in groups too large for the video cap. `ringing` is false
+ *  for a huddle (nobody's device rings; the conversation shows a join banner). */
+export type CallStartResult =
+  | { ok: true; callId: string; video: boolean; ringing: boolean }
   | { ok: false; reason: "offline" | "unauthorized" | "error" };
+
 export type CallInviteRelay = {
   callId: string;
-  /** The CALLER's DM group id (not viewer-symmetric) — the callee resolves
-   *  its own conversation by `fromUserId`, not by this id. */
   groupId: string;
   fromUserId: string;
   video: boolean;
 };
-/** Callee → caller: accept or decline the ringing invite. */
-export type CallAnswerPayload = { callId: string; toUserId: string; accept: boolean };
-export type CallAnswerRelay = { callId: string; fromUserId: string; accept: boolean };
-/** Opaque signaling blob (JSON: offer / answer / ICE candidate). */
-export type CallSignalPayload = { callId: string; toUserId: string; data: string };
-export type CallSignalRelay = { callId: string; fromUserId: string; data: string };
-/** `handled` is server-generated: sent to the answerer's OWN other devices so
- *  they stop ringing when one device accepts/declines. */
-export type CallEndReason =
-  | "ended"
-  | "cancelled"
-  | "busy"
-  | "timeout"
-  | "handled";
-export type CallEndPayload = {
+
+export type CallJoinPayload = { callId: string; groupId: string };
+/** `participants` are the devices already in the call — the joiner answers
+ *  their offers (see the glare rule in call-context). `gone` means the call
+ *  ended before this join landed; `full` means the participant cap. */
+export type CallJoinResult =
+  | { ok: true; participants: CallPeer[]; video: boolean }
+  | { ok: false; reason: "full" | "unauthorized" | "gone" | "error" };
+
+/** Not joining. `busy` is an automatic decline (already on another call) and is
+ *  recorded the same as a tapped decline — see docs/calls.md. */
+export type CallDeclinePayload = {
   callId: string;
-  toUserId: string;
-  reason: CallEndReason;
+  groupId: string;
+  reason: "declined" | "busy";
 };
-export type CallEndRelay = {
+export type CallDeclinedRelay = {
+  callId: string;
+  userId: string;
+  reason: "declined" | "busy";
+};
+
+export type CallLeavePayload = { callId: string; groupId: string };
+
+/** Broadcast inside the call room as the roster changes. */
+export type CallJoinedRelay = { callId: string } & CallPeer;
+export type CallLeftRelay = { callId: string } & CallPeer;
+
+/** Server → the answerer's OTHER devices: this ring was handled here, stop. */
+export type CallHandledRelay = { callId: string };
+/** Server → a device displaced because the same user joined elsewhere. */
+export type CallKickedRelay = {
+  callId: string;
+  reason: "joined_on_another_device";
+};
+
+/** Conversation-level liveness, so a group can show "Ongoing call · Join".
+ *  Sent to members' user rooms for ring-eligible groups, and to the group room
+ *  (i.e. whoever currently has it open) for huddles. */
+export type CallOngoingRelay = {
+  groupId: string;
+  callId: string;
+  video: boolean;
+  starterId: string;
+};
+export type CallOverRelay = { groupId: string; callId: string };
+
+/** Opaque signaling blob (JSON: offer / answer / ICE candidate), addressed to
+ *  one device. */
+export type CallSignalPayload = {
+  callId: string;
+  toDeviceId: string;
+  data: string;
+};
+export type CallSignalRelay = {
   callId: string;
   fromUserId: string;
-  reason: CallEndReason;
+  fromDeviceId: string;
+  data: string;
 };
 
 export type RecoveryRequestPayload = { deviceId: string; fingerprint: string };
@@ -571,13 +613,18 @@ export type ClientToServerEvents = {
   "recovery:offer": (payload: RecoveryOfferPayload) => void;
   "dm:reheal:request": (payload: DmRehealRequestPayload) => void;
   "dm:reheal:offer": (payload: DmRehealOfferPayload) => void;
-  "call:invite": (
-    payload: CallInvitePayload,
-    ack: (result: CallInviteResult) => void,
+  "device:announce": (payload: DeviceAnnouncePayload) => void;
+  "call:start": (
+    payload: CallStartPayload,
+    ack: (result: CallStartResult) => void,
   ) => void;
-  "call:answer": (payload: CallAnswerPayload) => void;
+  "call:join": (
+    payload: CallJoinPayload,
+    ack: (result: CallJoinResult) => void,
+  ) => void;
+  "call:decline": (payload: CallDeclinePayload) => void;
+  "call:leave": (payload: CallLeavePayload) => void;
   "call:signal": (payload: CallSignalPayload) => void;
-  "call:end": (payload: CallEndPayload) => void;
   "mls:publishKeyPackage": (payload: MlsPublishKeyPackagePayload) => void;
   "mls:fetchGroup": (
     payload: MlsFetchGroupPayload,
@@ -624,9 +671,14 @@ export type ServerToClientEvents = {
   "dm:reheal:request": (payload: DmRehealRequestRelay) => void;
   "dm:reheal:offer": (payload: DmRehealOfferRelay) => void;
   "call:invite": (payload: CallInviteRelay) => void;
-  "call:answer": (payload: CallAnswerRelay) => void;
+  "call:joined": (payload: CallJoinedRelay) => void;
+  "call:left": (payload: CallLeftRelay) => void;
+  "call:declined": (payload: CallDeclinedRelay) => void;
+  "call:handled": (payload: CallHandledRelay) => void;
+  "call:kicked": (payload: CallKickedRelay) => void;
+  "call:ongoing": (payload: CallOngoingRelay) => void;
+  "call:over": (payload: CallOverRelay) => void;
   "call:signal": (payload: CallSignalRelay) => void;
-  "call:end": (payload: CallEndRelay) => void;
   "mls:commit": (payload: MlsCommitRelay) => void;
   "mls:welcome": (payload: MlsWelcomeRelay) => void;
 };

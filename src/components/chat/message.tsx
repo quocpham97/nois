@@ -395,10 +395,17 @@ function CallEventRow({ msg }: { msg: Msg }) {
   const tint = answered ? "var(--app-accent)" : "var(--app-red)";
   const CallIcon = video ? Video : Phone;
   const DirIcon = me ? ArrowUpRight : ArrowDownLeft;
-  // A group call can't be placed (calls are 1:1), so only offer the redial on a
-  // DM — and never while another call is up.
-  const redialable = groups[currentGroupId]?.type === "dm" && !activeCall;
-  const detail = [msg.ts ? formatMsgTime(msg.ts) : msg.time, call.duration]
+  const isGroup = groups[currentGroupId]?.type === "group";
+  // Redial starts the same kind of call in this conversation — never while
+  // another call is already up. In a group whose size rules out video, fall back
+  // to a voice call rather than offering something the server would downgrade.
+  const redialable = !activeCall;
+  const detail = [
+    msg.ts ? formatMsgTime(msg.ts) : msg.time,
+    call.duration,
+    // Group calls say how many were on it; a DM's "2" says nothing.
+    call.joined && call.joined > 1 ? `${call.joined} on the call` : null,
+  ]
     .filter(Boolean)
     .join(" · ");
 
@@ -421,6 +428,12 @@ function CallEventRow({ msg }: { msg: Msg }) {
         </div>
       )}
       <div className={`flex min-w-0 flex-col ${me ? "items-end" : "items-start"}`}>
+        {/* In a group, who started the call is not implied by the avatar alone. */}
+        {!me && isGroup && (
+          <div className="mb-0.5 ml-3 text-[12px] font-semibold text-app-muted">
+            {msg.author.name.split(" ")[0]} started a call
+          </div>
+        )}
         <button
           type="button"
           disabled={!redialable}

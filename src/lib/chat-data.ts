@@ -83,12 +83,14 @@ export type ReplyRef = {
 };
 
 /**
- * A finished 1:1 call, recorded in the thread as a message (Messenger-style).
+ * A finished call, recorded in the thread as a message (Messenger-style).
  *
- * The CALLER owns the record: whichever side placed the call seals one of these
- * into a normal E2EE message when the call terminates, so both sides (and every
- * device of both sides) get the same row through the ordinary message path — no
- * server-side call log, and nothing to reconstruct after a reload.
+ * The STARTER owns the record: whoever placed the call seals one of these into a
+ * normal E2EE message when the call ends for them, so everyone in the
+ * conversation (and every device of theirs) gets the same row through the
+ * ordinary message path — no server-side call log, and nothing to reconstruct
+ * after a reload. In a group that means the row describes the call as the starter
+ * experienced it: if they leave while others carry on, the row stops there.
  *
  * `status` is stored from the caller's point of view; `callEventTitle` maps it to
  * the viewer's wording ("No answer" for the caller, "Missed voice call" for the
@@ -101,6 +103,9 @@ export type CallEvent = {
   status: "answered" | "declined" | "unanswered";
   /** Talk time as "m:ss"/"h:mm:ss" — answered calls only. */
   duration?: string;
+  /** Group calls: peak simultaneous participants ("4 on the call"). Absent for
+   *  a DM, where "2 on the call" says nothing. */
+  joined?: number;
 };
 
 /** Viewer-relative title for a call row. `mine` = the viewer placed the call. */

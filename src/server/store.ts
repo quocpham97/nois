@@ -441,7 +441,7 @@ export function fetchReceipts(
 
 // --- helpers ---------------------------------------------------------------
 
-function isMember(groupId: string, userId: string): boolean {
+export function isMember(groupId: string, userId: string): boolean {
   return members.get(groupId)?.has(userId) ?? false;
 }
 

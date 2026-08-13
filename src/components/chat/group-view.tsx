@@ -34,6 +34,11 @@ function GroupHeader({ ch }: { ch: Group }) {
   const inCall = call != null;
   const isDm = ch.type === "dm";
   const members = groupMembers(ch, me);
+  // Mirrors the server's rules (server.ts CALL_MAX_VIDEO / CALL_RING_MAX) — the
+  // server is authoritative; these just shape the affordances.
+  const memberCount = ch.members ?? members.length;
+  const videoEligible = memberCount <= 4;
+  const ringEligible = !(ch.type === "group" && ch.private === false) && memberCount <= 6;
   const pins = ch.pinned || [];
   const panelOpen = pinnedPanelFor === ch.id;
 
@@ -128,25 +133,31 @@ function GroupHeader({ ch }: { ch: Group }) {
             <span className="ml-1">{members.length}</span>
           </button>
         )}
-        {isDm && (
-          <>
-            <button
-              onClick={() => void startCall(ch.id, false)}
-              disabled={inCall}
-              title="Start a voice call"
-              className="flex size-10 items-center justify-center rounded-full text-app-accent hover:bg-app-hover disabled:opacity-40"
-            >
-              <Phone size={19} strokeWidth={1.9} />
-            </button>
-            <button
-              onClick={() => void startCall(ch.id, true)}
-              disabled={inCall}
-              title="Start a video call"
-              className="flex size-10 items-center justify-center rounded-full text-app-accent hover:bg-app-hover disabled:opacity-40"
-            >
-              <Video size={20} strokeWidth={1.9} />
-            </button>
-          </>
+        <button
+          onClick={() => void startCall(ch.id, false)}
+          disabled={inCall}
+          title={
+            isDm
+              ? "Start a voice call"
+              : ringEligible
+                ? "Start a voice call"
+                : "Start a voice call — this group is too big to ring, so people join from the conversation"
+          }
+          className="flex size-10 items-center justify-center rounded-full text-app-accent hover:bg-app-hover disabled:opacity-40"
+        >
+          <Phone size={19} strokeWidth={1.9} />
+        </button>
+        {/* Video only where the whole conversation fits under the video cap, so
+            a call can never outgrow it and degrade someone mid-conversation. */}
+        {videoEligible && (
+          <button
+            onClick={() => void startCall(ch.id, true)}
+            disabled={inCall}
+            title="Start a video call"
+            className="flex size-10 items-center justify-center rounded-full text-app-accent hover:bg-app-hover disabled:opacity-40"
+          >
+            <Video size={20} strokeWidth={1.9} />
+          </button>
         )}
         <button
           onClick={openSearch}
@@ -225,6 +236,43 @@ function GroupHeader({ ch }: { ch: Group }) {
           <Info size={19} strokeWidth={1.9} />
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Live call in this conversation that we're not in — the huddle affordance.
+ *
+ * A group too big to ring (or any public group) never makes anyone's device
+ * ring, so this bar is the only way in. It also covers a ring you declined or
+ * missed while the call is still going.
+ *
+ * NB the design comp has no state for this; the bar is modelled on the pinned
+ * bar below it and should get a proper design pass.
+ */
+function OngoingCallBar({ ch }: { ch: Group }) {
+  const { ongoing, joinOngoing, call } = useCall();
+  const live = ongoing[ch.id];
+  // Once we're in it, the call panel is the UI — don't offer to join twice.
+  if (!live || call) return null;
+  return (
+    <div className="flex shrink-0 items-center gap-2.5 border-b border-app-border bg-app-accent-soft px-4 py-2">
+      <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-app-accent text-white">
+        {live.video ? (
+          <Video size={15} strokeWidth={2} />
+        ) : (
+          <Phone size={15} strokeWidth={2} />
+        )}
+      </span>
+      <div className="min-w-0 flex-1 truncate text-[13px] text-app-text">
+        <span className="font-semibold">Ongoing {live.video ? "video" : "voice"} call</span>
+      </div>
+      <button
+        onClick={() => void joinOngoing(ch.id)}
+        className="shrink-0 rounded-full bg-app-accent px-3.5 py-1.5 text-[12.5px] font-semibold text-white hover:bg-app-accent-hover"
+      >
+        Join
+      </button>
     </div>
   );
 }
@@ -477,6 +525,7 @@ export function GroupView({ ch }: { ch: Group }) {
       }
     >
       <GroupHeader ch={ch} />
+      <OngoingCallBar ch={ch} />
       <PinnedBar ch={ch} />
       <div
         ref={scrollRef}

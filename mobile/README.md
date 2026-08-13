@@ -63,6 +63,33 @@ pnpm open:ios      # or: pnpm run:ios
 pnpm open:android  # or: pnpm run:android
 ```
 
+## Media permissions — REQUIRED for voice messages and calls
+
+`getUserMedia` is denied outright without these, so the mic button and every
+call (see `docs/calls.md`) fail in the shell no matter what the web app does.
+The native projects are generated and gitignored, so — like the deep-link
+scheme below — this has to be re-applied after `cap add`.
+
+**iOS** — `ios/App/App/Info.plist`:
+
+```xml
+<key>NSMicrophoneUsageDescription</key>
+<string>Microphone access is used for voice messages and calls.</string>
+<key>NSCameraUsageDescription</key>
+<string>Camera access is used for video calls.</string>
+```
+
+**Android** — `android/app/src/main/AndroidManifest.xml`, above `<application>`:
+
+```xml
+<uses-permission android:name="android.permission.RECORD_AUDIO" />
+<uses-permission android:name="android.permission.CAMERA" />
+<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+```
+
+Capacitor's bridge answers the WebView's permission request and triggers the
+runtime prompt. Neither platform has been exercised on a device yet.
+
 ## Deep-link scheme (`messenger://`) — REQUIRED for login
 
 Login reuses the desktop handoff end to end: the browser leg lands on

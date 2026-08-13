@@ -225,6 +225,10 @@ export function SocketProvider({
       setDeviceId(identity.deviceId);
       setFingerprint(identity.fingerprint);
       s.emit("keys:publish", { bundle: identity.bundle });
+      // Call signaling is addressed per device, so the server needs to know
+      // which device this socket is (it joins a `device:<id>` room). Announced
+      // on every connect, not just the first publish.
+      s.emit("device:announce", { deviceId: identity.deviceId });
       // First publish carries the full pool in the bundle; on reconnect the
       // bundle's prekeys are ignored server-side, so append any refill here.
       if (fresh.length) {
