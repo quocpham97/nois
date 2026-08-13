@@ -7,12 +7,15 @@ import { useCall } from "../chat/call-context";
 import { Avatar } from "../chat/bits";
 import { presenceColor } from "@/lib/chat-data";
 
-// Calls tab. The design shows a call-history list, but there is no call-history
-// data source (calls are ephemeral WebRTC signaling; nothing is persisted
-// client- or server-side). Rather than fake a log, this surfaces the real,
-// actionable thing: your DM contacts with one-tap voice/video call, using the
-// same useCall().startCall the conversation header uses. A persisted call log
-// would be a separate feature (needs server storage).
+// Calls tab. The design shows a call-history list. This surfaces the real,
+// actionable thing instead: your DM contacts with one-tap voice/video call,
+// using the same useCall().startCall the conversation header uses.
+//
+// It was written when nothing about a call was persisted. Finished calls now DO
+// leave a record — a CallEvent row in the DM thread (see docs/calls.md) — so a
+// real history list here is now possible: it would read the call rows out of the
+// message store rather than needing anything new server-side. Deliberately not
+// done yet; this tab still lists contacts, not calls.
 export function CallsScreen() {
   const { groups, dmOrder } = useChat();
   const { startCall, call } = useCall();
