@@ -413,6 +413,7 @@ export function Sidebar() {
   let mentionsCount = 0;
   Object.values(groups).forEach((ch) =>
     ch.messages.forEach((m) => {
+      if (m.snapshot) return; // sidebar preview line, not a real message
       if ((m.threadCount ?? 0) > 0) threadsCount++;
       if (
         !m.self &&

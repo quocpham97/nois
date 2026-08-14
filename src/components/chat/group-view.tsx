@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Info, Phone, Pin, Search, Video, X } from "lucide-react";
 import {
   gradientFor,
@@ -463,13 +463,21 @@ export function GroupView({ ch }: { ch: Group }) {
     clearHighlight,
     bubbleTheme,
   } = useChat();
-  const empty = ch.messages.length === 0;
+  // The sidebar's cached preview line rides in `messages` as a placeholder so
+  // the conversation list can paint before the socket connects (see the roster
+  // cache in chat-context). It holds a rendered snippet, not a body, so the
+  // thread must never render it — history/live arrivals supersede it by id.
+  const messages = useMemo(
+    () => ch.messages.filter((m) => !m.snapshot),
+    [ch.messages],
+  );
+  const empty = messages.length === 0;
   const hasOlder = historyCursor[ch.id] != null;
 
   // Pin to the latest message on group open / history load / new bottom
   // message — but not when older pages are prepended (same last id) or while
   // jumping to a highlighted message (which positions itself).
-  const lastId = ch.messages[ch.messages.length - 1]?.id;
+  const lastId = messages[messages.length - 1]?.id;
   const lastSeen = useRef<{ chId: string; lastId?: string }>({ chId: "" });
   useEffect(() => {
     const el = scrollRef.current;
@@ -499,7 +507,7 @@ export function GroupView({ ch }: { ch: Group }) {
   // group messages by date
   const groups: { date: string; msgs: Msg[] }[] = [];
   let curDate: string | null = null;
-  ch.messages.forEach((m) => {
+  messages.forEach((m) => {
     const d = m.date || curDate || "Today";
     if (d !== curDate) {
       groups.push({ date: d, msgs: [] });

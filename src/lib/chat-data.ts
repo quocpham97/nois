@@ -187,6 +187,14 @@ export type Message = {
   /** True when this message was forwarded from another conversation (shows a
    *  "Forwarded" marker above the bubble). */
   forwarded?: boolean;
+  /**
+   * Client-only: not a real message but the sidebar's cached last-line preview,
+   * rebuilt from the roster cache on boot so the conversation list paints before
+   * the socket connects. It carries only an id, a preview string and a stub
+   * author — never a body — so it must never render in a thread, and the real
+   * message (same id) always supersedes it.
+   */
+  snapshot?: boolean;
   /** Call event (a finished voice/video call) — renders as a call card instead
    *  of a bubble. Rides the E2EE envelope like every other body field, so the
    *  server never learns that a call happened, let alone how long it ran. */

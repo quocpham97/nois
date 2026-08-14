@@ -106,6 +106,7 @@ export function MentionsView() {
   const rows: { chId: string; ch: Group; msg: Message }[] = [];
   Object.entries(groups).forEach(([chId, ch]) => {
     ch.messages.forEach((m) => {
+      if (m.snapshot) return; // sidebar preview line, not a real message
       const mentioned =
         m.mentions?.includes(me) || (m.text?.includes("@" + me) ?? false);
       if (mentioned && !m.self) rows.push({ chId, ch, msg: m });

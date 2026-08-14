@@ -180,6 +180,10 @@ function restoreRoster(cache: RosterCache): {
     // Rebuild a minimal message just so previewOf/lastTs render the cached
     // snippet + recency. No `enc` — the decrypt effect must never touch these
     // placeholders (opening the conversation replaces them with real history).
+    // `snapshot` marks it as exactly that: a preview line, not a message. The
+    // body it carries is the already-rendered snippet, so a call row would read
+    // as plain text ("Missed voice call") and an attachment as "📎 name" — the
+    // thread never renders these, and the real message supersedes them by id.
     const messages: Message[] = last
       ? [
           {
@@ -191,6 +195,7 @@ function restoreRoster(cache: RosterCache): {
             deleted: last.deleted || undefined,
             author: { name: last.authorName } as User,
             reactions: [],
+            snapshot: true,
           } as Message,
         ]
       : [];
@@ -674,7 +679,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           const ch = next[groupId];
           if (!ch || loadedFullRef.current.has(groupId)) continue;
           const cur = ch.messages[ch.messages.length - 1];
-          if (cur && cur.id >= message.id) continue;
+          // Equal ids still upgrade a placeholder: same message, real body.
+          if (cur && (cur.snapshot ? cur.id > message.id : cur.id >= message.id))
+            continue;
           next[groupId] = { ...ch, messages: [withSelf(message)] };
           changed = true;
         }
@@ -1665,7 +1672,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           pendingMessagesRef.current.set(groupId, held);
           return s;
         }
-        if (ch.messages.some((m) => m.id === message.id)) return s;
+        // A roster-cache placeholder for this same message is a preview line,
+        // not the message — swap the real one in over it rather than de-duping
+        // the real one away (which would leave the preview text on screen).
+        const at = ch.messages.findIndex((m) => m.id === message.id);
+        if (at >= 0) {
+          if (!ch.messages[at].snapshot) return s;
+          const messages = [...ch.messages];
+          messages[at] = withSelf(message);
+          return { ...s, [groupId]: { ...ch, messages } };
+        }
         return {
           ...s,
           [groupId]: { ...ch, messages: [...ch.messages, withSelf(message)] },
@@ -1778,8 +1794,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       const held = pendingMessagesRef.current.get(groupId);
       if (!held?.length) return messages;
       queueMicrotask(() => pendingMessagesRef.current.delete(groupId));
-      const have = new Set(messages.map((m) => m.id));
-      return [...messages, ...held.filter((m) => !have.has(m.id)).map(withSelf)];
+      // Placeholders don't count as "already have it" — a real message with the
+      // same id replaces the preview line it stood in for.
+      const have = new Set(messages.filter((m) => !m.snapshot).map((m) => m.id));
+      const add = held.filter((m) => !have.has(m.id)).map(withSelf);
+      const added = new Set(add.map((m) => m.id));
+      return [
+        ...messages.filter((m) => !(m.snapshot && added.has(m.id))),
+        ...add,
+      ];
     };
 
     // Merge server-replayed history straight into live state.
@@ -1807,8 +1830,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           pendingMessagesRef.current.set(groupId, held);
           return s;
         }
-        const have = new Set(ch.messages.map((m) => m.id));
+        // As in withHeld: a roster-cache placeholder never blocks the real copy.
+        const have = new Set(
+          ch.messages.filter((m) => !m.snapshot).map((m) => m.id),
+        );
         const fresh = messages.filter((m) => !have.has(m.id));
+        const freshIds = new Set(fresh.map((m) => m.id));
         const byParent = new Map<string, Message[]>();
         for (const { parentId, reply } of replies) {
           byParent.set(parentId, [...(byParent.get(parentId) ?? []), reply]);
@@ -1816,9 +1843,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         if (!fresh.length && !byParent.size) return s;
         // Message ids are time-sortable (store.newId), so sorting by id restores
         // send order; optimistic "tmp-" ids sort last and stay at the bottom.
-        const merged = [...ch.messages, ...fresh.map(withSelf)].sort((a, b) =>
-          a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
-        );
+        const merged = [
+          ...ch.messages.filter((m) => !(m.snapshot && freshIds.has(m.id))),
+          ...fresh.map(withSelf),
+        ].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
         return {
           ...s,
           [groupId]: {
@@ -1850,11 +1878,14 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           // the async query below resolves).
           const loaded = next[c.id]?.messages;
           const seed = latestByGroupRef.current.get(c.id);
+          // A roster-cache placeholder doesn't count as loaded: prefer the real
+          // last message from local history when we have one.
+          const hasReal = loaded?.some((m) => !m.snapshot);
           next[c.id] = {
             ...c,
             messages: withHeld(
               c.id,
-              loaded?.length ? loaded : seed ? [withSelf(seed)] : loaded ?? [],
+              hasReal ? loaded! : seed ? [withSelf(seed)] : loaded ?? [],
             ),
           };
         }
@@ -2294,6 +2325,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           preview: message.preview,
           replyTo: message.replyTo,
           forwarded: message.forwarded,
+          // Every body field must ride along: a re-sealed message is the only
+          // copy the requesting device will ever see, so a field dropped here is
+          // lost for good on that device (a call row would decode as plain text).
+          call: message.call,
         },
         bundles,
         secrets,
@@ -2934,6 +2969,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         text: res.text,
         rich: res.rich ?? undefined,
         preview: res.preview ?? undefined,
+        replyTo: res.replyTo ?? undefined,
+        forwarded: res.forwarded ?? undefined,
         call: res.call ?? undefined,
         enc: undefined,
         att: res.att ?? undefined,
@@ -3465,11 +3502,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         msg.attachment?.encrypted && msg.attachment.key && msg.attachment.iv
           ? { key: msg.attachment.key, iv: msg.attachment.iv }
           : undefined;
+      // An edit REPLACES the stored envelope, so it must re-seal the whole body
+      // — anything left out here disappears for every other device.
       const content: MessageContent = {
         text: trimmed,
         rich,
         att,
         preview: msg.preview,
+        replyTo: msg.replyTo,
+        forwarded: msg.forwarded,
+        call: msg.call,
       };
       const build = isDm(groupId)
         ? buildEnvelope(dmPeerId(groupId), content)
