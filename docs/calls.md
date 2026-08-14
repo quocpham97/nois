@@ -204,15 +204,28 @@ error) records **nothing** — nothing rang.
 
 ## Configuration
 
+Required in production: without a TURN relay, symmetric NATs never connect
+(public STUN alone isn't enough). Two ways to supply one, and the client prefers
+the first — full detail in [calls-production.md](./calls-production.md).
+
 ```bash
-# Optional, but required in production. Without a TURN relay, symmetric NATs
-# never connect (public STUN alone isn't enough).
+# Preferred: a Cloudflare Realtime TURN key. Read by the SERVER process only,
+# which mints a short-lived credential per session and hands it to authenticated
+# clients over the socket (`ice:servers`). Nothing reaches the client bundle.
+TURN_KEY_ID=…
+TURN_KEY_API_TOKEN=…
+TURN_TTL_S=3600          # optional, default 3600
+
+# Fallback, consulted only when the above are unset: a static-credential
+# provider (ExpressTURN, self-hosted coturn). NEXT_PUBLIC_* is inlined at BUILD
+# time and the credential is world-readable in the bundle.
 NEXT_PUBLIC_TURN_URL=turns:turn.example.com:5349
 NEXT_PUBLIC_TURN_USERNAME=…
 NEXT_PUBLIC_TURN_CREDENTIAL=…
 ```
 
-The default ICE config is `stun:stun.l.google.com:19302` only.
+With neither set the ICE config is `stun:stun.l.google.com:19302` only. A
+failed mint is never a failed call — it logs, negative-caches, and falls back.
 
 Media capture needs platform permission plumbing, not just browser permission:
 
@@ -250,8 +263,11 @@ page init script, so nothing in the app has to expose them for testing.
 
 ## Not built
 
-- **TURN is unset** (see above). This is the production blocker, and it matters
-  more now than it did for 1:1: a mesh multiplies the NAT failure modes.
+- ~~TURN~~ — **done 2026-08-14.** Credentials are minted server-side from a
+  Cloudflare Realtime key, verified end-to-end including relay-to-relay (a call
+  where *both* sides need a relay, which ExpressTURN's free tier refused). Still
+  set on the deployment, not just locally, before calling this closed in
+  production.
 - **Signaling isn't E2EE-sealed.** SDP (including DTLS fingerprints) transits
   the server in plaintext, so a malicious *server* could MITM media. The fix is
   to seal `call:signal` blobs in the existing envelope crypto — see the E2EE

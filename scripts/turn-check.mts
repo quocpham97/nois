@@ -15,11 +15,23 @@
 // if it fails, calls still work unless BOTH participants need a relay.
 //
 // Run it after changing TURN configuration, and against a deployed instance
-// (change URL) before trusting a production rollout.
+// before trusting a production rollout.
 //
-// Needs the dev server on :4000 with NEXT_PUBLIC_TURN_* set at BUILD time
-// (Next inlines them — restart the dev server after editing .env.local). Run:
+// It asserts on whatever the app actually configured, so it covers both credential
+// paths: server-minted (TURN_KEY_ID + TURN_KEY_API_TOKEN, read by the server
+// process and handed over the socket) and the NEXT_PUBLIC_TURN_* fallback.
+//
+// Local (dev server on :4000; if you're on the fallback path those vars must be
+// present at BUILD time — Next inlines them, so restart the dev server after
+// editing .env.local. Server-minted credentials just need a restart):
 //   npx tsx --env-file=.env.local scripts/turn-check.mts [--headed]
+//
+// Production: point it at the deployment. It mints its own session cookies, so
+// it needs that environment's AUTH_SECRET, and it WRITES to that database (two
+// test users and a DM between them) — cleanup needs DATABASE_URL too, and is
+// skipped with a warning if it can't connect.
+//   AUTH_SECRET=… DATABASE_URL=… npx tsx scripts/turn-check.mts \
+//     --url=https://nois-chat.onrender.com
 
 import { chromium, type Page } from "playwright";
 import { io, type Socket } from "socket.io-client";
@@ -27,7 +39,8 @@ import { encode } from "next-auth/jwt";
 import { dmIdFor } from "../src/lib/dm-id.ts";
 import { getPool } from "../src/lib/db.ts";
 
-const URL = "http://localhost:4000";
+const urlArg = process.argv.find((a) => a.startsWith("--url="));
+const URL = (urlArg?.slice("--url=".length) ?? "http://localhost:4000").replace(/\/$/, "");
 const STAMP = Date.now();
 const A = `turn-a-${STAMP}@test`;
 const B = `turn-b-${STAMP}@test`;
@@ -38,18 +51,28 @@ const check = (cond: boolean, label: string) =>
   results.push(`${cond ? "PASS ✅" : "FAIL ❌"}  ${label}`);
 const sleep = (ms: number) => new Promise((f) => setTimeout(f, ms));
 
+// Auth.js names the session cookie by scheme (see src/server/session-cookie.ts)
+// AND salts the JWE with that same name, so both have to match the target's
+// scheme — a token salted for http is undecodable by an https deployment. NB the
+// server decides by its own AUTH_URL, so this assumes the deployment's AUTH_URL
+// scheme matches the URL you point at, which it should.
+const SECURE = URL.startsWith("https://");
+const COOKIE_NAME = SECURE
+  ? "__Secure-authjs.session-token"
+  : "authjs.session-token";
+
 async function jwtFor(uid: string): Promise<string> {
   return encode({
     token: { uid, name: uid },
     secret: process.env.AUTH_SECRET!,
-    salt: "authjs.session-token",
+    salt: COOKIE_NAME,
   });
 }
 
 async function connect(uid: string): Promise<Socket> {
   const s = io(URL, {
     transports: ["websocket"],
-    extraHeaders: { cookie: `authjs.session-token=${await jwtFor(uid)}` },
+    extraHeaders: { cookie: `${COOKIE_NAME}=${await jwtFor(uid)}` },
     forceNew: true,
   });
   await new Promise<void>((res, rej) => {
@@ -148,11 +171,12 @@ async function main() {
     });
     await ctx.addCookies([
       {
-        name: "authjs.session-token",
+        name: COOKIE_NAME,
         value: await jwtFor(uid),
-        domain: "localhost",
+        domain: new global.URL(URL).hostname,
         path: "/",
         httpOnly: true,
+        secure: SECURE,
         sameSite: "Lax",
       },
     ]);
@@ -282,9 +306,13 @@ async function main() {
   const ok = results.every((r) => r.startsWith("PASS"));
   if (!ok) {
     console.log(
-      "\nIf the call never connected: the credentials may be wrong or expired, the\n" +
-        "provider may be unreachable, or NEXT_PUBLIC_TURN_* was not present when the\n" +
-        "app was BUILT (Next inlines it — restart the dev server / redeploy).",
+      "\nIf no TURN server was configured at all, check which path you're on:\n" +
+        "  server-minted — TURN_KEY_ID / TURN_KEY_API_TOKEN set for the SERVER process?\n" +
+        "                  a failed mint logs '[turn] could not mint credentials'.\n" +
+        "  fallback      — NEXT_PUBLIC_TURN_* must be present when the app is BUILT\n" +
+        "                  (Next inlines it — restart the dev server / redeploy).\n" +
+        "If one was configured but the call never connected, the credentials may be\n" +
+        "wrong or expired, or the provider may be unreachable from here.",
     );
   }
   console.log("\n" + (ok ? "ALL PASS ✅" : "SOME FAILED ❌"));

@@ -262,6 +262,22 @@ export type CallPeer = { userId: string; deviceId: string };
  *  it (`device:<deviceId>` room). Emitted on every connect. */
 export type DeviceAnnouncePayload = { deviceId: string };
 
+/** Shaped like the DOM's `RTCIceServer`, spelled out here because this module is
+ *  shared with the server and must not depend on DOM lib types. */
+export type IceServerConfig = {
+  urls: string | string[];
+  username?: string;
+  credential?: string;
+};
+/** ICE servers for a call, minted server-side and never baked into the bundle.
+ *  Cloudflare issues short-lived credentials only, so they're fetched per
+ *  session and expire on their own; `ttl` is the remaining lifetime in seconds
+ *  and the client refetches before it runs out. An EMPTY `iceServers` means the
+ *  server has no TURN key configured — the client then falls back to the
+ *  `NEXT_PUBLIC_TURN_*` build-time vars, and to STUN-only if those are unset
+ *  too. See docs/calls-production.md. */
+export type IceServersResult = { iceServers: IceServerConfig[]; ttl: number };
+
 export type CallStartPayload = { groupId: string; video: boolean };
 /** `video` in the ack is the EFFECTIVE mode: the server downgrades a video
  *  request to voice in groups too large for the video cap. `ringing` is false
@@ -614,6 +630,7 @@ export type ClientToServerEvents = {
   "dm:reheal:request": (payload: DmRehealRequestPayload) => void;
   "dm:reheal:offer": (payload: DmRehealOfferPayload) => void;
   "device:announce": (payload: DeviceAnnouncePayload) => void;
+  "ice:servers": (ack: (result: IceServersResult) => void) => void;
   "call:start": (
     payload: CallStartPayload,
     ack: (result: CallStartResult) => void,

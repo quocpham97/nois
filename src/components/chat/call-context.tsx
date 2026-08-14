@@ -44,6 +44,7 @@ import type {
   CallOverRelay,
   CallPeer,
   CallSignalRelay,
+  IceServersResult,
 } from "@/lib/socket-events";
 import { useChat } from "./chat-context";
 import { useSocket } from "./socket-context";
@@ -130,21 +131,29 @@ export function useCall(): CallContextValue {
 /** How long an unanswered call rings before it's treated as missed. */
 const RING_TIMEOUT_MS = 45_000;
 
-// Public STUN is enough for most NATs; symmetric NATs need a TURN relay —
-// point NEXT_PUBLIC_TURN_URL (+ USERNAME/CREDENTIAL) at one to cover those.
-// A mesh multiplies the NAT failure modes, so TURN matters more here than it
-// did for 1:1.
-function iceServers(): RTCIceServer[] {
-  const servers: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+// Public STUN is enough for most NATs; symmetric NATs need a TURN relay. A mesh
+// multiplies the NAT failure modes, so TURN matters more here than it did for
+// 1:1.
+//
+// TURN credentials come from the SERVER (`ice:servers`), not from this bundle —
+// Cloudflare issues short-lived ones only, and a static credential shipped in
+// the JavaScript is an open relay for anyone who opens devtools. The
+// NEXT_PUBLIC_* vars below are the fallback for deployments pointed at a
+// provider with static credentials (e.g. ExpressTURN, self-hosted coturn), and
+// they keep those working unchanged. See docs/calls-production.md.
+const STUN_ONLY: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+
+function envIceServers(): RTCIceServer[] {
   const turn = process.env.NEXT_PUBLIC_TURN_URL;
-  if (turn) {
-    servers.push({
+  if (!turn) return STUN_ONLY;
+  return [
+    ...STUN_ONLY,
+    {
       urls: turn,
       username: process.env.NEXT_PUBLIC_TURN_USERNAME,
       credential: process.env.NEXT_PUBLIC_TURN_CREDENTIAL,
-    });
-  }
-  return servers;
+    },
+  ];
 }
 
 const getMedia = (video: boolean): Promise<MediaStream> =>
@@ -190,6 +199,33 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     membersRef.current = workspaceMembers;
     deviceIdRef.current = deviceId;
   }, [groups, workspaceMembers, deviceId]);
+
+  // Server-minted ICE servers, held until they near expiry. Resolved BEFORE a
+  // call is placed or joined so `ensurePeer` stays synchronous — an
+  // RTCPeerConnection's ICE config is fixed at construction, so arriving late
+  // would mean a peer built without TURN.
+  const iceRef = useRef<{ servers: RTCIceServer[]; expiresAt: number } | null>(null);
+
+  const ensureIceServers = useCallback(async (): Promise<void> => {
+    if (!socket) return;
+    const cached = iceRef.current;
+    if (cached && cached.expiresAt > Date.now()) return;
+    const res = await new Promise<IceServersResult | null>((resolve) => {
+      socket.timeout(5000).emit("ice:servers", (err, r) => resolve(err ? null : r));
+    });
+    // No credentials is a DEGRADED call (build-time vars, else STUN only), not
+    // a failed one — placing the call must never block on this.
+    if (!res?.iceServers.length) return;
+    iceRef.current = {
+      servers: res.iceServers as RTCIceServer[],
+      expiresAt: Date.now() + Math.max(res.ttl, 30) * 1000,
+    };
+  }, [socket]);
+
+  // Warm the cache on connect so the common case pays no round trip at call time.
+  useEffect(() => {
+    void ensureIceServers();
+  }, [ensureIceServers]);
 
   const setCallBoth = useCallback((c: CallInfo | null) => {
     callRef.current = c;
@@ -330,7 +366,9 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       if (existing) return existing;
       const stream = localStreamRef.current;
       if (!stream) return null;
-      const pc = new RTCPeerConnection({ iceServers: iceServers() });
+      const pc = new RTCPeerConnection({
+        iceServers: iceRef.current?.servers ?? envIceServers(),
+      });
       const state: PeerState = { pc, userId: peerUserId, pendingIce: [] };
       peersRef.current.set(peerDeviceId, state);
       for (const track of stream.getTracks()) pc.addTrack(track, stream);
@@ -503,6 +541,9 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       if (!socket) return;
+      // Fetched alongside the permission prompt rather than before it, so a
+      // cold credential cache costs nothing the user can perceive.
+      const ice = ensureIceServers();
       const ch = groupsRef.current[groupId];
       let stream: MediaStream;
       try {
@@ -518,6 +559,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       localStreamRef.current = stream;
       setLocalStream(stream);
       const me = resolveUser(userId);
+      await ice;
       socket
         .timeout(8000)
         .emit("call:start", { groupId, video }, (err, res) => {
@@ -576,7 +618,16 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
           }
         });
     },
-    [socket, userId, resolveUser, titleFor, recordCall, setCallBoth, teardown],
+    [
+      socket,
+      userId,
+      resolveUser,
+      titleFor,
+      recordCall,
+      setCallBoth,
+      teardown,
+      ensureIceServers,
+    ],
   );
 
   /** Shared by accepting a ring and joining an ongoing call from the banner. */
@@ -590,6 +641,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       stream?: MediaStream;
     }) => {
       if (!socket) return;
+      const ice = ensureIceServers();
       const { callId, groupId, video, starterId } = target;
       let stream = target.stream ?? null;
       if (!stream) {
@@ -607,6 +659,9 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       localStreamRef.current = stream;
       setLocalStream(stream);
       const ch = groupsRef.current[groupId];
+      // Incumbents offer the moment `call:joined` lands, so the credentials
+      // must be in hand before we announce ourselves.
+      await ice;
       socket.timeout(8000).emit("call:join", { callId, groupId }, (err, res) => {
         if (err || !res?.ok) {
           const reason = !err && res && !res.ok ? res.reason : "error";
@@ -651,7 +706,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         // We are the joiner, so we do not offer — every incumbent offers to us.
       });
     },
-    [socket, userId, resolveUser, titleFor, setCallBoth, teardown],
+    [socket, userId, resolveUser, titleFor, setCallBoth, teardown, ensureIceServers],
   );
 
   const acceptCall = useCallback(async () => {

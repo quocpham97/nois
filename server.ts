@@ -57,6 +57,94 @@ const CALL_RING_MAX = 6;
 /** Joins refused for being at capacity — the agreed trigger for building an SFU. */
 let callCapRejections = 0;
 
+// TURN credentials are minted HERE, not inlined into the client bundle. The key
+// never leaves this process; clients ask for `ice:servers` over their already
+// authenticated socket and get a credential that expires on its own, so a
+// leaked one stops being an open relay instead of staying one forever.
+// Cloudflare issues no static credentials at all, which is what forces this
+// shape — see docs/calls-production.md.
+const TURN_KEY_ID = process.env.TURN_KEY_ID;
+const TURN_KEY_API_TOKEN = process.env.TURN_KEY_API_TOKEN;
+/** Credential lifetime. Long enough that no call outlives its own credential
+ *  (ICE re-checks during a call would fail), short enough that a leak is
+ *  self-limiting. */
+const TURN_TTL_S = Number(process.env.TURN_TTL_S) || 3600;
+/** Refetch this far ahead of expiry so a call never starts on a credential
+ *  that dies mid-negotiation. */
+const TURN_REFRESH_MARGIN_S = 300;
+
+type IceServerConfig = {
+  urls: string | string[];
+  username?: string;
+  credential?: string;
+};
+// Cached per process: the credential is not user-scoped, so one fetch serves
+// every client until it nears expiry. `inflight` collapses a thundering herd
+// (many clients connecting at once) into a single upstream request.
+let iceCache: { servers: IceServerConfig[]; expiresAt: number } | null = null;
+let iceInflight: Promise<IceServerConfig[]> | null = null;
+
+async function fetchCloudflareIceServers(): Promise<IceServerConfig[]> {
+  if (!TURN_KEY_ID || !TURN_KEY_API_TOKEN) return [];
+  const res = await fetch(
+    `https://rtc.live.cloudflare.com/v1/turn/keys/${TURN_KEY_ID}/credentials/generate-ice-servers`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${TURN_KEY_API_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ttl: TURN_TTL_S }),
+      signal: AbortSignal.timeout(5000),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(`cloudflare turn ${res.status} ${await res.text()}`);
+  }
+  // Their response nests a single object under `iceServers`; normalise to the
+  // array shape RTCPeerConnection wants either way, since one object and a
+  // list of them are both plausible readings of that field.
+  const body = (await res.json()) as {
+    iceServers?: IceServerConfig | IceServerConfig[];
+  };
+  const raw = body.iceServers;
+  if (!raw) return [];
+  return Array.isArray(raw) ? raw : [raw];
+}
+
+/** Current ICE servers, or [] if TURN isn't configured (the client then falls
+ *  back to its build-time vars). Never throws: no TURN is a degraded call, but
+ *  a thrown error here would be no call at all. */
+async function iceServersFor(): Promise<{ servers: IceServerConfig[]; ttl: number }> {
+  const now = Date.now();
+  if (iceCache && iceCache.expiresAt > now) {
+    return { servers: iceCache.servers, ttl: Math.floor((iceCache.expiresAt - now) / 1000) };
+  }
+  if (!iceInflight) {
+    iceInflight = fetchCloudflareIceServers()
+      .then((servers) => {
+        iceCache = {
+          servers,
+          expiresAt: Date.now() + (TURN_TTL_S - TURN_REFRESH_MARGIN_S) * 1000,
+        };
+        return servers;
+      })
+      .catch((e) => {
+        console.warn("[turn] could not mint credentials:", (e as Error).message);
+        // Negative-cache briefly: with the provider down, every call start
+        // would otherwise re-attempt and pay the timeout before falling back.
+        iceCache = { servers: [], expiresAt: Date.now() + 30_000 };
+        return [];
+      })
+      .finally(() => {
+        iceInflight = null;
+      });
+  }
+  const servers = await iceInflight;
+  const ttl = iceCache ? Math.floor((iceCache.expiresAt - Date.now()) / 1000) : 0;
+  return { servers, ttl: Math.max(ttl, 0) };
+}
+
 const app = next({ dev });
 const handle = app.getRequestHandler();
 
@@ -305,6 +393,15 @@ app.prepare().then(async () => {
       if (typeof deviceId !== "string" || !deviceId) return;
       socket.data.deviceId = deviceId;
       socket.join("device:" + deviceId);
+    });
+
+    // Short-lived TURN credentials for this session. Authenticated by virtue of
+    // being on an authenticated socket — which is the whole point: the previous
+    // shape shipped a static credential to every visitor inside the JS bundle.
+    socket.on("ice:servers", async (ack) => {
+      if (typeof ack !== "function") return;
+      const { servers, ttl } = await iceServersFor();
+      ack({ iceServers: servers, ttl });
     });
 
     // Replay a group's durable state to THIS socket: missed messages/replies

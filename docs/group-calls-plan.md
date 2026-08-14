@@ -22,8 +22,13 @@ Deviations from the plan as written, and why:
 - **The video cap is enforced structurally**, by only offering video when the whole
   group is ≤4 members, so the participant cap the server counts is just the voice
   cap of 6. Same guarantee, no extra state.
-- **TURN is still unset** — configuration, not code, and still the production
-  blocker (prerequisite 2).
+- **TURN**: prerequisite 2 is **met** (2026-08-14). Credentials are minted
+  server-side (`ice:servers`) from a Cloudflare Realtime key rather than inlined
+  into the bundle, with the old `NEXT_PUBLIC_TURN_*` vars kept as a fallback.
+  Relay-to-relay works, so the mesh no longer fails when two participants are
+  both behind carrier-grade NAT — which mattered more here than for 1:1, since a
+  mesh multiplies the NAT failure modes. See
+  [calls-production.md](./calls-production.md#server-minted-credentials-shipped).
 
 ## Recommendation in one paragraph
 
@@ -55,8 +60,15 @@ never be reached by surprise mid-call.
 | Effort | contained in `call-context.tsx` | new service + deploy + monitoring |
 
 **Trigger to revisit:** frequent cap rejections in telemetry, or mesh
-CPU/bandwidth proving unacceptable on the mobile shells. At that point evaluate
-LiveKit (E2EE-capable, self-hostable) rather than hand-rolling.
+CPU/bandwidth proving unacceptable on the mobile shells.
+
+**Update (2026-08-14):** the E2EE half of this objection is weaker than it looked
+when written. Cloudflare's Orange Meets does E2EE over an SFU with MLS for group
+key agreement plus WebRTC Encoded Transform for frames — and MLS is already live
+in this codebase, so that part exists. Encoded Transform also reached baseline
+browser availability in late 2025. The remaining reasons to stay on mesh are cost
+and operational surface, not "E2EE can't be done over an SFU". The concrete path
+is in [calls-production.md](./calls-production.md#the-concrete-path-if-you-want-to-build-it).
 
 Cap rejections are only a usable trigger if they're counted, so Phase 1 must log
 one server-side counter when a join is refused for being at capacity. Without it
