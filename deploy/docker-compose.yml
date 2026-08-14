@@ -33,9 +33,25 @@ services:
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY}
       VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY}
       VAPID_SUBJECT: ${VAPID_SUBJECT}
+      # Inlined into the client bundle at BUILD time — see calls-production.md.
+      NEXT_PUBLIC_TURN_URL: ${NEXT_PUBLIC_TURN_URL}
+      NEXT_PUBLIC_TURN_USERNAME: ${NEXT_PUBLIC_TURN_USERNAME}
+      NEXT_PUBLIC_TURN_CREDENTIAL: ${NEXT_PUBLIC_TURN_CREDENTIAL}
     depends_on: [redis, postgres]
     deploy:
       replicas: 3 # multiple nodes; the Redis adapter relays broadcasts between them
+
+  # TURN relay for calls (docs/calls-production.md). host networking is not
+  # optional: coturn needs the real client-facing IP and a wide UDP port range,
+  # neither of which survives docker's userland proxy. Bring your own
+  # turnserver.conf (the doc has a starting point) and open 3478/udp+tcp,
+  # 5349/tcp and the relay range on the host firewall.
+  coturn:
+    image: coturn/coturn:4.6
+    network_mode: host
+    volumes:
+      - ./turnserver.conf:/etc/coturn/turnserver.conf:ro
+    command: ["-c", "/etc/coturn/turnserver.conf"]
 
   nginx:
     image: nginx:alpine

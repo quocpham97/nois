@@ -41,3 +41,19 @@ services:
         sync: false
       - key: VAPID_SUBJECT
         sync: false
+      # TURN relay for calls (docs/calls-production.md). Without these, calls
+      # fall back to STUN only and fail on symmetric NATs — a production
+      # blocker, more so for group calls, where a mesh multiplies the NAT
+      # failure modes. NB these are NEXT_PUBLIC_*: Next inlines them at BUILD
+      # time (so they must be set before/at build — changing them on Render
+      # triggers a rebuild, which is what you want) and they ship inside the
+      # client bundle, so a static credential here is world-readable. Fine for a
+      # private deploy; use time-limited credentials for a public one.
+      # Render itself cannot host coturn (no UDP ingress) — point these at a
+      # managed TURN provider or a coturn VM.
+      - key: NEXT_PUBLIC_TURN_URL
+        sync: false # e.g. turns:calls.example.com:5349
+      - key: NEXT_PUBLIC_TURN_USERNAME
+        sync: false
+      - key: NEXT_PUBLIC_TURN_CREDENTIAL
+        sync: false
