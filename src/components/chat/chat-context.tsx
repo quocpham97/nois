@@ -61,6 +61,7 @@ import type { MlsKeyPair, StoredMlsKeyPair } from "@/lib/crypto/mls";
 import type {
   MlsCommitAck,
   MlsFetchGroupResult,
+  MlsMemberPackage,
   ReceiptRelayPayload,
 } from "@/lib/socket-events";
 
@@ -75,6 +76,64 @@ import type {
 const MLS_ENABLED: boolean = true;
 /** Lazy import so ts-mls is only fetched (as its own chunk) when MLS is used. */
 const loadMls = () => import("@/lib/crypto/mls");
+type MlsModule = Awaited<ReturnType<typeof loadMls>>;
+
+/** One member device to add, resolved from the key directory. */
+type MlsAddCandidate = {
+  userId: string;
+  deviceId: string;
+  identity: string;
+  sigKey: string;
+  kp: MlsKeyPackage;
+};
+
+/**
+ * Reduce the key directory's published packages to a set that can safely go in
+ * ONE commit: at most one package per client, none of them ours.
+ *
+ * MLS decides "same client" by the leaf SIGNATURE KEY, and a commit carrying
+ * two Adds that share one is invalid (RFC 9420 §12.2) — ts-mls rejects the
+ * whole commit, which took the group's MLS establishment down with it and
+ * silently dropped every send back to sender-keys. The directory can hold such
+ * rows: it is keyed by (user, device), so a device that changes its id — a PIN
+ * restore adopts the backed-up one — leaves its old row behind holding a
+ * package with the same signature key as its new one.
+ *
+ * So: drop a package whose credential identity disagrees with the row it was
+ * filed under (that mismatch IS the stale copy), then keep the first package
+ * per identity and per signature key. Rows arrive ordered by device id, so
+ * every member reduces the same directory to the same set.
+ */
+function mlsAddCandidates(
+  mls: MlsModule,
+  packages: MlsMemberPackage[],
+  ownIdentity: string,
+): MlsAddCandidate[] {
+  const out: MlsAddCandidate[] = [];
+  const seenIdentity = new Set<string>([ownIdentity]);
+  const seenSigKey = new Set<string>();
+  for (const p of packages) {
+    const identity = mls.mlsIdentity(p.userId, p.deviceId);
+    if (seenIdentity.has(identity)) continue;
+    const kp = mls.mlsDecodeKeyPackage(p.keyPackage);
+    if (!kp) continue;
+    const claimed = mls.mlsKeyPackageIdentity(kp);
+    if (claimed === null) continue;
+    // The package must belong to the row it was filed under: same user, and
+    // either this device or a legacy (pre-multi-device) package, which carries
+    // the bare userId. Anything else is a leftover from a device whose id
+    // changed, and its signature key collides with that device's current row.
+    const claimedBy = mls.mlsParseIdentity(claimed);
+    if (claimedBy.userId !== p.userId) continue;
+    if (claimedBy.deviceId !== "" && claimedBy.deviceId !== p.deviceId) continue;
+    const sigKey = mls.mlsKeyPackageSigKey(kp);
+    if (seenSigKey.has(sigKey)) continue;
+    seenIdentity.add(identity);
+    seenSigKey.add(sigKey);
+    out.push({ userId: p.userId, deviceId: p.deviceId, identity, sigKey, kp });
+  }
+  return out;
+}
 
 /** History page size (mirrors the old server page size). */
 const PAGE_SIZE = 30;
@@ -1249,18 +1308,32 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // offline adds to be joinable. Never leaves this device (excluded from
   // device-to-device recovery offers; see socket-context approveDevice).
   const mlsKeyPair = useCallback(async (): Promise<MlsKeyPair | null> => {
-    if (mlsKpRef.current) return mlsKpRef.current;
     const mls = await loadMls();
+    const secrets = await getSecrets();
+    if (!secrets) return null; // device identity not provisioned yet
+    // The pair is only usable while it still names THIS device: a PIN restore
+    // adopts the backed-up device id mid-session, and republishing the old pair
+    // under the new id would leave two directory rows sharing one signature key
+    // — which MLS reads as one client and rejects the commit over. A legacy
+    // (pre-multi-device) pair carries the bare userId and stays valid.
+    const fits = (kp: MlsKeyPair) => {
+      const claimed = mls.mlsKeyPackageIdentity(kp.publicPackage);
+      if (claimed === null) return false;
+      const by = mls.mlsParseIdentity(claimed);
+      return (
+        by.userId === userId &&
+        (by.deviceId === "" || by.deviceId === secrets.deviceId)
+      );
+    };
+    if (mlsKpRef.current && fits(mlsKpRef.current)) return mlsKpRef.current;
     const stored = await groupGet<StoredMlsKeyPair>(userId, "mlskp");
     if (stored) {
       const kp = mls.mlsImportKeyPair(stored);
-      if (kp) {
+      if (kp && fits(kp)) {
         mlsKpRef.current = kp;
         return kp;
       }
     }
-    const secrets = await getSecrets();
-    if (!secrets) return null; // device identity not provisioned yet
     const kp = await mls.mlsGenerateKeyPackage(userId, secrets.deviceId);
     mlsKpRef.current = kp;
     await groupPut(userId, "mlskp", mls.mlsExportKeyPair(kp));
@@ -1379,21 +1452,20 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         const adds: MlsKeyPackage[] = [];
         const targets: { toUserId: string; toDeviceId: string }[] = [];
         const removes: number[] = [];
-        for (const p of packages) {
-          if (!memberSet.has(p.userId)) continue; // package of a non-member
-          const identity = mls.mlsIdentity(p.userId, p.deviceId);
-          if (identity === me) continue;
-          const kp = mls.mlsDecodeKeyPackage(p.keyPackage);
-          if (!kp) continue;
-          const leaf = leafByIdentity.get(identity);
-          if (!leaf) {
-            adds.push(kp);
-            targets.push({ toUserId: p.userId, toDeviceId: p.deviceId });
-          } else if (leaf.sigKey !== mls.mlsKeyPackageSigKey(kp)) {
-            removes.push(leaf.leafIndex);
-            adds.push(kp);
-            targets.push({ toUserId: p.userId, toDeviceId: p.deviceId });
-          }
+        for (const c of mlsAddCandidates(mls, packages, me)) {
+          if (!memberSet.has(c.userId)) continue; // package of a non-member
+          const leaf = leafByIdentity.get(c.identity);
+          if (leaf && leaf.sigKey === c.sigKey) continue; // already in, unchanged
+          // A signature key already in the tree under ANOTHER identity would
+          // make this an Add for someone the group already holds — equally
+          // fatal to the commit. Leave it to the remove pass to clear first.
+          if (leaves.some((l) => l.sigKey === c.sigKey && l.identity !== c.identity))
+            continue;
+          // Reset device (republished under a new signature key): its stale leaf
+          // goes in the same commit as the re-add.
+          if (leaf) removes.push(leaf.leafIndex);
+          adds.push(c.kp);
+          targets.push({ toUserId: c.userId, toDeviceId: c.deviceId });
         }
         for (const l of leaves) {
           if (l.identity === me) continue;
@@ -1460,16 +1532,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       const mls = await loadMls();
       const { packages, memberIds } = await mlsFetchGroup(groupId);
       const me = mls.mlsIdentity(userId, secrets.deviceId);
-      const targets = packages
-        .map((p) => ({
-          userId: p.userId,
-          deviceId: p.deviceId,
-          kp: mls.mlsDecodeKeyPackage(p.keyPackage),
-        }))
-        .filter(
-          (m): m is { userId: string; deviceId: string; kp: MlsKeyPackage } =>
-            !!m.kp && mls.mlsIdentity(m.userId, m.deviceId) !== me,
-        );
+      const targets = mlsAddCandidates(mls, packages, me);
       const coveredUsers = new Set(targets.map((t) => t.userId));
       const coMembers = memberIds.filter((id) => id !== userId);
       if (!coMembers.length || !coMembers.every((id) => coveredUsers.has(id))) {

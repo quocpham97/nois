@@ -297,9 +297,21 @@ export function mlsGroupMembers(state: ClientState): MlsMemberInfo[] {
 }
 
 /** The signature public key a KeyPackage's leaf would carry (for comparing a
- *  published package against an existing leaf of the same identity). */
+ *  published package against an existing leaf of the same identity). This is
+ *  also what MLS itself uses to decide whether two KeyPackages represent the
+ *  SAME client — a commit carrying two Adds with one signature key is invalid
+ *  (RFC 9420 §12.2), so callers must dedupe on it before proposing. */
 export function mlsKeyPackageSigKey(kp: KeyPackage): string {
   return toB64(kp.leafNode.signaturePublicKey as Uint8Array<ArrayBuffer>);
+}
+
+/** The credential identity ("<userId>#<deviceId>") a KeyPackage claims, or null
+ *  when it carries a credential type we don't issue. A published package whose
+ *  identity disagrees with the directory row it was filed under is stale. */
+export function mlsKeyPackageIdentity(kp: KeyPackage): string | null {
+  const cred = kp.leafNode.credential;
+  if (cred.credentialType !== "basic") return null;
+  return new TextDecoder().decode(cred.identity);
 }
 
 /** Current epoch of a group state (what a commit must be submitted against). */
