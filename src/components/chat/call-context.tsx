@@ -1,19 +1,21 @@
 "use client";
 
 // Voice/video calls, 1:1 and group. This context owns the whole call state
-// machine. Media is a full-mesh of RTCPeerConnections — one per remote DEVICE,
-// no media server — so media stays peer-to-peer over DTLS-SRTP and the server
-// only ever relays signaling blobs (see the call:* handlers in server.ts).
+// machine — phases, the participant roster, ring timeouts, device migration and
+// the thread record — but NOT how media gets between people. That sits behind
+// `CallTransport` (call-transport.ts), which today is a full mesh of
+// RTCPeerConnections and could be an SFU without this file changing much.
+//
+// The server only ever relays signaling blobs (see the call:* handlers in
+// server.ts); with the mesh transport it never touches media at all.
 //
 // A DM call is just a mesh of one peer: there is a single engine here, not a 1:1
 // path plus a group path.
 //
-// Two invariants worth keeping in mind when editing:
-//  - Signaling is addressed per DEVICE. Two devices of one user must never both
-//    be treated as "the peer" (see docs/group-calls-plan.md).
-//  - Exactly one side of each pair offers: whoever is ALREADY in the call offers
-//    to a joiner, and the joiner only ever answers. That's what keeps a mesh
-//    glare-free without any tie-breaking.
+// The invariant to keep in mind when editing: signaling is addressed per DEVICE.
+// Two devices of one user must never both be treated as "the peer" (see
+// docs/group-calls-plan.md). The glare rule that goes with it — incumbents
+// offer, joiners answer — is enforced by the `offering` argument to `addPeer`.
 //
 // Camera/mic toggles flip track.enabled, so no renegotiation is ever needed and
 // every peer's tracks are fixed at setup.
@@ -46,6 +48,11 @@ import type {
   CallSignalRelay,
   IceServersResult,
 } from "@/lib/socket-events";
+import {
+  type CallTransport,
+  type SignalMsg,
+  createMeshTransport,
+} from "./call-transport";
 import { useChat } from "./chat-context";
 import { useSocket } from "./socket-context";
 
@@ -162,19 +169,6 @@ const getMedia = (video: boolean): Promise<MediaStream> =>
     video: video ? { width: { ideal: 1280 }, height: { ideal: 720 } } : false,
   });
 
-/** Wire shape of a call:signal `data` blob. */
-type SignalMsg =
-  | { type: "offer" | "answer"; sdp?: string }
-  | { type: "ice"; candidate: RTCIceCandidateInit };
-
-/** Per-remote-device connection state. */
-type PeerState = {
-  pc: RTCPeerConnection;
-  userId: string;
-  /** Candidates that arrived before the remote description was set. */
-  pendingIce: RTCIceCandidateInit[];
-};
-
 export function CallProvider({ children }: { children: React.ReactNode }) {
   const { socket, userId, deviceId } = useSocket();
   const { groups, workspaceMembers, logCallEvent } = useChat();
@@ -188,7 +182,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   // Handlers read call state through refs so the socket listeners (registered
   // once per socket) never see stale closures.
   const callRef = useRef<CallInfo | null>(null);
-  const peersRef = useRef<Map<string, PeerState>>(new Map());
+  const transportRef = useRef<CallTransport | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const groupsRef = useRef(groups);
@@ -201,7 +195,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   }, [groups, workspaceMembers, deviceId]);
 
   // Server-minted ICE servers, held until they near expiry. Resolved BEFORE a
-  // call is placed or joined so `ensurePeer` stays synchronous — an
+  // call is placed or joined, because the transport is built with them — an
   // RTCPeerConnection's ICE config is fixed at construction, so arriving late
   // would mean a peer built without TURN.
   const iceRef = useRef<{ servers: RTCIceServer[]; expiresAt: number } | null>(null);
@@ -271,24 +265,17 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  const closePeer = useCallback((peerDeviceId: string) => {
-    const p = peersRef.current.get(peerDeviceId);
-    if (!p) return;
-    p.pc.close();
-    peersRef.current.delete(peerDeviceId);
-  }, []);
-
   const teardown = useCallback(() => {
     clearRingTimer();
-    for (const [id] of peersRef.current) closePeer(id);
-    peersRef.current.clear();
+    transportRef.current?.close();
+    transportRef.current = null;
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     localStreamRef.current = null;
     setLocalStream(null);
     setMicOn(true);
     setCamOn(true);
     setCallBoth(null);
-  }, [clearRingTimer, closePeer, setCallBoth]);
+  }, [clearRingTimer, setCallBoth]);
 
   // --- thread record ----------------------------------------------------------
   // Every finished call leaves one row in its conversation, written by the side
@@ -356,66 +343,53 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   }, [socket, recordCall, teardown]);
   const endCallRef = useRef(endCall);
 
-  // --- mesh ------------------------------------------------------------------
+  // --- media transport --------------------------------------------------------
 
-  /** Create (or reuse) the connection to one remote device. `offering` marks us
-   *  as the side that sends the offer — the incumbent, never the joiner. */
-  const ensurePeer = useCallback(
-    (peerDeviceId: string, peerUserId: string, callId: string): PeerState | null => {
-      const existing = peersRef.current.get(peerDeviceId);
-      if (existing) return existing;
-      const stream = localStreamRef.current;
-      if (!stream) return null;
-      const pc = new RTCPeerConnection({
+  /** Build the media layer for one call and wire its events into call state.
+   *  Swapping the mesh for an SFU is swapping the factory called here — see
+   *  call-transport.ts. `patchCall` no-ops once the call is gone or replaced,
+   *  so a straggling event from a torn-down transport can't touch a later call. */
+  const openTransport = useCallback(
+    (callId: string, stream: MediaStream): CallTransport => {
+      transportRef.current?.close();
+      const transport = createMeshTransport({
+        localStream: stream,
         iceServers: iceRef.current?.servers ?? envIceServers(),
+        events: {
+          sendSignal: (toDeviceId, msg) => sendSignal(toDeviceId, callId, msg),
+          onStream: (deviceId, remote) =>
+            patchCall(callId, (c) => ({
+              participants: c.participants.map((p) =>
+                p.deviceId === deviceId ? { ...p, stream: remote } : p,
+              ),
+            })),
+          onConnected: (deviceId) =>
+            patchCall(callId, (c) => ({
+              phase: "active",
+              startedAt: c.startedAt ?? Date.now(),
+              participants: c.participants.map((p) =>
+                p.deviceId === deviceId ? { ...p, connected: true } : p,
+              ),
+            })),
+          onFailed: (deviceId) => {
+            // One leg failing is not the whole call failing — drop that peer
+            // and keep talking to everyone else. If it was the last one, end.
+            patchCall(callId, (c) => ({
+              participants: c.participants.filter((p) => p.deviceId !== deviceId),
+            }));
+            const c = callRef.current;
+            if (c?.callId === callId && c.participants.length === 0) {
+              toast.error("Call connection lost");
+              endCallRef.current();
+            }
+          },
+        },
       });
-      const state: PeerState = { pc, userId: peerUserId, pendingIce: [] };
-      peersRef.current.set(peerDeviceId, state);
-      for (const track of stream.getTracks()) pc.addTrack(track, stream);
-      pc.onicecandidate = (e) => {
-        if (e.candidate) {
-          sendSignal(peerDeviceId, callId, {
-            type: "ice",
-            candidate: e.candidate.toJSON(),
-          });
-        }
-      };
-      pc.ontrack = (e) => {
-        const s = e.streams[0] ?? new MediaStream([e.track]);
-        patchCall(callId, (c) => ({
-          participants: c.participants.map((p) =>
-            p.deviceId === peerDeviceId ? { ...p, stream: s } : p,
-          ),
-        }));
-      };
-      pc.onconnectionstatechange = () => {
-        if (callRef.current?.callId !== callId) return;
-        if (peersRef.current.get(peerDeviceId)?.pc !== pc) return;
-        if (pc.connectionState === "connected") {
-          patchCall(callId, (c) => ({
-            phase: "active",
-            startedAt: c.startedAt ?? Date.now(),
-            participants: c.participants.map((p) =>
-              p.deviceId === peerDeviceId ? { ...p, connected: true } : p,
-            ),
-          }));
-        } else if (pc.connectionState === "failed") {
-          // One leg failing is not the whole call failing — drop that peer and
-          // keep talking to everyone else. If it was the last one, end the call.
-          closePeer(peerDeviceId);
-          patchCall(callId, (c) => ({
-            participants: c.participants.filter((p) => p.deviceId !== peerDeviceId),
-          }));
-          const c = callRef.current;
-          if (c?.callId === callId && c.participants.length === 0) {
-            toast.error("Call connection lost");
-            endCallRef.current();
-          }
-        }
-      };
-      return state;
+      transportRef.current = transport;
+      void transport.start();
+      return transport;
     },
-    [sendSignal, patchCall, closePeer],
+    [sendSignal, patchCall],
   );
 
   /** Add a participant row (idempotent) and keep the peak count. */
@@ -451,25 +425,17 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       if (joinerDevice === deviceIdRef.current) return; // our own echo
       clearRingTimer();
       addParticipant(callId, { userId: joinerId, deviceId: joinerDevice });
-      const state = ensurePeer(joinerDevice, joinerId, callId);
-      if (!state) return;
-      try {
-        const offer = await state.pc.createOffer();
-        await state.pc.setLocalDescription(offer);
-        sendSignal(joinerDevice, callId, { type: "offer", sdp: offer.sdp });
-      } catch (err) {
-        console.warn("[call] offer failed", joinerDevice, err);
-        closePeer(joinerDevice);
-      }
+      // We were already here, so we offer — the joiner only ever answers.
+      await transportRef.current?.addPeer(joinerDevice, joinerId, true);
     },
-    [addParticipant, clearRingTimer, closePeer, ensurePeer, sendSignal],
+    [addParticipant, clearRingTimer],
   );
 
   const onLeft = useCallback(
     ({ callId, deviceId: goneDevice }: CallLeftRelay) => {
       const c = callRef.current;
       if (!c || c.callId !== callId) return;
-      closePeer(goneDevice);
+      transportRef.current?.removePeer(goneDevice);
       const remaining = c.participants.filter((p) => p.deviceId !== goneDevice);
       patchCall(callId, { participants: remaining });
       // Last peer out ends the call for us too.
@@ -483,7 +449,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         teardown();
       }
     },
-    [closePeer, patchCall, recordCall, socket, teardown],
+    [patchCall, recordCall, socket, teardown],
   );
 
   // --- signaling -------------------------------------------------------------
@@ -499,37 +465,14 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       // An offer from a device we don't know yet means we're the joiner (or the
-      // roster event is still in flight) — set the peer up as the answerer.
-      if (msg.type === "offer" && !peersRef.current.has(fromDeviceId)) {
+      // roster event is still in flight) — give it a tile. Idempotent, and the
+      // transport sets itself up as the answerer for the same reason.
+      if (msg.type === "offer") {
         addParticipant(callId, { userId: fromUserId, deviceId: fromDeviceId });
-        ensurePeer(fromDeviceId, fromUserId, callId);
       }
-      const state = peersRef.current.get(fromDeviceId);
-      if (!state) return;
-      const { pc } = state;
-      try {
-        if (msg.type === "offer") {
-          await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
-          for (const cand of state.pendingIce.splice(0)) {
-            await pc.addIceCandidate(cand);
-          }
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          sendSignal(fromDeviceId, callId, { type: "answer", sdp: answer.sdp });
-        } else if (msg.type === "answer") {
-          await pc.setRemoteDescription({ type: "answer", sdp: msg.sdp });
-          for (const cand of state.pendingIce.splice(0)) {
-            await pc.addIceCandidate(cand);
-          }
-        } else if (msg.type === "ice" && msg.candidate) {
-          if (pc.remoteDescription) await pc.addIceCandidate(msg.candidate);
-          else state.pendingIce.push(msg.candidate);
-        }
-      } catch (err) {
-        console.warn("[call] signaling failed", fromDeviceId, err);
-      }
+      await transportRef.current?.handleSignal(fromDeviceId, fromUserId, msg);
     },
-    [addParticipant, ensurePeer, sendSignal],
+    [addParticipant],
   );
 
   // --- starting / joining ----------------------------------------------------
@@ -600,6 +543,9 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
             participants: [],
             peak: 1,
           });
+          // Ready before anyone can join: `call:joined` is what triggers our
+          // offer, and it can land immediately.
+          openTransport(res.callId, stream);
           // Nobody rang (a huddle) → no ring timeout; the call just waits.
           if (res.ringing) {
             ringTimerRef.current = setTimeout(() => {
@@ -627,6 +573,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       setCallBoth,
       teardown,
       ensureIceServers,
+      openTransport,
     ],
   );
 
@@ -659,9 +606,11 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       localStreamRef.current = stream;
       setLocalStream(stream);
       const ch = groupsRef.current[groupId];
-      // Incumbents offer the moment `call:joined` lands, so the credentials
-      // must be in hand before we announce ourselves.
+      // Incumbents offer the moment `call:joined` lands, so both the
+      // credentials and the transport must be in place before we announce
+      // ourselves — their offers can beat our own join ack.
       await ice;
+      openTransport(callId, stream);
       socket.timeout(8000).emit("call:join", { callId, groupId }, (err, res) => {
         if (err || !res?.ok) {
           const reason = !err && res && !res.ok ? res.reason : "error";
@@ -706,7 +655,16 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         // We are the joiner, so we do not offer — every incumbent offers to us.
       });
     },
-    [socket, userId, resolveUser, titleFor, setCallBoth, teardown, ensureIceServers],
+    [
+      socket,
+      userId,
+      resolveUser,
+      titleFor,
+      setCallBoth,
+      teardown,
+      ensureIceServers,
+      openTransport,
+    ],
   );
 
   const acceptCall = useCallback(async () => {

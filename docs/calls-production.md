@@ -411,11 +411,15 @@ above, since Cloudflare relays between its own allocations.
 
 Suggested phasing, keeping the app working throughout:
 
-1. **Transport swap.** `call-context.tsx` publishes one stream and subscribes to
-   N instead of maintaining `Map<deviceId, RTCPeerConnection>`. Everything around
-   it survives untouched: the room protocol (`call:start`/`join`/`leave`), the
-   ring-vs-huddle rule, device migration, the thread record. Ship it behind a
-   flag with the mesh as fallback.
+1. **Transport swap.** The seam for this now exists: `CallTransport` in
+   `src/components/chat/call-transport.ts`, with `createMeshTransport` behind
+   it and `openTransport` in `call-context.tsx` as the single place a transport
+   is chosen. An SFU implementation publishes one stream in `start` and
+   subscribes per device in `addPeer`, and `handleSignal` becomes a no-op
+   because negotiation runs against the media server rather than between peers.
+   Everything around it survives untouched: the room protocol
+   (`call:start`/`join`/`leave`), the ring-vs-huddle rule, device migration, the
+   thread record. Ship it behind a flag with the mesh as fallback.
 2. **Tokens.** The server mints SFU session tokens from the same `isMember`
    check `call:start` already does, so a room can't be joined by a non-member.
 3. **E2EE.** Encoded Transform in a worker, keyed from the group's MLS exporter
@@ -435,9 +439,9 @@ rotation and a fallback path for clients without Encoded Transform).
   supports E2EE via insertable streams and can be self-hosted, but its cloud free
   tier is metered in WebRTC minutes (5,000/month) rather than bandwidth. Either
   needs TURN, so that work is a prerequisite regardless.
-- **Client rework.** `call-context.tsx` publishes one stream and subscribes to N
-  instead of maintaining a `Map<deviceId, RTCPeerConnection>`. The room protocol
-  (`call:start`/`join`/`leave`) survives; the media layer under it doesn't.
+- **Client rework.** A second `CallTransport` implementation that publishes one
+  stream and subscribes to N. The room protocol (`call:start`/`join`/`leave`)
+  survives; the media layer under it doesn't.
 - **Tokens.** Access tokens minted server-side from the same membership check
   `call:start` already does, so the SFU can't be joined by non-members.
 - **E2EE.** Per-frame encryption keyed off the group's existing key material,

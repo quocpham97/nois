@@ -11,7 +11,8 @@ group path. The sizing rules below and the reasoning behind them are in
 
 | | |
 | --- | --- |
-| Client engine | `src/components/chat/call-context.tsx` |
+| Client engine | `src/components/chat/call-context.tsx` (phases, roster, records) |
+| Media transport | `src/components/chat/call-transport.ts` (`CallTransport`, `createMeshTransport`) |
 | UI | `src/components/chat/call-view.tsx` (`CallUI`, mounted by both shells) |
 | Thread record | `src/components/chat/message.tsx` (`CallEventRow`), `src/lib/chat-data.ts` (`CallEvent`) |
 | Server relay | `server.ts`, the `call:*` handlers |
@@ -51,11 +52,22 @@ Handlers read live state through `callRef`/`handlersRef` so the socket listeners
 
 ### The mesh
 
-One `RTCPeerConnection` per remote **device**, held in `peersRef` keyed by
-deviceId. Exactly one side of each pair offers: **whoever is already in the call
-offers to a joiner, and the joiner only ever answers.** That single rule keeps the
-mesh glare-free with no tie-breaking. A leg that fails is dropped on its own; the
-call ends only when the last peer goes.
+Media sits behind `CallTransport` (`call-transport.ts`), so the engine above it
+— phases, roster, ring timeouts, device migration, the thread record — doesn't
+know how media travels. The interface is five calls: `start`, `addPeer`,
+`removePeer`, `handleSignal`, `close`.
+
+The one implementation is `createMeshTransport`: one `RTCPeerConnection` per
+remote **device**, keyed by deviceId. Exactly one side of each pair offers:
+**whoever is already in the call offers to a joiner, and the joiner only ever
+answers** — carried by the `offering` argument to `addPeer`. That single rule
+keeps the mesh glare-free with no tie-breaking. A leg that fails is dropped on
+its own (`onFailed`); the call ends only when the last peer goes.
+
+The seam exists so an SFU can replace the mesh without disturbing the engine —
+it would publish once in `start` and subscribe per device in `addPeer`. Why
+that's deferred, and what it would cost, is in
+[calls-production.md](./calls-production.md#the-concrete-path-if-you-want-to-build-it).
 
 ### Signaling
 
