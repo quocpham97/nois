@@ -356,6 +356,14 @@ type ChatContextValue = {
   /** Append a finished call to a conversation as an E2EE message. Caller-side
    *  only — CallProvider owns when this fires (one row per call). */
   logCallEvent: (groupId: string, call: CallEvent) => void;
+  /** Media key for a call in this group, derived from the group's MLS exporter
+   *  secret so every member at the same epoch gets the same bytes with no extra
+   *  round trip. Null when the group has no MLS state (DMs are pairwise), which
+   *  is what confines SFU calls to MLS groups. See docs/calls-production.md. */
+  exportCallKey: (
+    groupId: string,
+    callId: string,
+  ) => Promise<{ epoch: number; key: Uint8Array } | null>;
   deleteMessage: (groupId: string, msgId: string) => void;
 
   /** Message-edit mode: the composer edits this message instead of sending. */
@@ -3434,6 +3442,37 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
    * `text` carries a readable rendering of the same thing: it's what a client
    * too old to know about `call` shows, and it's what full-text search indexes.
    */
+  /**
+   * Per-call media key, for encrypting frames the SFU forwards but must not be
+   * able to read (phase D — docs/calls-production.md).
+   *
+   * The whole key agreement is one exporter call: members of an MLS group at
+   * the same epoch derive identical bytes without exchanging anything, and the
+   * epoch is returned alongside so frames can say which key encrypted them.
+   * `callId` is the exporter context, so two concurrent calls in one group
+   * never share a key.
+   *
+   * No lock: exporting reads the key schedule, it doesn't advance a ratchet.
+   */
+  const exportCallKey = useCallback(
+    async (groupId: string, callId: string) => {
+      if (!MLS_ENABLED) return null;
+      const state = await mlsLoadState(groupId);
+      if (!state) return null; // no MLS group (a DM, or we're not a member yet)
+      const mls = await loadMls();
+      return {
+        epoch: mls.mlsEpoch(state),
+        key: await mls.mlsExportSecret(
+          state,
+          "chat-app call media",
+          new TextEncoder().encode(callId),
+          32,
+        ),
+      };
+    },
+    [mlsLoadState],
+  );
+
   const logCallEvent = useCallback(
     (groupId: string, call: CallEvent) => {
       if (!groupsRef.current[groupId]) return; // unresolvable conversation
@@ -4133,6 +4172,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       sendMessage,
       retrySend,
       logCallEvent,
+      exportCallKey,
       deleteMessage,
       editing,
       editingMessage,
@@ -4260,6 +4300,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       sendMessage,
       retrySend,
       logCallEvent,
+      exportCallKey,
       deleteMessage,
       editing,
       editingMessage,

@@ -55,6 +55,11 @@ import {
   createMeshTransport,
 } from "./call-transport";
 import { type SfuApi, createSfuTransport } from "./call-transport-sfu";
+import {
+  type FrameCrypto,
+  createFrameCrypto,
+  frameCryptoSupported,
+} from "./call-frame-crypto";
 import { useChat } from "./chat-context";
 import { useSocket } from "./socket-context";
 
@@ -158,6 +163,15 @@ const STUN_ONLY: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
  *  the product's central promise for participant headroom. */
 const SFU_ENABLED = process.env.NEXT_PUBLIC_CALL_TRANSPORT === "sfu";
 
+/** A browser that can't do Encoded Transform can't seal frames, and an SFU call
+ *  it couldn't seal would be a call the server can read. There is no downgrade
+ *  path on purpose — refuse, and say why. */
+function sfuUnavailable(): boolean {
+  if (!SFU_ENABLED || frameCryptoSupported()) return false;
+  toast.error("This browser can't encrypt call media — calls need a newer version");
+  return true;
+}
+
 function envIceServers(): RTCIceServer[] {
   const turn = process.env.NEXT_PUBLIC_TURN_URL;
   if (!turn) return STUN_ONLY;
@@ -179,7 +193,7 @@ const getMedia = (video: boolean): Promise<MediaStream> =>
 
 export function CallProvider({ children }: { children: React.ReactNode }) {
   const { socket, userId, deviceId } = useSocket();
-  const { groups, workspaceMembers, logCallEvent } = useChat();
+  const { groups, workspaceMembers, logCallEvent, exportCallKey } = useChat();
 
   const [call, setCall] = useState<CallInfo | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
@@ -191,6 +205,9 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   // once per socket) never see stale closures.
   const callRef = useRef<CallInfo | null>(null);
   const transportRef = useRef<CallTransport | null>(null);
+  const frameCryptoRef = useRef<FrameCrypto | null>(null);
+  /** Epochs already handed to the worker, so re-deriving is idempotent. */
+  const keyEpochsRef = useRef<Set<number>>(new Set());
   const localStreamRef = useRef<MediaStream | null>(null);
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const groupsRef = useRef(groups);
@@ -277,6 +294,9 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     clearRingTimer();
     transportRef.current?.close();
     transportRef.current = null;
+    frameCryptoRef.current?.close();
+    frameCryptoRef.current = null;
+    keyEpochsRef.current.clear();
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     localStreamRef.current = null;
     setLocalStream(null);
@@ -352,6 +372,37 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   const endCallRef = useRef(endCall);
 
   // --- media transport --------------------------------------------------------
+
+  /**
+   * Feed the frame-crypto worker the current epoch's media key.
+   *
+   * Called at call start and then periodically, which is how rekeying works:
+   * the key follows the group's MLS EPOCH, not the call roster. A call joiner
+   * is already a member and derives it themselves; the person who must be
+   * locked out is one REMOVED from the group, and that removal is exactly what
+   * advances the epoch. Frames carry their epoch, and the worker keeps the
+   * previous key briefly so media in flight across a commit still opens.
+   */
+  const pumpKeys = useCallback(
+    async (callId: string, groupId: string) => {
+      const fc = frameCryptoRef.current;
+      if (!fc) return;
+      const derived = await exportCallKey(groupId, callId);
+      if (!derived) {
+        // No MLS state means no key agreement, so there is no safe way to run
+        // this call through a server. Refuse rather than fall back in the clear.
+        if (callRef.current?.callId === callId) {
+          toast.error("This conversation can't hold an encrypted group call");
+          endCallRef.current();
+        }
+        return;
+      }
+      if (keyEpochsRef.current.has(derived.epoch)) return;
+      keyEpochsRef.current.add(derived.epoch);
+      fc.addKey(derived.epoch, derived.key);
+    },
+    [exportCallKey],
+  );
 
   /** The socket-backed proxy the SFU transport calls. Every request is scoped
    *  to a call the server can see us in, and the Cloudflare app token stays on
@@ -457,17 +508,40 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
           },
         },
       };
-      // The one line that chooses how media travels. Default is the mesh; the
-      // SFU is opt-in and NOT safe for users until per-frame E2EE lands, since
-      // Cloudflare can see media until then (docs/calls-production.md).
-      const transport = SFU_ENABLED
-        ? createSfuTransport({ ...common, api: sfuApi(callId, groupId) })
-        : createMeshTransport(common);
+      // The one line that chooses how media travels. Default is the mesh,
+      // where media never reaches a server at all; the SFU pairs with
+      // per-frame encryption so it can forward what it cannot read.
+      if (!SFU_ENABLED) {
+        const transport = createMeshTransport(common);
+        transportRef.current = transport;
+        return transport;
+      }
+      const frameCrypto = createFrameCrypto();
+      frameCryptoRef.current = frameCrypto;
+      // Keys arrive a moment later; frames sent before then fail to seal and
+      // are dropped by the worker rather than sent in the clear.
+      void pumpKeys(callId, groupId);
+      const transport = createSfuTransport({
+        ...common,
+        api: sfuApi(callId, groupId),
+        frameCrypto,
+      });
       transportRef.current = transport;
       return transport;
     },
-    [sendSignal, patchCall, sfuApi],
+    [sendSignal, patchCall, sfuApi, pumpKeys],
   );
+
+  // Rekey while a call is up. Polling rather than subscribing to MLS commits:
+  // the check is a cheap read of state we already hold, and it self-heals if a
+  // commit lands while we're mid-call regardless of how it got there.
+  const activeCallId = call?.callId;
+  const activeGroupId = call?.groupId;
+  useEffect(() => {
+    if (!SFU_ENABLED || !activeCallId || !activeGroupId) return;
+    const id = setInterval(() => void pumpKeys(activeCallId, activeGroupId), 5000);
+    return () => clearInterval(id);
+  }, [activeCallId, activeGroupId, pumpKeys]);
 
   /** Add a participant row (idempotent) and keep the peak count. */
   const addParticipant = useCallback(
@@ -561,7 +635,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         toast.error("You're already in a call");
         return;
       }
-      if (!socket) return;
+      if (!socket || sfuUnavailable()) return;
       // Fetched alongside the permission prompt rather than before it, so a
       // cold credential cache costs nothing the user can perceive.
       const ice = ensureIceServers();
@@ -667,7 +741,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       /** Media we already hold (accepting a ring acquires it first). */
       stream?: MediaStream;
     }) => {
-      if (!socket) return;
+      if (!socket || sfuUnavailable()) return;
       const ice = ensureIceServers();
       const { callId, groupId, video, starterId } = target;
       let stream = target.stream ?? null;

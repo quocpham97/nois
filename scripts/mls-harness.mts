@@ -305,6 +305,45 @@ async function main() {
   check(bob.got.includes("AFTER-REMOVE"), `bob decrypts post-removal traffic (${JSON.stringify(bob.got)})`);
   check(!carol.got.includes("AFTER-REMOVE"), "REMOVED carol cannot decrypt post-removal traffic");
 
+  // --- call media keys (phase D) ------------------------------------------------
+  // The entire key agreement for E2EE calls over an SFU is the MLS exporter:
+  // members at the same epoch must derive identical bytes with no round trip,
+  // and a removed member must not be able to derive the current ones.
+  {
+    const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
+    const forCall = (state: NonNullable<typeof aliceD1.state>, callId: string) =>
+      mls.mlsExportSecret(state, "chat-app call media", new TextEncoder().encode(callId), 32);
+
+    const aliceKey = await forCall(aliceD1.state!, "call-1");
+    const bobKey = await forCall(bob.state!, "call-1");
+    check(
+      hex(aliceKey) === hex(bobKey),
+      "two members at the same epoch derive the SAME call media key",
+    );
+    check(aliceKey.length === 32, `the derived key is 32 bytes (${aliceKey.length})`);
+
+    const otherCall = await forCall(aliceD1.state!, "call-2");
+    check(
+      hex(aliceKey) !== hex(otherCall),
+      "a different callId derives a different key (concurrent calls don't share one)",
+    );
+
+    // Carol was removed above, so her state is stuck at the old epoch.
+    const carolKey = carol.state ? hex(await forCall(carol.state, "call-1")) : null;
+    check(
+      carolKey !== null && carolKey !== hex(aliceKey),
+      "a REMOVED member cannot derive the current call media key",
+    );
+
+    // Alice's second device is the same member — it must still agree.
+    if (aliceD2.state) {
+      check(
+        hex(await forCall(aliceD2.state, "call-1")) === hex(aliceKey),
+        "a second device of the same user derives the same key",
+      );
+    }
+  }
+
   // --- cleanup ----------------------------------------------------------------
   const pool = getPool();
   await pool.query(`DELETE FROM mls_commit WHERE group_id=$1`, [CH]);

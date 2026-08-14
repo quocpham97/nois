@@ -37,6 +37,7 @@ import {
   decodeGroupState,
   defaultCryptoProvider,
   joinGroup,
+  mlsExporter,
   processPrivateMessage,
   processMessage,
   type CiphersuiteImpl,
@@ -317,6 +318,28 @@ export function mlsKeyPackageIdentity(kp: KeyPackage): string | null {
 /** Current epoch of a group state (what a commit must be submitted against). */
 export function mlsEpoch(state: ClientState): number {
   return Number(state.groupContext.epoch);
+}
+
+/**
+ * RFC 9420 §8.5 exporter: derive key material for a protocol OUTSIDE MLS from
+ * the group's current epoch secret.
+ *
+ * This is what lets call media be end-to-end encrypted through an SFU without
+ * inventing a key-agreement protocol: every member at the same epoch derives
+ * the same bytes with no extra round trip, and a member removed from the group
+ * can't derive the next epoch's. Reading it does NOT advance any ratchet (it's
+ * a pure derivation from `keySchedule.exporterSecret`), so unlike encrypt and
+ * decrypt this needs no lock — and epoch and secret come from one state
+ * snapshot, so they always describe each other.
+ */
+export async function mlsExportSecret(
+  state: ClientState,
+  label: string,
+  context: Uint8Array,
+  length: number,
+): Promise<Uint8Array> {
+  const cs = await mlsCiphersuite();
+  return mlsExporter(state.keySchedule.exporterSecret, label, context, length, cs);
 }
 
 export type SyncCommitResult = {

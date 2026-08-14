@@ -24,6 +24,7 @@ import type {
   SfuSessionDescription,
 } from "@/lib/socket-events";
 import type { CallTransport, SignalMsg, TransportEvents } from "./call-transport";
+import type { FrameCrypto } from "./call-frame-crypto";
 
 /** The socket-backed proxy to Cloudflare's Realtime API. The app token is
  *  app-wide, so none of this can happen in the browser — see server.ts. */
@@ -50,16 +51,40 @@ type PeerState = {
   announced: boolean;
 };
 
+/** Pin VP8 for video. The frame-crypto worker leaves a fixed number of codec
+ *  header bytes in the clear, and those offsets are VP8's — negotiating H.264
+ *  would corrupt every frame. Other payload types (rtx, red, fec) are kept,
+ *  since they aren't primary codecs. */
+function preferVp8(transceiver: RTCRtpTransceiver): void {
+  const codecs = RTCRtpSender.getCapabilities("video")?.codecs;
+  if (!codecs) return;
+  const usable = codecs.filter(
+    (c) => /\/vp8$/i.test(c.mimeType) || !/^video\/(vp9|h264|h265|av1)$/i.test(c.mimeType),
+  );
+  if (usable.some((c) => /\/vp8$/i.test(c.mimeType))) {
+    try {
+      transceiver.setCodecPreferences(usable);
+    } catch {
+      // Non-fatal: without VP8 pinned, frame crypto would be unsafe, so the
+      // caller checks support before enabling it at all.
+    }
+  }
+}
+
 export function createSfuTransport({
   localStream,
   iceServers,
   events,
   api,
+  frameCrypto,
 }: {
   localStream: MediaStream;
   iceServers: RTCIceServer[];
   events: TransportEvents;
   api: SfuApi;
+  /** Per-frame E2EE. Null means media is readable by the SFU — only acceptable
+   *  behind the phase C flag, never for users. */
+  frameCrypto: FrameCrypto | null;
 }): CallTransport {
   const peers = new Map<string, PeerState>();
   /** Which peer a pulled transceiver belongs to, so `ontrack` can route. */
@@ -121,10 +146,15 @@ export function createSfuTransport({
     pubPc = pub;
     watch(pub);
     // sendonly: this connection never carries anyone else's media.
-    const senders = localStream.getTracks().map((track) => ({
-      track,
-      transceiver: pub.addTransceiver(track, { direction: "sendonly" }),
-    }));
+    const senders = localStream.getTracks().map((track) => {
+      const transceiver = pub.addTransceiver(track, { direction: "sendonly" });
+      if (frameCrypto) {
+        if (track.kind === "video") preferVp8(transceiver);
+        // Attached before the offer, so no frame can ever leave unsealed.
+        frameCrypto.protectSender(transceiver.sender, track.kind);
+      }
+      return { track, transceiver };
+    });
     const offer = await pub.createOffer();
     await pub.setLocalDescription(offer);
     if (closed) return;
@@ -155,6 +185,8 @@ export function createSfuTransport({
     watch(sub);
     sub.ontrack = (e) => {
       if (closed) return;
+      // Before anything reads the track: what arrives from the SFU is sealed.
+      frameCrypto?.protectReceiver(e.receiver, e.track.kind);
       const mid = e.transceiver.mid;
       const deviceId = mid ? midToDevice.get(mid) : undefined;
       if (!deviceId) return;
