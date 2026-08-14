@@ -411,15 +411,10 @@ above, since Cloudflare relays between its own allocations.
 
 Suggested phasing, keeping the app working throughout:
 
-1. **Transport swap.** The seam for this now exists: `CallTransport` in
-   `src/components/chat/call-transport.ts`, with `createMeshTransport` behind
-   it and `openTransport` in `call-context.tsx` as the single place a transport
-   is chosen. An SFU implementation publishes one stream in `start` and
-   subscribes per device in `addPeer`, and `handleSignal` becomes a no-op
-   because negotiation runs against the media server rather than between peers.
-   Everything around it survives untouched: the room protocol
-   (`call:start`/`join`/`leave`), the ring-vs-huddle rule, device migration, the
-   thread record. Ship it behind a flag with the mesh as fallback.
+1. **Transport swap. ✅ built 2026-08-14** — see
+   [Phase C, as built](#phase-c-as-built) below. The room protocol
+   (`call:start`/`join`/`leave`), the ring-vs-huddle rule, device migration and
+   the thread record all survived untouched, as predicted.
 2. **Tokens.** The server mints SFU session tokens from the same `isMember`
    check `call:start` already does, so a room can't be joined by a non-member.
 3. **E2EE.** Encoded Transform in a worker, keyed from the group's MLS exporter
@@ -432,6 +427,68 @@ Suggested phasing, keeping the app working throughout:
 Effort: phase 1 is comparable to the mesh work itself; phase 3 is the harder
 half (codec header handling — VP8 keeps 1–10 unencrypted bytes — plus key
 rotation and a fallback path for clients without Encoded Transform).
+
+### Phase C, as built
+
+**Do not enable this in production.** Until phase D lands, media is decrypted at
+the SFU and the product's central promise does not hold. It is off by default
+and gated on a build-time flag precisely so it can't be turned on by accident
+from a dashboard.
+
+```bash
+NEXT_PUBLIC_CALL_TRANSPORT=sfu   # client: route media through the SFU
+SFU_APP_ID=…                     # server only: Cloudflare Realtime SFU app
+SFU_APP_TOKEN=…
+```
+
+Note those are **not** declared in `render.yaml`, deliberately — the blueprint
+shouldn't invite setting them. Note also that the SFU app is a *different*
+credential from the TURN key: create one under Realtime → SFU in the Cloudflare
+dashboard.
+
+| Piece | Where |
+| --- | --- |
+| Transport | `src/components/chat/call-transport-sfu.ts` |
+| Proxy | `sfu:*` handlers in `server.ts` |
+| Wire types | `Sfu*` in `src/lib/socket-events.ts` |
+| Selection | `SFU_ENABLED` in `call-context.tsx` (`openTransport`) |
+
+**Two Realtime sessions per client**, each one PeerConnection: a publisher that
+pushes our tracks once no matter how many people listen, and a subscriber that
+pulls everyone else. Splitting them keeps renegotiation — which happens on
+every join and leave — away from our own outbound media.
+
+**Peers exchange session ids over the existing `call:signal` relay** as an
+`sfu-hello` blob, so the server learns nothing new about who publishes what and
+no roster events had to change. That is why the diff is a new file plus a proxy
+rather than surgery.
+
+**The proxy exists because Cloudflare's app token is app-wide** — there is no
+room-scoped, per-participant token as LiveKit has — so it can never reach a
+browser. Authorization is `socket.rooms.has(callRoom(...))`: being *in the call*,
+which is stricter than group membership. Session ids are additionally bound to
+the socket that opened them, because `tracks/close` against someone else's
+session is the abuse Cloudflare's own docs call out. The guard checks
+authorization **before** configuration, so an unauthorized caller can't probe
+whether a deployment even has an SFU.
+
+**`phase: "active"` was redefined**, as flagged: under an SFU
+`connectionState === "connected"` only means "connected to Cloudflare", which is
+true in an empty room. A leg now counts as up only when the subscriber
+connection is live *and* media for that device has actually arrived.
+
+**Failure is all-or-nothing**, also as flagged. A mesh loses one pair when a leg
+dies; here one dead connection is every leg, so `failAll` drops the whole roster
+and the engine above reports "Call connection lost". Session re-establishment is
+not implemented and should be part of any move toward shipping this.
+
+**What is verified, and what is not.** `scripts/call-harness.mts` covers the
+authorization gate (non-participant refused, forged session id refused,
+participant clears it), and the mesh path is unchanged across all three call
+harnesses. **The media path is entirely unverified** — it has never been run
+against a real Cloudflare SFU app, so treat the publish/pull/renegotiate
+sequence as written-to-spec, not working. Reading the spec is not the same as
+having seen a frame arrive.
 
 ### What that means in practice
 

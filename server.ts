@@ -20,6 +20,7 @@ loadEnvConfig(process.cwd());
 import type {
   ClientToServerEvents,
   ServerToClientEvents,
+  SfuFailure,
 } from "./src/lib/socket-events";
 import {
   type Group,
@@ -78,6 +79,38 @@ type IceServerConfig = {
   username?: string;
   credential?: string;
 };
+
+// Cloudflare Realtime SFU (phase C — flag-gated, see docs/calls-production.md).
+//
+// The app token is app-WIDE: Cloudflare issues no room-scoped, per-participant
+// token the way LiveKit does. So it can never be handed to a client, and every
+// SFU call is proxied through this process. That is the whole reason the SFU
+// needs server surface at all — the mesh needed none.
+const SFU_APP_ID = process.env.SFU_APP_ID;
+const SFU_APP_TOKEN = process.env.SFU_APP_TOKEN;
+const SFU_BASE = "https://rtc.live.cloudflare.com/v1";
+
+/** One proxied Realtime API call. Throws on transport or HTTP failure; the
+ *  caller turns that into an `ok: false` ack rather than a dropped call. */
+async function sfuFetch<T>(
+  path: string,
+  method: "POST" | "PUT",
+  body?: unknown,
+): Promise<T> {
+  const res = await fetch(`${SFU_BASE}/apps/${SFU_APP_ID}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${SFU_APP_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    throw new Error(`sfu ${method} ${path} → ${res.status} ${await res.text()}`);
+  }
+  return (await res.json()) as T;
+}
 // Cached per process: the credential is not user-scoped, so one fetch serves
 // every client until it nears expiry. `inflight` collapses a thundering herd
 // (many clients connecting at once) into a single upstream request.
@@ -1092,6 +1125,98 @@ app.prepare().then(async () => {
         fromDeviceId: (socket.data.deviceId as string | undefined) ?? "",
         data,
       });
+    });
+
+    // SFU proxy. Authorization is the call room itself — `socket.rooms.has`
+    // answers "is this user in this call" with no extra state, the same trick
+    // the roster uses, and it is strictly stronger than group membership: a
+    // member who never joined the call cannot pull anyone's media.
+    //
+    // Sessions are additionally bound to the socket that created them, because
+    // `tracks/close` against someone else's session is exactly the abuse
+    // Cloudflare's docs warn about. A client never gets to name a session it
+    // did not open.
+    const sfuSessions = new Set<string>();
+    const sfuGuard = (
+      groupId: unknown,
+      callId: unknown,
+      sessionId?: unknown,
+    ): SfuFailure["reason"] | null => {
+      // Authorization BEFORE configuration, deliberately: whether this
+      // deployment has an SFU is not something an unauthorized caller should
+      // be able to probe, and checking it first would also make the
+      // authorization tests pass vacuously on a deployment without one.
+      if (typeof groupId !== "string" || typeof callId !== "string") return "error";
+      if (!socket.rooms.has(callRoom(groupId, callId))) return "unauthorized";
+      if (sessionId !== undefined) {
+        if (typeof sessionId !== "string" || !sfuSessions.has(sessionId)) {
+          return "unauthorized";
+        }
+      }
+      if (!SFU_APP_ID || !SFU_APP_TOKEN) return "unconfigured";
+      return null;
+    };
+
+    socket.on("sfu:session", async ({ groupId, callId }, ack) => {
+      if (typeof ack !== "function") return;
+      const bad = sfuGuard(groupId, callId);
+      if (bad) return ack({ ok: false, reason: bad });
+      try {
+        const res = await sfuFetch<{ sessionId: string }>("/sessions/new", "POST");
+        sfuSessions.add(res.sessionId);
+        ack({ ok: true, sessionId: res.sessionId });
+      } catch (e) {
+        console.warn("[sfu] session failed:", (e as Error).message);
+        ack({ ok: false, reason: "error" });
+      }
+    });
+
+    // Both halves of the SFU go through here: `location: "local"` publishes our
+    // own tracks, `location: "remote"` subscribes to a peer's. The SDP stays
+    // opaque to us, exactly like call:signal.
+    socket.on("sfu:tracks", async ({ groupId, callId, sessionId, body }, ack) => {
+      if (typeof ack !== "function") return;
+      const bad = sfuGuard(groupId, callId, sessionId);
+      if (bad) return ack({ ok: false, reason: bad });
+      try {
+        const res = await sfuFetch<Record<string, unknown>>(
+          `/sessions/${sessionId}/tracks/new`,
+          "POST",
+          body,
+        );
+        ack({ ok: true, result: res });
+      } catch (e) {
+        console.warn("[sfu] tracks failed:", (e as Error).message);
+        ack({ ok: false, reason: "error" });
+      }
+    });
+
+    socket.on("sfu:renegotiate", async ({ groupId, callId, sessionId, body }, ack) => {
+      if (typeof ack !== "function") return;
+      const bad = sfuGuard(groupId, callId, sessionId);
+      if (bad) return ack({ ok: false, reason: bad });
+      try {
+        await sfuFetch(`/sessions/${sessionId}/renegotiate`, "PUT", body);
+        ack({ ok: true });
+      } catch (e) {
+        console.warn("[sfu] renegotiate failed:", (e as Error).message);
+        ack({ ok: false, reason: "error" });
+      }
+    });
+
+    socket.on("sfu:close", async ({ groupId, callId, sessionId, body }, ack) => {
+      const bad = sfuGuard(groupId, callId, sessionId);
+      if (bad) {
+        if (typeof ack === "function") ack({ ok: false, reason: bad });
+        return;
+      }
+      try {
+        await sfuFetch(`/sessions/${sessionId}/tracks/close`, "PUT", body);
+        if (typeof ack === "function") ack({ ok: true });
+      } catch (e) {
+        console.warn("[sfu] close failed:", (e as Error).message);
+        if (typeof ack === "function") ack({ ok: false, reason: "error" });
+      }
     });
 
     // MLS delivery service (Phase 4, feature-flagged) — the server ORDERS

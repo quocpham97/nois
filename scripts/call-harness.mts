@@ -378,8 +378,47 @@ async function main() {
     goneJoin?.ok === false && goneJoin.reason === "gone",
     "joining a call that isn't running → gone",
   );
+  // --- SFU proxy authorization (phase C) ---------------------------------------
+  // The Cloudflare app token is app-wide, so the server proxies every SFU call
+  // and is the only thing standing between a member and someone else's media.
+  // These assert the gate, not the media path — the latter needs a real SFU app
+  // (see docs/calls-production.md).
+  type SfuResult = { ok: true; sessionId?: string } | { ok: false; reason: string };
   if (privateStart?.ok) {
-    bob.emit("call:leave", { callId: privateStart.callId, groupId: smallGroup });
+    const sfuCallId = privateStart.callId;
+    // Bob started it, so he IS in the room; Carol is a member who never joined.
+    const outsiderSfu = await emitWithAck<SfuResult>(carol, "sfu:session", {
+      groupId: smallGroup,
+      callId: sfuCallId,
+    });
+    check(
+      outsiderSfu?.ok === false && outsiderSfu.reason === "unauthorized",
+      `a group member not IN the call cannot open an SFU session (${outsiderSfu?.ok === false ? outsiderSfu.reason : "allowed"})`,
+    );
+    // Naming a session you did not create is the `tracks/close` abuse
+    // Cloudflare's docs warn about; it must be refused before any upstream call.
+    const forged = await emitWithAck<SfuResult>(bob, "sfu:tracks", {
+      groupId: smallGroup,
+      callId: sfuCallId,
+      sessionId: "someone-elses-session",
+      body: { tracks: [] },
+    });
+    check(
+      forged?.ok === false && forged.reason === "unauthorized",
+      `a session id the socket never opened is refused (${forged?.ok === false ? forged.reason : "allowed"})`,
+    );
+    // Positive control: Bob IS in the call, so he clears the gate and only the
+    // missing Cloudflare app stops him. Without this the two checks above would
+    // also pass if the guard were rejecting everything unconditionally.
+    const allowed = await emitWithAck<SfuResult>(bob, "sfu:session", {
+      groupId: smallGroup,
+      callId: sfuCallId,
+    });
+    check(
+      allowed?.ok === true || (allowed?.ok === false && allowed.reason === "unconfigured"),
+      `a participant clears the gate (${allowed?.ok ? "session opened" : (allowed?.reason ?? "no ack")})`,
+    );
+    bob.emit("call:leave", { callId: sfuCallId, groupId: smallGroup });
   }
 
   // --- crash-leave --------------------------------------------------------------

@@ -51,8 +51,10 @@ import type {
 import {
   type CallTransport,
   type SignalMsg,
+  type TransportEvents,
   createMeshTransport,
 } from "./call-transport";
+import { type SfuApi, createSfuTransport } from "./call-transport-sfu";
 import { useChat } from "./chat-context";
 import { useSocket } from "./socket-context";
 
@@ -149,6 +151,12 @@ const RING_TIMEOUT_MS = 45_000;
 // provider with static credentials (e.g. ExpressTURN, self-hosted coturn), and
 // they keep those working unchanged. See docs/calls-production.md.
 const STUN_ONLY: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+
+/** Route media through the SFU instead of a peer mesh. OFF by default and
+ *  deliberately build-time, because this is not a user-facing setting: until
+ *  phase D (per-frame E2EE) the SFU can see media, so turning this on trades
+ *  the product's central promise for participant headroom. */
+const SFU_ENABLED = process.env.NEXT_PUBLIC_CALL_TRANSPORT === "sfu";
 
 function envIceServers(): RTCIceServer[] {
   const turn = process.env.NEXT_PUBLIC_TURN_URL;
@@ -345,14 +353,78 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 
   // --- media transport --------------------------------------------------------
 
+  /** The socket-backed proxy the SFU transport calls. Every request is scoped
+   *  to a call the server can see us in, and the Cloudflare app token stays on
+   *  the server — it is app-wide, so it could never be handed to a browser. */
+  const sfuApi = useCallback(
+    (callId: string, groupId: string): SfuApi => {
+      const scope = { callId, groupId };
+      const warn = (reason: string) => {
+        console.warn("[call] sfu request failed:", reason);
+        if (reason === "unconfigured") {
+          toast.error("This deployment has no SFU configured");
+        }
+      };
+      return {
+        session: () =>
+          new Promise((resolve) => {
+            if (!socket) return resolve(null);
+            socket.timeout(10_000).emit("sfu:session", scope, (err, res) => {
+              if (err || !res || !res.ok) {
+                warn(!err && res && !res.ok ? res.reason : "timeout");
+                return resolve(null);
+              }
+              resolve(res.sessionId);
+            });
+          }),
+        tracks: (sessionId, body) =>
+          new Promise((resolve) => {
+            if (!socket) return resolve(null);
+            socket
+              .timeout(10_000)
+              .emit("sfu:tracks", { ...scope, sessionId, body }, (err, res) => {
+                if (err || !res || !res.ok) {
+                  warn(!err && res && !res.ok ? res.reason : "timeout");
+                  return resolve(null);
+                }
+                resolve(res.result);
+              });
+          }),
+        renegotiate: (sessionId, sessionDescription) =>
+          new Promise((resolve) => {
+            if (!socket) return resolve(false);
+            socket
+              .timeout(10_000)
+              .emit(
+                "sfu:renegotiate",
+                { ...scope, sessionId, body: { sessionDescription } },
+                (err, res) => resolve(!err && !!res?.ok),
+              );
+          }),
+        closeTracks: (sessionId, mids) => {
+          socket?.emit("sfu:close", {
+            ...scope,
+            sessionId,
+            body: { tracks: mids.map((mid) => ({ mid })), force: false },
+          });
+        },
+      };
+    },
+    [socket],
+  );
+
   /** Build the media layer for one call and wire its events into call state.
    *  Swapping the mesh for an SFU is swapping the factory called here — see
    *  call-transport.ts. `patchCall` no-ops once the call is gone or replaced,
    *  so a straggling event from a torn-down transport can't touch a later call. */
   const openTransport = useCallback(
-    (callId: string, stream: MediaStream): CallTransport => {
+    (callId: string, groupId: string, stream: MediaStream): CallTransport => {
       transportRef.current?.close();
-      const transport = createMeshTransport({
+      const common: {
+        localStream: MediaStream;
+        iceServers: RTCIceServer[];
+        events: TransportEvents;
+      } = {
         localStream: stream,
         iceServers: iceRef.current?.servers ?? envIceServers(),
         events: {
@@ -384,12 +456,17 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
             }
           },
         },
-      });
+      };
+      // The one line that chooses how media travels. Default is the mesh; the
+      // SFU is opt-in and NOT safe for users until per-frame E2EE lands, since
+      // Cloudflare can see media until then (docs/calls-production.md).
+      const transport = SFU_ENABLED
+        ? createSfuTransport({ ...common, api: sfuApi(callId, groupId) })
+        : createMeshTransport(common);
       transportRef.current = transport;
-      void transport.start();
       return transport;
     },
-    [sendSignal, patchCall],
+    [sendSignal, patchCall, sfuApi],
   );
 
   /** Add a participant row (idempotent) and keep the peak count. */
@@ -464,10 +541,11 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       } catch {
         return;
       }
-      // An offer from a device we don't know yet means we're the joiner (or the
-      // roster event is still in flight) — give it a tile. Idempotent, and the
-      // transport sets itself up as the answerer for the same reason.
-      if (msg.type === "offer") {
+      // First contact from a device we don't know yet means we're the joiner
+      // (or the roster event is still in flight) — give it a tile. Idempotent,
+      // and the transport sets itself up for the same reason. `offer` is the
+      // mesh's first contact; `sfu-hello` is the SFU's.
+      if (msg.type === "offer" || msg.type === "sfu-hello") {
         addParticipant(callId, { userId: fromUserId, deviceId: fromDeviceId });
       }
       await transportRef.current?.handleSignal(fromDeviceId, fromUserId, msg);
@@ -544,8 +622,10 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
             peak: 1,
           });
           // Ready before anyone can join: `call:joined` is what triggers our
-          // offer, and it can land immediately.
-          openTransport(res.callId, stream);
+          // offer, and it can land immediately. `start` only after the ack,
+          // because the server authorizes SFU calls on call-room membership
+          // and we are only in the room once `call:start` has succeeded.
+          void openTransport(res.callId, groupId, stream).start();
           // Nobody rang (a huddle) → no ring timeout; the call just waits.
           if (res.ringing) {
             ringTimerRef.current = setTimeout(() => {
@@ -610,7 +690,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       // credentials and the transport must be in place before we announce
       // ourselves — their offers can beat our own join ack.
       await ice;
-      openTransport(callId, stream);
+      const transport = openTransport(callId, groupId, stream);
       socket.timeout(8000).emit("call:join", { callId, groupId }, (err, res) => {
         if (err || !res?.ok) {
           const reason = !err && res && !res.ok ? res.reason : "error";
@@ -653,6 +733,10 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
           peak: participants.length + 1,
         });
         // We are the joiner, so we do not offer — every incumbent offers to us.
+        // The SFU is the exception and doesn't care: `start` publishes our own
+        // media, which both sides do independently. It waits for the ack
+        // because the server authorizes on call-room membership.
+        void transport.start();
       });
     },
     [

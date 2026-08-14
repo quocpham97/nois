@@ -17,10 +17,16 @@
 // negotiation runs against the media server rather than between peers. See
 // docs/calls-production.md for why that is deferred and what it would cost.
 
-/** Wire shape of a `call:signal` `data` blob. Opaque to the server. */
+/** Wire shape of a `call:signal` `data` blob. Opaque to the server.
+ *
+ *  `sfu-hello` is how the SFU transport tells a peer which Realtime session and
+ *  track names to pull. It rides the existing per-device signal relay rather
+ *  than adding roster events, so the server needs no new knowledge of who is
+ *  publishing what — it stays a dumb relay under both transports. */
 export type SignalMsg =
   | { type: "offer" | "answer"; sdp?: string }
-  | { type: "ice"; candidate: RTCIceCandidateInit };
+  | { type: "ice"; candidate: RTCIceCandidateInit }
+  | { type: "sfu-hello"; sessionId: string; tracks: string[] };
 
 /** What a transport tells the engine above it. All are dropped after `close`. */
 export type TransportEvents = {

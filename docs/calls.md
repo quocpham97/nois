@@ -12,7 +12,7 @@ group path. The sizing rules below and the reasoning behind them are in
 | | |
 | --- | --- |
 | Client engine | `src/components/chat/call-context.tsx` (phases, roster, records) |
-| Media transport | `src/components/chat/call-transport.ts` (`CallTransport`, `createMeshTransport`) |
+| Media transport | `src/components/chat/call-transport.ts` (`CallTransport`, `createMeshTransport`); `call-transport-sfu.ts` is an off-by-default SFU alternative — see [calls-production.md](./calls-production.md#phase-c-as-built) |
 | UI | `src/components/chat/call-view.tsx` (`CallUI`, mounted by both shells) |
 | Thread record | `src/components/chat/message.tsx` (`CallEventRow`), `src/lib/chat-data.ts` (`CallEvent`) |
 | Server relay | `server.ts`, the `call:*` handlers |

@@ -353,6 +353,58 @@ export type CallSignalRelay = {
   data: string;
 };
 
+// SFU (phase C, flag-gated). Cloudflare Realtime's app token is app-wide — no
+// room-scoped per-participant token exists — so the client never holds it and
+// every call is proxied through the server, which authorizes on call-room
+// membership. Shapes mirror Cloudflare's Realtime API; the SDP is as opaque to
+// us here as it is in `call:signal`.
+export type SfuSessionDescription = { type: "offer" | "answer"; sdp: string };
+export type SfuTrackObject = {
+  location?: "local" | "remote";
+  trackName?: string;
+  sessionId?: string;
+  mid?: string | null;
+};
+export type SfuTracksBody = {
+  tracks: SfuTrackObject[];
+  sessionDescription?: SfuSessionDescription;
+};
+export type SfuTracksResponse = {
+  sessionDescription?: SfuSessionDescription;
+  requiresImmediateRenegotiation?: boolean;
+  tracks?: (SfuTrackObject & { errorCode?: string; errorDescription?: string })[];
+  errorCode?: string;
+  errorDescription?: string;
+};
+
+/** `unconfigured` means the deployment has no SFU app — the client falls back
+ *  to the mesh rather than failing the call. */
+export type SfuFailure = {
+  ok: false;
+  reason: "unconfigured" | "unauthorized" | "error";
+};
+/** Every SFU call is scoped to a call the caller is currently in. */
+type SfuScope = { groupId: string; callId: string };
+
+export type SfuSessionPayload = SfuScope;
+export type SfuSessionResult = { ok: true; sessionId: string } | SfuFailure;
+
+export type SfuTracksPayload = SfuScope & {
+  sessionId: string;
+  body: SfuTracksBody;
+};
+export type SfuTracksResult = { ok: true; result: SfuTracksResponse } | SfuFailure;
+
+export type SfuRenegotiatePayload = SfuScope & {
+  sessionId: string;
+  body: { sessionDescription: SfuSessionDescription };
+};
+export type SfuClosePayload = SfuScope & {
+  sessionId: string;
+  body: { tracks: { mid?: string }[]; force: boolean };
+};
+export type SfuOkResult = { ok: true } | SfuFailure;
+
 export type RecoveryRequestPayload = { deviceId: string; fingerprint: string };
 // Responder → requester: `env` is an `encryptForDevices` envelope sealed to the
 // requesting device only (opaque to the server), carrying the group seeds.
@@ -642,6 +694,19 @@ export type ClientToServerEvents = {
   "call:decline": (payload: CallDeclinePayload) => void;
   "call:leave": (payload: CallLeavePayload) => void;
   "call:signal": (payload: CallSignalPayload) => void;
+  "sfu:session": (
+    payload: SfuSessionPayload,
+    ack: (result: SfuSessionResult) => void,
+  ) => void;
+  "sfu:tracks": (
+    payload: SfuTracksPayload,
+    ack: (result: SfuTracksResult) => void,
+  ) => void;
+  "sfu:renegotiate": (
+    payload: SfuRenegotiatePayload,
+    ack: (result: SfuOkResult) => void,
+  ) => void;
+  "sfu:close": (payload: SfuClosePayload, ack?: (result: SfuOkResult) => void) => void;
   "mls:publishKeyPackage": (payload: MlsPublishKeyPackagePayload) => void;
   "mls:fetchGroup": (
     payload: MlsFetchGroupPayload,
