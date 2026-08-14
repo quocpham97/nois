@@ -431,11 +431,43 @@ async function main() {
     callId: crashCallId,
     groupId: smallGroup,
   });
-  const aliceSeesLeft = waitFor<{ deviceId: string }>(aliceD1, "call:left", 3000);
+  // A dropped socket is usually a BLIP, not a departure: media is
+  // peer-to-peer and unaffected, so the seat is held for CALL_DROP_GRACE_MS
+  // before the rest of the call is told. Evicting immediately used to end a
+  // call that was still perfectly able to carry audio — and cascaded, because
+  // one eviction emptied everyone else's roster in turn.
+  const noEarlyLeft = waitFor<{ deviceId: string }>(aliceD1, "call:left", 3000);
   bob.disconnect(); // tab closed / network died
   check(
+    (await noEarlyLeft) === null,
+    "a dropped socket does NOT immediately evict its owner from the call",
+  );
+
+  // Back within the grace window: the call carries on and nobody else is told
+  // anything except that the seat is occupied again.
+  const bobBack = await connect(BOB, "bob-d1");
+  const aliceSeesRejoin = waitFor<{ deviceId: string }>(aliceD1, "call:joined", 3000);
+  const rejoin = await emitWithAck<JoinResult>(bobBack, "call:rejoin", {
+    callId: crashCallId,
+    groupId: smallGroup,
+  });
+  check(rejoin?.ok === true, `a reconnecting device reclaims its seat (${JSON.stringify(rejoin)})`);
+  check(
+    (await aliceSeesRejoin)?.deviceId === "bob-d1",
+    "peers are told to heal the leg, so an expired grace period still recovers",
+  );
+  const lateLeft = waitFor<{ deviceId: string }>(aliceD1, "call:left", 4000);
+  check(
+    (await lateLeft) === null,
+    "the held seat's timer does not fire after a successful rejoin",
+  );
+
+  // Gone for good: past the grace period the eviction lands as it always did.
+  const aliceSeesLeft = waitFor<{ deviceId: string }>(aliceD1, "call:left", 15000);
+  bobBack.disconnect();
+  check(
     (await aliceSeesLeft)?.deviceId === "bob-d1",
-    "a disconnect leaves the call like a normal leave",
+    "a socket that stays gone is evicted once the grace period expires",
   );
   aliceD1.emit("call:leave", { callId: crashCallId, groupId: smallGroup });
 

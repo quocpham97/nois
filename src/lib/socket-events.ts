@@ -316,6 +316,15 @@ export type CallDeclinedRelay = {
 
 export type CallLeavePayload = { callId: string; groupId: string };
 
+/** Reclaim a seat after a websocket blip. Media is peer-to-peer and survives a
+ *  signaling drop, so a reconnect should restore the call rather than end it —
+ *  the server holds the seat for a grace period, and this is how a client takes
+ *  it back. Unlike `call:join` it never displaces the user's other devices. */
+export type CallRejoinPayload = { callId: string; groupId: string };
+export type CallRejoinResult =
+  | { ok: true; participants: CallPeer[] }
+  | { ok: false; reason: "full" | "unauthorized" | "gone" | "error" };
+
 /** Broadcast inside the call room as the roster changes. */
 export type CallJoinedRelay = { callId: string } & CallPeer;
 export type CallLeftRelay = { callId: string } & CallPeer;
@@ -690,6 +699,10 @@ export type ClientToServerEvents = {
   "call:join": (
     payload: CallJoinPayload,
     ack: (result: CallJoinResult) => void,
+  ) => void;
+  "call:rejoin": (
+    payload: CallRejoinPayload,
+    ack: (result: CallRejoinResult) => void,
   ) => void;
   "call:decline": (payload: CallDeclinePayload) => void;
   "call:leave": (payload: CallLeavePayload) => void;

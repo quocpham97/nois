@@ -960,6 +960,45 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     [userId, resolveUser, clearRingTimer, recordCall, socket, teardown],
   );
 
+  /**
+   * The socket came back. Media is peer-to-peer, so the call itself probably
+   * never stopped — but we're out of the call room, which means we'd miss every
+   * roster event from here on. Reclaim the seat rather than let the call rot.
+   */
+  const onReconnect = useCallback(() => {
+    const c = callRef.current;
+    // A ring we hadn't answered has no seat to reclaim.
+    if (!c || !socket || c.phase === "incoming") return;
+    socket
+      .timeout(8000)
+      .emit("call:rejoin", { callId: c.callId, groupId: c.groupId }, (err, res) => {
+        if (err || !res?.ok) {
+          const reason = !err && res && !res.ok ? res.reason : "error";
+          toast(
+            reason === "gone"
+              ? "The call ended while you were offline"
+              : reason === "full"
+                ? "Couldn't rejoin — the call is full"
+                : "Couldn't rejoin the call",
+          );
+          recordCall(c, c.phase === "active" ? "answered" : "unanswered");
+          teardown();
+          return;
+        }
+        // Anyone who left while we were away really is gone; drop them rather
+        // than keep a tile for a leg that no longer exists.
+        const here = new Set(res.participants.map((p) => p.deviceId));
+        const cur = callRef.current;
+        if (!cur || cur.callId !== c.callId) return;
+        for (const p of cur.participants) {
+          if (!here.has(p.deviceId)) transportRef.current?.removePeer(p.deviceId);
+        }
+        patchCall(c.callId, (cc) => ({
+          participants: cc.participants.filter((p) => here.has(p.deviceId)),
+        }));
+      });
+  }, [socket, patchCall, recordCall, teardown]);
+
   /** Another of our devices took (or refused) this ring — stop ringing here. */
   const onHandled = useCallback(
     ({ callId }: CallHandledRelay) => {
@@ -1039,6 +1078,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     onOngoing,
     onOver,
     onSignal,
+    onReconnect,
   });
   useEffect(() => {
     handlersRef.current = {
@@ -1051,6 +1091,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       onOngoing,
       onOver,
       onSignal,
+      onReconnect,
     };
     endCallRef.current = endCall;
   });
@@ -1066,6 +1107,10 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     const live = (p: CallOngoingRelay) => handlersRef.current.onOngoing(p);
     const over = (p: CallOverRelay) => handlersRef.current.onOver(p);
     const signal = (p: CallSignalRelay) => void handlersRef.current.onSignal(p);
+    // Fires again on every reconnect. On the FIRST connect there's no call yet,
+    // so the handler is a no-op — it only matters after a drop.
+    const reconnected = () => handlersRef.current.onReconnect();
+    socket.on("connect", reconnected);
     socket.on("call:invite", invite);
     socket.on("call:joined", joined);
     socket.on("call:left", left);
@@ -1076,6 +1121,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     socket.on("call:over", over);
     socket.on("call:signal", signal);
     return () => {
+      socket.off("connect", reconnected);
       socket.off("call:invite", invite);
       socket.off("call:joined", joined);
       socket.off("call:left", left);

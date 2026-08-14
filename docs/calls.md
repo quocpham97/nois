@@ -72,15 +72,30 @@ that's deferred, and what it would cost, is in
 ### Signaling
 
 A call *is* a socket room, `call:<groupId>:<callId>`. The room is the roster, so
-there is **no per-call server state** to keep consistent: `fetchSockets()` on it
-is adapter-aware (correct across nodes behind the Redis adapter), the groupId is
-recoverable from the room name, and a crashed participant leaves automatically.
+there is almost **no per-call server state** to keep consistent: `fetchSockets()`
+on it is adapter-aware (correct across nodes behind the Redis adapter), the
+groupId is recoverable from the room name, and a crashed participant leaves
+automatically.
+
+**Except for dropped sockets.** Media is peer-to-peer and survives a websocket
+blip untouched, so evicting on disconnect ended calls that were still perfectly
+able to carry audio — and cascaded, because one eviction emptied everyone else's
+roster in turn. A dropped device now keeps its seat for `CALL_DROP_GRACE_MS`
+(10s), and `call:rejoin` reclaims it. Held seats are the one piece of per-call
+server state, and they exist because the room can't express "expected back": a
+blip usually hits *everyone* at once, and a socket leaves its rooms the instant
+it disconnects, so without them the room would be empty and the first client
+back would be told the call was over. They're node-local, which fits this
+deliberately single-node deployment (see `render.yaml`); behind a Redis adapter
+a reconnect landing on another node would be told `gone` — pessimistic, not
+wrong, and the thing to revisit if this scales out.
 
 | Event | Direction | Server does |
 | --- | --- | --- |
 | `call:start` | starter → server | **validates membership**, opens the room, rings if eligible, acks `{callId, video, ringing}` or `offline`/`unauthorized` |
 | `call:invite` | server → members' devices | rings (ring-eligible groups only) |
 | `call:join` | joiner → server | validates membership, refuses `full`/`gone`, displaces the joiner's own other device, acks the current roster |
+| `call:rejoin` | reconnecting device → server | reclaims a held seat after a websocket blip; never displaces another device, announces `call:joined` so peers heal the leg |
 | `call:joined` / `call:left` | server → the room | roster changes, per device |
 | `call:decline` | invitee → server | relays `call:declined` into the room (`declined` or `busy`) |
 | `call:handled` | server → the actor's other devices | this ring was handled here, stop |
@@ -251,7 +266,8 @@ Media capture needs platform permission plumbing, not just browser permission:
 
 ```bash
 # server rules: membership, ring vs huddle, video gate, capacity, per-device
-# signal routing, ordered device migration, crash-leave (36 checks)
+# signal routing, ordered device migration, crash-leave, reconnect grace,
+# SFU proxy authorization (43 checks)
 npx tsx --env-file=.env.local scripts/call-harness.mts
 
 # 1:1 in two browsers, then reads the thread on each side:

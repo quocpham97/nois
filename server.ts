@@ -57,6 +57,56 @@ const CALL_MAX_VIDEO = 4;
 const CALL_RING_MAX = 6;
 /** Joins refused for being at capacity — the agreed trigger for building an SFU. */
 let callCapRejections = 0;
+/**
+ * How long a dropped participant keeps their place before the rest of the call
+ * is told they're gone.
+ *
+ * Signaling and media are separate: the PeerConnections are peer-to-peer and
+ * survive a websocket blip untouched. Evicting on `disconnecting` therefore
+ * ended a call that was still perfectly capable of carrying audio — and worse,
+ * it cascaded, because the eviction emptied everyone else's roster in turn.
+ * Wi-Fi-to-cellular handoff is exactly this case.
+ */
+const CALL_DROP_GRACE_MS = Number(process.env.CALL_DROP_GRACE_MS) || 10_000;
+
+/**
+ * Seats held for devices whose socket dropped, keyed `<room>|<deviceId>`.
+ *
+ * The room alone can't express this. A blip usually hits everyone at once (a
+ * server hiccup, not one bad phone), and a socket leaves its rooms the moment
+ * it disconnects — so the room goes EMPTY and there is nothing for the first
+ * client back to rejoin. Holding the seats keeps the call addressable across a
+ * total signaling outage, and keeps `call:over` from firing on a call that
+ * everyone is in the middle of returning to.
+ *
+ * Node-local, which suits a deployment that is deliberately single-node
+ * (REDIS_URL unset — see render.yaml). Behind the Redis adapter a reconnect
+ * landing on another node would not see the held seat and would be told the
+ * call is gone: correct-but-pessimistic, and the point to revisit if this ever
+ * scales out.
+ */
+const heldSeats = new Map<string, { userId: string; expiresAt: number }>();
+const seatKey = (room: string, deviceId: string) => `${room}|${deviceId}`;
+/** Is anyone expected back in this room? */
+const roomHasHeldSeat = (room: string): boolean => {
+  const now = Date.now();
+  for (const [key, seat] of heldSeats) {
+    if (key.startsWith(room + "|") && seat.expiresAt > now) return true;
+  }
+  return false;
+};
+/** A seat this user is expected back in, tolerating an unannounced deviceId. */
+const heldSeatFor = (room: string, userId: string, deviceId: string): string | null => {
+  const now = Date.now();
+  const exact = heldSeats.get(seatKey(room, deviceId));
+  if (exact && exact.expiresAt > now) return seatKey(room, deviceId);
+  for (const [key, seat] of heldSeats) {
+    if (key.startsWith(room + "|") && seat.userId === userId && seat.expiresAt > now) {
+      return key; // one device per user per call, so this is unambiguous
+    }
+  }
+  return null;
+};
 
 // TURN credentials are minted HERE, not inlined into the client bundle. The key
 // never leaves this process; clients ask for `ice:servers` over their already
@@ -1087,6 +1137,53 @@ app.prepare().then(async () => {
       });
     });
 
+    // Reclaim a seat after a websocket blip. Distinct from `call:join` in two
+    // ways that matter: it does NOT displace the user's other devices (nobody
+    // switched devices — the same one came back), and it tolerates a call it
+    // was already part of.
+    //
+    // It DOES announce `call:joined`. If the grace period expired first, peers
+    // tore our leg down and need to rebuild it; if it hadn't, they still hold a
+    // live PeerConnection and the announcement costs one harmless
+    // renegotiation. Making it unconditional keeps this correct across nodes,
+    // where the node handling the reconnect may not be the one that saw the
+    // drop and cannot know which case it is in.
+    socket.on("call:rejoin", async ({ callId, groupId }, ack) => {
+      const reply = (r: Parameters<typeof ack>[0]) => {
+        if (typeof ack === "function") ack(r);
+      };
+      if (typeof callId !== "string" || !callId || typeof groupId !== "string") {
+        return reply({ ok: false, reason: "error" });
+      }
+      if (!store.isMember(groupId, userId)) {
+        return reply({ ok: false, reason: "unauthorized" });
+      }
+      const room = callRoom(groupId, callId);
+      const present = (await io.in(room).fetchSockets()).filter((s) => s.id !== socket.id);
+      const deviceId = (socket.data.deviceId as string | undefined) ?? "";
+      const seat = heldSeatFor(room, userId, deviceId);
+      // Nobody present AND nobody expected back: the call really did end while
+      // we were away. If a seat is still held, an outage took everyone out at
+      // once and we're simply the first one back.
+      if (present.length === 0 && !seat) return reply({ ok: false, reason: "gone" });
+      const others = present.filter((s) => s.data.userId !== userId);
+      if (others.length >= CALL_MAX_VOICE) {
+        // Our seat was taken during the outage. Rare, and honest.
+        callCapRejections += 1;
+        return reply({ ok: false, reason: "full" });
+      }
+      if (seat) heldSeats.delete(seat); // reclaimed
+      socket.join(room);
+      socket.to(room).emit("call:joined", { callId, userId, deviceId });
+      reply({
+        ok: true,
+        participants: others.map((s) => ({
+          userId: s.data.userId as string,
+          deviceId: (s.data.deviceId as string | undefined) ?? "",
+        })),
+      });
+    });
+
     socket.on("call:decline", ({ callId, groupId, reason }) => {
       if (!callId || typeof groupId !== "string") return;
       io.to(callRoom(groupId, callId)).emit("call:declined", {
@@ -1107,7 +1204,8 @@ app.prepare().then(async () => {
         deviceId: (socket.data.deviceId as string | undefined) ?? "",
       });
       const left = await io.in(room).fetchSockets();
-      if (left.length === 0) notifyCallOver(groupId, callId);
+      // Someone mid-reconnect still counts as being on the call.
+      if (left.length === 0 && !roomHasHeldSeat(room)) notifyCallOver(groupId, callId);
     });
 
     socket.on("call:signal", ({ callId, toDeviceId, data }) => {
@@ -1474,10 +1572,13 @@ app.prepare().then(async () => {
       }
     });
 
-    // Leaving a call by crashing/closing the tab must look like leaving it
-    // normally. `disconnecting` still has the socket's rooms, so the call rooms
-    // are recoverable here (in `disconnect` they're already gone).
+    // Leaving a call by crashing or closing the tab must eventually look like
+    // leaving it normally — but NOT immediately, because a dropped websocket is
+    // usually a blip, not a departure (see CALL_DROP_GRACE_MS). `disconnecting`
+    // still has the socket's rooms, so the call rooms are recoverable here (in
+    // `disconnect` they're already gone).
     socket.on("disconnecting", () => {
+      const goneDeviceId = (socket.data.deviceId as string | undefined) ?? "";
       for (const room of socket.rooms) {
         if (!room.startsWith("call:")) continue;
         const rest = room.slice("call:".length);
@@ -1485,17 +1586,27 @@ app.prepare().then(async () => {
         if (cut <= 0) continue;
         const groupId = rest.slice(0, cut);
         const callId = rest.slice(cut + 1);
-        socket.to(room).emit("call:left", {
-          callId,
+        heldSeats.set(seatKey(room, goneDeviceId), {
           userId,
-          deviceId: (socket.data.deviceId as string | undefined) ?? "",
+          expiresAt: Date.now() + CALL_DROP_GRACE_MS,
         });
-        void (async () => {
-          const left = (await io.in(room).fetchSockets()).filter(
-            (s) => s.id !== socket.id,
-          );
-          if (left.length === 0) notifyCallOver(groupId, callId);
-        })();
+        setTimeout(() => {
+          void (async () => {
+            heldSeats.delete(seatKey(room, goneDeviceId));
+            const present = await io.in(room).fetchSockets();
+            const back = present.some(
+              (s) =>
+                s.data.userId === userId &&
+                ((s.data.deviceId as string | undefined) ?? "") === goneDeviceId,
+            );
+            if (back) return; // reconnected in time — nobody else ever knew
+            io.to(room).emit("call:left", { callId, userId, deviceId: goneDeviceId });
+            // Only truly over once nobody is present AND nobody is expected.
+            if (present.length === 0 && !roomHasHeldSeat(room)) {
+              notifyCallOver(groupId, callId);
+            }
+          })();
+        }, CALL_DROP_GRACE_MS);
       }
     });
 
