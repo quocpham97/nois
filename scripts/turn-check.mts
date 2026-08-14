@@ -31,7 +31,7 @@
 // test users and a DM between them) — cleanup needs DATABASE_URL too, and is
 // skipped with a warning if it can't connect.
 //   AUTH_SECRET=… DATABASE_URL=… npx tsx scripts/turn-check.mts \
-//     --url=https://nois-chat.onrender.com
+//     --url=https://nois-gwhl.onrender.com
 
 import { chromium, type Page } from "playwright";
 import { io, type Socket } from "socket.io-client";

@@ -24,7 +24,7 @@ services:
       - key: AUTH_SECRET
         generateValue: true # Render generates a strong secret on first deploy
       - key: AUTH_URL
-        sync: false # e.g. https://nois-chat.onrender.com  (optional; see above)
+        sync: false # e.g. https://nois-gwhl.onrender.com  (optional; see above)
       # --- secrets: fill these in the Render dashboard (Environment tab) ---
       - key: AUTH_GOOGLE_ID
         sync: false
