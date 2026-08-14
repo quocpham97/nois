@@ -1,18 +1,39 @@
 "use client";
 
-// Call UI: a floating incoming-call card (top-right, non-blocking) and the
-// in-call panel (bottom-right) with remote video / voice avatar, local PiP,
-// mute/camera/hang-up controls and a duration timer. All state lives in
-// call-context; this file is purely presentational plus the ring tones.
+// Call UI, following the comp (`Messenger Chat.dc.html`), which draws two
+// distinct surfaces rather than one that grows:
+//
+//   * A DOCKED CARD (bottom-right, non-blocking) for every state where the call
+//     hasn't connected — placing one and receiving one. You can keep reading the
+//     conversation while it rings, which is the whole point of it being a card.
+//   * A FULL-SCREEN PANEL once media is up, because at that point the call *is*
+//     what you're doing.
+//
+// The panel can also be popped into its own window, the way Messenger does —
+// see call-window.tsx for why that's a portal rather than a second route.
+//
+// All state lives in call-context; this file is presentational plus ring tones.
 
 import { useEffect, useRef, useState } from "react";
-import { Mic, MicOff, Phone, PhoneOff, Users, Video, VideoOff } from "lucide-react";
+import { createPortal } from "react-dom";
+import {
+  Mic,
+  MicOff,
+  Minimize2,
+  Phone,
+  PhoneOff,
+  SquareArrowOutUpRight,
+  Users,
+  Video,
+  VideoOff,
+} from "lucide-react";
 import { type User } from "@/lib/chat-data";
 import {
   useCall,
   type CallInfo,
   type CallParticipant,
 } from "./call-context";
+import { useCallPopout } from "./call-window";
 
 /** Attach a MediaStream to a <video>. `mirror` for the self-view. */
 function StreamVideo({
@@ -220,41 +241,162 @@ function VoiceBars() {
   );
 }
 
-function IncomingCallCard({ call }: { call: CallInfo }) {
-  const { acceptCall, declineCall } = useCall();
-  useRingTone("incoming");
+/** The card's own rings — tighter and slower than the panel's, and green while
+ *  a call is coming in so "someone wants you" reads before any text does. */
+function CardRings({ incoming }: { incoming: boolean }) {
+  return (
+    <>
+      {[0, 1].map((i) => (
+        <span
+          key={i}
+          className="pointer-events-none absolute rounded-full"
+          style={{
+            inset: -3,
+            border: `2px solid ${incoming ? "rgba(49,162,76,0.55)" : "rgba(255,255,255,0.35)"}`,
+            animation: `callRing 1.9s ${i * 0.75}s ease-out infinite`,
+          }}
+        />
+      ))}
+    </>
+  );
+}
+
+/** One of the card's paired actions, per the comp: full-width halves, pill
+ *  shaped, lifting slightly on hover. */
+function DockButton({
+  onClick,
+  label,
+  title,
+  icon,
+  background,
+  color = "#fff",
+}: {
+  onClick: () => void;
+  label: string;
+  /** Defaults to the label; spelled out where the label is a bare verb. */
+  title?: string;
+  icon?: React.ReactNode;
+  background: string;
+  color?: string;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      onClick={onClick}
+      title={title ?? label}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      className="flex flex-1 items-center justify-center gap-[9px] text-[15px]"
+      style={{
+        height: 46,
+        borderRadius: 23,
+        fontWeight: 650,
+        background,
+        color,
+        transition: "transform .12s, filter .15s",
+        transform: hover ? "translateY(-1px)" : "none",
+        filter: hover ? "brightness(1.08)" : "none",
+      }}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+/**
+ * The pre-connection surface for BOTH directions, per the comp's
+ * `renderCallCard`: a docked card rather than a takeover, so a ringing call
+ * never hides the conversation it's about.
+ *
+ * Receiving offers Decline / Accept; placing offers Mute / End, because those
+ * are the only two things worth doing while you wait.
+ */
+function CallDock({ call }: { call: CallInfo }) {
+  const { acceptCall, declineCall, endCall, toggleMic, micOn } = useCall();
+  const incoming = call.phase === "incoming";
+  useRingTone(incoming ? "incoming" : "outgoing");
+
   // In a group the caller and the conversation are different things, and you
   // need both to decide whether to pick up.
-  const subtitle =
-    call.kind === "group"
+  const subtitle = incoming
+    ? call.kind === "group"
       ? `${call.starter.name} · ${call.video ? "video" : "voice"} call`
-      : `Incoming ${call.video ? "video" : "voice"} call…`;
+      : `Incoming ${call.video ? "video" : "voice"} call…`
+    : call.kind === "group"
+      ? "Waiting for others…"
+      : call.video
+        ? "Ringing…"
+        : "Calling…";
+
   return (
-    <div className="animate-fade-in fixed right-5 top-5 z-[400] w-[320px] rounded-2xl border border-app-border bg-panel-2 p-4 shadow-[var(--app-shadow-lg)]">
-      <div className="flex items-center gap-3">
-        <PeerAvatar user={call.peer ?? call.starter} size={44} />
-        <div className="min-w-0">
-          <div className="truncate text-[15px] font-bold text-app-text">
-            {call.title}
-          </div>
-          <div className="truncate text-[12.5px] text-app-muted">{subtitle}</div>
+    <div
+      data-call-dock={incoming ? "incoming" : "outgoing"}
+      className="fixed z-[400] flex flex-col"
+      style={{
+        bottom: 26,
+        right: 26,
+        width: 352,
+        padding: 18,
+        gap: 16,
+        borderRadius: 26,
+        background: "rgba(30,31,34,0.97)",
+        backdropFilter: "blur(18px)",
+        border: "1px solid rgba(255,255,255,0.09)",
+        boxShadow: "0 24px 60px rgba(0,0,0,0.45)",
+        animation: "fadeUp .22s ease-out",
+      }}
+    >
+      <div className="flex min-w-0 items-center gap-3.5">
+        <div className="relative flex shrink-0">
+          <CardRings incoming={incoming} />
+          <PeerAvatar user={call.peer ?? call.starter} size={52} />
         </div>
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <div className="truncate text-[16.5px] font-bold text-white">{call.title}</div>
+          <div className="truncate text-[13.5px] text-white/60">{subtitle}</div>
+        </div>
+        <span className="ml-auto shrink-0 text-white/35">
+          {call.video ? <Video size={18} /> : <Phone size={18} />}
+        </span>
       </div>
-      <div className="mt-4 flex gap-2">
-        <button
-          onClick={declineCall}
-          className="flex flex-1 items-center justify-center gap-2 rounded-full py-2 text-[13px] font-semibold text-white"
-          style={{ background: "var(--app-red)" }}
-        >
-          <PhoneOff size={15} /> Decline
-        </button>
-        <button
-          onClick={() => void acceptCall()}
-          className="flex flex-1 items-center justify-center gap-2 rounded-full py-2 text-[13px] font-semibold text-white"
-          style={{ background: "var(--app-green)" }}
-        >
-          {call.video ? <Video size={15} /> : <Phone size={15} />} Accept
-        </button>
+      <div className="flex gap-3">
+        {incoming ? (
+          <>
+            <DockButton
+              onClick={declineCall}
+              label="Decline"
+              title="Decline call"
+              icon={<PhoneOff size={19} />}
+              background="#F4364C"
+            />
+            <DockButton
+              onClick={() => void acceptCall()}
+              label="Accept"
+              title="Accept call"
+              icon={call.video ? <Video size={19} /> : <Phone size={19} />}
+              background="#31A24C"
+            />
+          </>
+        ) : (
+          <>
+            <DockButton
+              onClick={toggleMic}
+              label={micOn ? "Mute" : "Unmute"}
+              title={micOn ? "Mute microphone" : "Unmute microphone"}
+              icon={micOn ? <Mic size={18} /> : <MicOff size={18} />}
+              background={micOn ? "rgba(255,255,255,0.12)" : "#fff"}
+              color={micOn ? "#fff" : "#111"}
+            />
+            <DockButton
+              onClick={endCall}
+              label="End"
+              title="End call"
+              icon={<PhoneOff size={19} />}
+              background="#F4364C"
+            />
+          </>
+        )}
       </div>
     </div>
   );
@@ -308,10 +450,21 @@ function ParticipantTile({
  * full-bleed when it's a video call), and 2+ peers become a grid of tiles with
  * the same rounded corners, name labels and backdrop.
  */
-function CallPanel({ call }: { call: CallInfo }) {
+function CallPanel({
+  call,
+  popped,
+  onPopOut,
+  onPopIn,
+}: {
+  call: CallInfo;
+  popped: boolean;
+  onPopOut: () => void;
+  onPopIn: () => void;
+}) {
   const { localStream, micOn, camOn, endCall, toggleMic, toggleCam } = useCall();
-  const ringing = call.phase === "outgoing";
-  useRingTone(ringing ? "outgoing" : null);
+  // Placing a call rings from the dock, so by the time the panel is on screen
+  // somebody has answered — what's left is waiting for their media.
+  const ringing = call.phase === "connecting";
   const peers = call.participants;
   const connected = peers.filter((p) => p.connected);
   const isVideo = call.video;
@@ -319,15 +472,7 @@ function CallPanel({ call }: { call: CallInfo }) {
   // avatar layout gives way to the stream.
   const live = isVideo && connected.length > 0;
 
-  const status = ringing
-    ? call.kind === "group"
-      ? "Waiting for others…"
-      : isVideo
-        ? "Ringing…"
-        : "Calling…"
-    : call.phase === "connecting"
-      ? "Connecting…"
-      : null;
+  const status = ringing ? "Connecting…" : null;
 
   const bg = live
     ? "radial-gradient(120% 120% at 50% 0%, #24344f 0%, #0e141d 70%)"
@@ -348,6 +493,13 @@ function CallPanel({ call }: { call: CallInfo }) {
           Muted
         </span>
       )}
+      <button
+        onClick={popped ? onPopIn : onPopOut}
+        title={popped ? "Return the call to the app window" : "Open call in a new window"}
+        className="ml-auto flex size-9 items-center justify-center rounded-full text-white/70 transition-colors hover:bg-white/[0.16] hover:text-white"
+      >
+        {popped ? <Minimize2 size={17} /> : <SquareArrowOutUpRight size={17} />}
+      </button>
     </div>
   );
 
@@ -520,10 +672,89 @@ function CallPanel({ call }: { call: CallInfo }) {
   );
 }
 
+/**
+ * What the app window shows while the call lives in its own window. Without
+ * this the call would simply vanish from here, which reads as "it dropped" —
+ * and if the popup ends up behind the main window, nothing would say otherwise.
+ */
+function PoppedOutCard({ call, onPopIn }: { call: CallInfo; onPopIn: () => void }) {
+  const { endCall } = useCall();
+  return (
+    <div
+      data-call-dock="popped"
+      className="fixed z-[400] flex flex-col"
+      style={{
+        bottom: 26,
+        right: 26,
+        width: 352,
+        padding: 18,
+        gap: 16,
+        borderRadius: 26,
+        background: "rgba(30,31,34,0.97)",
+        backdropFilter: "blur(18px)",
+        border: "1px solid rgba(255,255,255,0.09)",
+        boxShadow: "0 24px 60px rgba(0,0,0,0.45)",
+        animation: "fadeUp .22s ease-out",
+      }}
+    >
+      <div className="flex min-w-0 items-center gap-3.5">
+        <div className="shrink-0">
+          <PeerAvatar user={call.peer ?? call.starter} size={52} />
+        </div>
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <div className="truncate text-[16.5px] font-bold text-white">{call.title}</div>
+          <div className="truncate text-[13.5px] text-white/60">
+            {call.startedAt ? <CallTimer startedAt={call.startedAt} /> : "In another window"}
+          </div>
+        </div>
+        <span className="ml-auto shrink-0 text-white/35">
+          {call.video ? <Video size={18} /> : <Phone size={18} />}
+        </span>
+      </div>
+      <div className="flex gap-3">
+        <DockButton
+          onClick={onPopIn}
+          label="Bring back"
+          icon={<Minimize2 size={18} />}
+          background="rgba(255,255,255,0.12)"
+        />
+        <DockButton
+          onClick={endCall}
+          label="End"
+          title="End call"
+          icon={<PhoneOff size={19} />}
+          background="#F4364C"
+        />
+      </div>
+    </div>
+  );
+}
+
 /** Mounted once in the Shell — renders whichever call surface applies. */
 export function CallUI() {
   const { call } = useCall();
+  const { container, popOut, popIn } = useCallPopout();
+
+  // A popped-out window must not outlive the call it belongs to. CallUI stays
+  // mounted between calls, so the hook's unmount cleanup never fires here.
+  useEffect(() => {
+    if (!call) popIn();
+  }, [call, popIn]);
+
   if (!call) return null;
-  if (call.phase === "incoming") return <IncomingCallCard call={call} />;
-  return <CallPanel call={call} />;
+  // Ringing in either direction is a card, not a takeover — see CallDock.
+  if (call.phase === "incoming" || call.phase === "outgoing") {
+    return <CallDock call={call} />;
+  }
+
+  const panel = (
+    <CallPanel call={call} popped={container !== null} onPopOut={popOut} onPopIn={popIn} />
+  );
+  if (!container) return panel;
+  return (
+    <>
+      {createPortal(panel, container)}
+      <PoppedOutCard call={call} onPopIn={popIn} />
+    </>
+  );
 }

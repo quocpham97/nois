@@ -327,6 +327,18 @@
     transform: scaleY(1);
   }
 }
+/* The docked call card rises into place rather than appearing — it arrives
+   unprompted (an incoming call), so the motion is what draws the eye. */
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
 .animate-call-in {
   animation: callIn 0.25s ease-out;
 }

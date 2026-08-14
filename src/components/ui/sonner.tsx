@@ -10,6 +10,10 @@ const Toaster = ({ ...props }: ToasterProps) => {
   return (
     <Sonner
       theme={theme as ToasterProps["theme"]}
+      // Bottom-CENTRE, per the comp's renderToast — and load-bearing, not just
+      // cosmetic: the docked call card occupies the bottom-right corner, and
+      // sonner's default position would stack toasts on top of Accept/Decline.
+      position="bottom-center"
       className="toaster group"
       icons={{
         success: (

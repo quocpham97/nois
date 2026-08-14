@@ -119,13 +119,50 @@ meant for its peer. Clients announce their device id on connect
 
 ### The call surface
 
-`call-view.tsx` follows the comp's `renderCallOverlay`: a full-screen overlay
+The comp draws **two** surfaces rather than one that grows, and `call-view.tsx`
+follows that split:
+
+| Phase | Surface |
+| --- | --- |
+| `incoming` / `outgoing` | **Docked card**, bottom-right (`CallDock`, the comp's `renderCallCard`) |
+| `connecting` / `active` | **Full-screen panel** (`CallPanel`, the comp's `renderCallOverlay`) |
+
+The card is the point: a call that is only *ringing* — in either direction —
+shouldn't seize the window, so you can keep reading the conversation it's about
+while it rings. 352px, radius 26, dark glass over a blur, a pair of expanding
+rings on the avatar (green while a call is coming in, white while you're placing
+one), and two half-width actions: Decline/Accept when receiving, Mute/End when
+placing.
+
+**Toasts sit bottom-centre because of this**, per the comp's `renderToast`.
+That's load-bearing, not cosmetic: sonner's default bottom-right position stacks
+toasts directly on top of Accept/Decline.
+
+#### Popping the call out
+
+`call-window.tsx` opens the panel in its own OS window, the way Messenger does.
+It is a **React portal into a `window.open()`ed document**, not a second route:
+the same React tree renders into the popup, so the MediaStreams,
+PeerConnections and all call state stay exactly where they are. A second window
+navigated to a call URL would mean a second socket, a second device identity and
+a renegotiated call.
+
+The cost is that the popup starts empty, so its `<style>`/`<link>` tags are
+cloned from the opener and re-cloned on change (dev HMR rewrites them, and the
+theme toggle rewrites the root attributes). The popup is closed when the call
+ends, when the opener goes away, and when the user brings it back; the app window
+keeps a card saying where the call went, since otherwise a popup hidden behind
+the main window looks exactly like a dropped call.
+
+#### The panel
+
+`CallPanel` follows the comp's `renderCallOverlay`: a full-screen overlay
 (fade-in, radial backdrop that lifts once video is up), the conversation title,
 self picture-in-picture at 150×200, and 58px translucent controls floating at the
-bottom (hang-up bigger and red). An unanswered call pulses three expanding rings
-behind the avatar; a connected voice call shows a small equalizer so silence still
-looks live. Those three animations are CSS keyframes in `globals.css`
-(`callIn`, `callRing`, `barsPulse`).
+bottom (hang-up bigger and red). A call still connecting pulses three expanding
+rings behind the avatar; a connected voice call shows a small equalizer so silence
+still looks live. Those animations are CSS keyframes in `globals.css`
+(`callIn`, `callRing`, `barsPulse`, `fadeUp`).
 
 The comp only draws a 1:1 call, so the mesh **extends** that language rather than
 replacing it: one peer keeps the comp's centred layout (their video full-bleed
@@ -139,14 +176,14 @@ Two deliberate departures from the comp:
 - **No speaker toggle.** The comp has one, but it's a mobile idiom — the web has
   no earpiece/speaker concept, only `setSinkId` device selection. A control that
   did nothing would be worse than its absence.
-- **The overlay is modal.** The comp gives it `z-index: 300` over everything with
-  no minimize, so a call takes the whole window and you can't read the
-  conversation while you're in one. Worth revisiting with a design pass if
-  multitasking during calls matters.
+- **No "ended" card.** The comp keeps the card on screen after a declined or
+  unanswered call, offering Call back / Dismiss. Here the call simply ends and
+  the thread row records the outcome, which is the same information somewhere
+  more durable. Worth revisiting if redialling from the card is wanted.
 
-The incoming-call card is not from the comp (the mock has no incoming state) — it
-stays a non-blocking card in the top-right so a ringing call doesn't seize the UI
-before you've accepted it.
+The panel stays modal while connected, matching the comp's `z-index: 300` — but
+popping it into its own window is now the answer to multitasking during a call,
+rather than shrinking it in place.
 
 ### Multi-device
 

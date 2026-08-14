@@ -187,10 +187,15 @@ async function main() {
   await sleep(700);
   // The call surface shows the CONVERSATION, not the caller: while we're ringing
   // someone, their avatar belongs on screen, not our own.
+  // Placing a call now shows the comp's docked card, so the face to check is
+  // the card's 52px avatar rather than the panel's 150px one.
   const ringingFace = await callerPage.evaluate(() => {
-    const el = [...document.querySelectorAll("span")].find(
-      (s) => (s as HTMLElement).style.width === "150px",
-    );
+    const dock = document.querySelector("[data-call-dock]");
+    const el = dock
+      ? [...dock.querySelectorAll("span")].find(
+          (s) => getComputedStyle(s).width === "52px",
+        )
+      : null;
     return (el?.textContent ?? "").trim();
   });
   check(

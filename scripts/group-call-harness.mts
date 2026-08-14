@@ -207,7 +207,9 @@ async function main() {
       getComputedStyle(el).animationName.includes("callRing"),
     ).length,
   );
-  check(ringing === 3, `the outgoing call pulses (${ringing} rings animating)`);
+  // Two, not three: placing a call now shows the comp's docked CARD rather than
+  // the full-screen panel, and the card carries a tighter pair of rings.
+  check(ringing === 2, `the outgoing call pulses (${ringing} rings animating)`);
   if (process.argv.includes("--shots")) {
     await pageA.screenshot({ path: "/tmp/call-ringing.png" });
     await pageC.screenshot({ path: "/tmp/call-incoming.png" });
