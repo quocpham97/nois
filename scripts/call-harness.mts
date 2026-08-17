@@ -10,8 +10,11 @@
 //     A roster is a poor proxy for reachability — a 40-person group with three
 //     people online is a three-person group as far as a call is concerned — and
 //     the cap is what stops any group becoming a notification cannon
-//   - video is offered only when the whole group fits under the video cap (4)
-//   - the participant cap (6) is enforced and refusals are counted
+//   - video follows presence the same way, and because people can come online
+//     mid-call the video cap (4) is enforced at JOIN rather than guaranteed by
+//     the group's size
+//   - the participant cap is enforced by what the call CARRIES — 4 video, 6
+//     voice — and refusals are counted
 //   - one device per user per call: a second device DISPLACES the first, and the
 //     displacement is ordered ahead of the new device's announcement (that
 //     ordering is the entire self-echo guarantee)
@@ -282,7 +285,7 @@ async function main() {
   );
   check(
     smallStart?.ok === true && smallStart.video === true,
-    "a private group of 3 may use video (≤4)",
+    "3 people online may use video (≤4)",
   );
   check((await smallInv) !== null, "a member's device actually rings");
   if (smallStart?.ok) bob.emit("call:leave", { callId: smallStart.callId, groupId: smallGroup });
@@ -313,7 +316,7 @@ async function main() {
   );
   check(
     bigStart?.ok === true && bigStart.video === false,
-    "a group of 8 is voice-only (above the video cap)",
+    "8 people online is voice-only — past the video cap",
   );
   check((await bigInv) === null, "no member's device rings for a huddle");
   const live = await bigLive;
@@ -447,6 +450,56 @@ async function main() {
     bob.emit("call:leave", { callId: sfuCallId, groupId: smallGroup });
   }
 
+  // --- a video call cannot outgrow its cap --------------------------------------
+  // Video eligibility follows presence now, so the group can no longer guarantee
+  // the cap on its own: people who were offline when the call started can come
+  // online, see the banner and join. The ceiling has to hold at JOIN instead.
+  const growGroup = await makeGroup(bob, "call-grow-" + Date.now(), true, [
+    ALICE,
+    CAROL,
+    CROWD[0],
+    CROWD[1],
+  ]);
+  // Everyone except Alice steps away, so the call is offered video.
+  carol.disconnect();
+  crowd[0].disconnect();
+  crowd[1].disconnect();
+  await sleep(600);
+  const growStart = await emitWithAck<StartResult>(bob, "call:start", {
+    groupId: growGroup,
+    video: true,
+  });
+  check(
+    growStart?.ok === true && growStart.video === true,
+    "video is offered when only the ONLINE members would fit under the cap",
+  );
+  const growCallId = growStart?.ok ? growStart.callId : "";
+  // ...and now the absent ones come back and pile in.
+  const carolBack = await connect(CAROL, "carol-d1");
+  const crowd0Back = await connect(CROWD[0], "crowd-d0");
+  const crowd1Back = await connect(CROWD[1], "crowd-d1");
+  await sleep(400);
+  const growJoins: (JoinResult | null)[] = [];
+  for (const s of [aliceD1, carolBack, crowd0Back, crowd1Back]) {
+    growJoins.push(
+      await emitWithAck<JoinResult>(s, "call:join", { callId: growCallId, groupId: growGroup }),
+    );
+  }
+  const admittedVideo = growJoins.filter((r) => r?.ok).length;
+  check(
+    admittedVideo === 3,
+    `a video call admits 4 in total including the starter (admitted ${admittedVideo})`,
+  );
+  check(
+    growJoins.some((r) => r?.ok === false && r.reason === "full"),
+    "the 5th is refused — a video call can't grow past the VIDEO cap, only the voice one",
+  );
+  for (const s of [aliceD1, carolBack, crowd0Back, crowd1Back]) {
+    s.emit("call:leave", { callId: growCallId, groupId: growGroup });
+  }
+  bob.emit("call:leave", { callId: growCallId, groupId: growGroup });
+  await sleep(300);
+
   // --- crash-leave --------------------------------------------------------------
   const crashStart = await emitWithAck<StartResult>(bob, "call:start", {
     groupId: smallGroup,
@@ -497,12 +550,14 @@ async function main() {
   );
   aliceD1.emit("call:leave", { callId: crashCallId, groupId: smallGroup });
 
-  for (const s of [aliceD1, aliceD2, carol, ...crowd]) s.disconnect();
+  for (const s of [aliceD1, aliceD2, carol, carolBack, crowd0Back, crowd1Back, ...crowd]) {
+    s.disconnect();
+  }
 
   // Cleanup: harness users' membership/read rows and the test conversations.
   try {
     const pool = getPool();
-    const groupIds = [dmId, smallGroup, bigGroup, publicGroup, dormantGroup];
+    const groupIds = [dmId, smallGroup, bigGroup, publicGroup, dormantGroup, growGroup];
     await pool.query(`DELETE FROM message WHERE group_id = ANY($1)`, [groupIds]);
     await pool.query(`DELETE FROM group_member WHERE user_id = ANY($1)`, [[...ALL, ...dormant]]);
     await pool.query(`DELETE FROM read_cursor WHERE user_id = ANY($1)`, [ALL]);

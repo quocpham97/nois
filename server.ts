@@ -48,9 +48,10 @@ const port = Number(process.env.PORT) || 4000;
 
 // Call limits (see docs/group-calls-plan.md). Media is a full mesh, so every
 // participant uploads N−1 streams: the caps are about uplink and CPU, not policy.
-// CALL_MAX_VIDEO is enforced structurally rather than by counting participants —
-// video is only offered when the whole GROUP fits under it, so a call can never
-// grow past the cap and degrade someone already talking.
+// A call is capped by what it CARRIES, not by the group it's in — a video call
+// at 4, a voice call at 6 — and the ceiling is enforced when someone joins, so
+// a call that starts small can't quietly grow past it and degrade people already
+// talking. Which one applies is read off the callId (see `capacityOf`).
 const CALL_MAX_VOICE = 6;
 const CALL_MAX_VIDEO = 4;
 /** Largest private group whose members' devices ring; above this it's a huddle. */
@@ -1021,8 +1022,23 @@ app.prepare().then(async () => {
       store.listMemberIds(groupId).length <= CALL_RING_MAX;
     // Video needs the whole group to fit under the video cap, so a call can
     // never grow past it mid-session and degrade someone already talking.
-    const videoEligible = (groupId: string) =>
-      store.listMemberIds(groupId).length <= CALL_MAX_VIDEO;
+    // Video follows presence too: offered when everyone who could answer right
+    // now would fit under the video cap (starter + up to 3).
+    //
+    // That loses the structural guarantee the roster gave us — the group could
+    // no longer outgrow the cap, so nothing had to be counted — because people
+    // who were offline at start time can come online, see the banner and join.
+    // The cap is therefore enforced at JOIN instead, which needs one fact the
+    // room can't answer: whether this call is a video call. That fact rides in
+    // the callId rather than a server-side map, so the "no per-call state to
+    // keep consistent across nodes" property survives intact.
+    const videoEligible = (online: string[]) => online.length <= CALL_MAX_VIDEO - 1;
+    const VIDEO_CALL = "v-";
+    const newCallId = (video: boolean) => (video ? VIDEO_CALL : "") + randomUUID();
+    const isVideoCall = (callId: string) => callId.startsWith(VIDEO_CALL);
+    /** How many people this call can hold, given what it carries. */
+    const capacityOf = (callId: string) =>
+      isVideoCall(callId) ? CALL_MAX_VIDEO : CALL_MAX_VOICE;
 
     // Conversation-level liveness for the "Ongoing call · Join" affordance. For
     // ring-eligible groups (≤6 members) every member's own room gets it, so a
@@ -1060,8 +1076,6 @@ app.prepare().then(async () => {
       if (typeof groupId !== "string" || !store.isMember(groupId, userId)) {
         return reply({ ok: false, reason: "unauthorized" });
       }
-      const callId = randomUUID();
-      const effectiveVideo = !!video && videoEligible(groupId);
       const others = store.listMemberIds(groupId).filter((id) => id !== userId);
       // Adapter-aware, so this is the real answer across nodes rather than the
       // one this process happens to know.
@@ -1069,6 +1083,8 @@ app.prepare().then(async () => {
         others.map(async (id) => ((await io.in("user:" + id).fetchSockets()).length > 0 ? id : null)),
       );
       const online = presence.filter((id): id is string => id !== null);
+      const effectiveVideo = !!video && videoEligible(online);
+      const callId = newCallId(effectiveVideo);
       // A 1:1 call with nobody on the other end has failed; a GROUP call with
       // nobody online is a huddle you can legitimately sit in and wait.
       if (store.isDm(groupId) && online.length === 0) {
@@ -1126,7 +1142,7 @@ app.prepare().then(async () => {
         });
       }
       const remaining = present.filter((s) => s.data.userId !== userId);
-      if (remaining.length >= CALL_MAX_VOICE) {
+      if (remaining.length >= capacityOf(callId)) {
         // Counted, not just refused: "frequent cap rejections" is the agreed
         // trigger for building an SFU, and a trigger nobody can observe is not
         // a trigger (see docs/group-calls-plan.md).
@@ -1143,7 +1159,7 @@ app.prepare().then(async () => {
       socket.to("user:" + userId).emit("call:handled", { callId });
       reply({
         ok: true,
-        video: videoEligible(groupId),
+        video: isVideoCall(callId),
         participants: remaining.map((s) => ({
           userId: s.data.userId as string,
           deviceId: (s.data.deviceId as string | undefined) ?? "",
@@ -1181,7 +1197,7 @@ app.prepare().then(async () => {
       // once and we're simply the first one back.
       if (present.length === 0 && !seat) return reply({ ok: false, reason: "gone" });
       const others = present.filter((s) => s.data.userId !== userId);
-      if (others.length >= CALL_MAX_VOICE) {
+      if (others.length >= capacityOf(callId)) {
         // Our seat was taken during the outage. Rare, and honest.
         callCapRejections += 1;
         return reply({ ok: false, reason: "full" });

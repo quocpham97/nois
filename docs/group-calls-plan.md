@@ -19,9 +19,11 @@ Deviations from the plan as written, and why:
   group room (whoever has the conversation open). Opening a big group *after* a
   huddle starts shows no Join bar. Fixing it needs shared state, which is the same
   trade-off as above.
-- **The video cap is enforced structurally**, by only offering video when the whole
-  group is ≤4 members, so the participant cap the server counts is just the voice
-  cap of 6. Same guarantee, no extra state.
+- **The video cap was enforced structurally**, by only offering video when the
+  whole group is ≤4 members, so the participant cap the server counts was just
+  the voice cap of 6. **Superseded 2026-08-17** along with the ring rule: video
+  follows presence now, so the cap is enforced at join instead — see
+  [the revision](#revision-ring-who-can-answer).
 - **TURN**: prerequisite 2 is **met** (2026-08-14). Credentials are minted
   server-side (`ice:servers`) from a Cloudflare Realtime key rather than inlined
   into the bundle, with the old `NEXT_PUBLIC_TURN_*` vars kept as a fallback.
@@ -219,6 +221,21 @@ The instability the original rule warned about is real and accepted: whether a
 call rings now depends on who happens to be connected. That is the intended
 behaviour rather than a side effect — ringing people who cannot answer was never
 the goal.
+
+**Video moved with it**, and cost more. It was offered only when the whole group
+fit under the video cap, which meant the cap needed no enforcement at all: the
+group couldn't outgrow it. Following presence breaks exactly that — someone
+offline when the call started can come online, see the banner and join — so the
+guarantee had to be rebuilt somewhere. It now holds at **join**: a call is capped
+by what it carries, 4 for video and 6 for voice, and the 5th person into a video
+call is refused rather than silently degrading everyone.
+
+That needs one fact the room can't derive — whether this is a video call — so it
+rides in the **callId** (`v-` prefix) rather than a server-side map. Ugly at
+first glance, but it keeps the property the whole design rests on: no per-call
+state that has to be kept consistent across nodes. Refusing rather than degrading
+also matches the original reasoning, which chose a predictable limit over a
+surprise landing on people already talking.
 
 ## Client (`call-context.tsx`)
 

@@ -23,10 +23,10 @@ group path. The sizing rules below and the reasoning behind them are in
 
 | | |
 | --- | --- |
-| Participants | 6 voice, 4 video |
+| Participants | 6 voice, 4 video — capped by what the call **carries**, enforced when someone joins |
 | Rings | the members who are **online**, when they'd all fit in the call (≤5 others). Privacy and roster size don't enter into it |
 | Huddle — no ring, joinable from the conversation | more online members than would fit, or nobody online at all |
-| Video offered | only when the whole group is ≤4 members, so a call can't outgrow the cap mid-session and degrade someone already talking |
+| Video offered | when the **online** members would fit under the video cap (≤3 others). Because latecomers can come online and join, the cap is enforced at join time rather than guaranteed by the group's size |
 | Devices per user per call | 1 — a second device displaces the first |
 
 ## The call state machine
@@ -94,7 +94,7 @@ wrong, and the thing to revisit if this scales out.
 | --- | --- | --- |
 | `call:start` | starter → server | **validates membership**, opens the room, rings if eligible, acks `{callId, video, ringing}` or `offline`/`unauthorized` |
 | `call:invite` | server → **online** members' devices | rings when they'd all fit in the call |
-| `call:join` | joiner → server | validates membership, refuses `full`/`gone`, displaces the joiner's own other device, acks the current roster |
+| `call:join` | joiner → server | validates membership, refuses `full` at the call's own cap (4 video / 6 voice) or `gone`, displaces the joiner's own other device, acks the current roster |
 | `call:rejoin` | reconnecting device → server | reclaims a held seat after a websocket blip; never displaces another device, announces `call:joined` so peers heal the leg |
 | `call:joined` / `call:left` | server → the room | roster changes, per device |
 | `call:decline` | invitee → server | relays `call:declined` into the room (`declined` or `busy`) |
