@@ -1001,14 +1001,23 @@ app.prepare().then(async () => {
     const callRoom = (groupId: string, callId: string) =>
       `call:${groupId}:${callId}`;
 
-    // Who may be rung: private groups of at most CALL_RING_MAX members. A public
-    // group NEVER rings at any size — `group:join` records anyone who so much as
-    // opens one as a member (E2EE sender keys target the explicit roster), so a
-    // public roster is a list of people who once looked, not people who agreed
-    // to be reachable. Above the cap, and for every public group, the call is a
-    // huddle: joinable from the conversation, nobody's device rings.
-    const ringEligible = (groupId: string) =>
-      !store.isPublicGroup(groupId) &&
+    // Who may be rung: the members who are ONLINE right now, provided they'd all
+    // fit in the call. Ringing is about reaching people who can actually answer,
+    // and a roster is a poor proxy for that — a 40-person group with three
+    // people online is, for the purposes of a call, a three-person group.
+    //
+    // The cap still does the load-bearing work. It bounds a ring to at most the
+    // voice cap, so "everyone rung can get in" stays true and no group, however
+    // large, can be turned into a notification cannon. Note this is NOT much of
+    // a new capability for an attacker: a stranger can already ring you one to
+    // one by opening a DM, so the ceiling here is an amplification of something
+    // already possible, not a new door.
+    const ringEligible = (online: string[]) =>
+      online.length > 0 && online.length <= CALL_RING_MAX - 1;
+
+    /** Small enough to tell every member's devices directly rather than only
+     *  whoever has the conversation open. About fanout cost, not about ringing. */
+    const compactGroup = (groupId: string) =>
       store.listMemberIds(groupId).length <= CALL_RING_MAX;
     // Video needs the whole group to fit under the video cap, so a call can
     // never grow past it mid-session and degrade someone already talking.
@@ -1024,7 +1033,7 @@ app.prepare().then(async () => {
       groupId: string,
       payload: { callId: string; video: boolean; starterId: string },
     ) => {
-      if (ringEligible(groupId)) {
+      if (compactGroup(groupId)) {
         for (const id of store.listMemberIds(groupId)) {
           io.to("user:" + id).emit("call:ongoing", { groupId, ...payload });
         }
@@ -1033,7 +1042,7 @@ app.prepare().then(async () => {
       }
     };
     const notifyCallOver = (groupId: string, callId: string) => {
-      if (ringEligible(groupId)) {
+      if (compactGroup(groupId)) {
         for (const id of store.listMemberIds(groupId)) {
           io.to("user:" + id).emit("call:over", { groupId, callId });
         }
@@ -1054,19 +1063,24 @@ app.prepare().then(async () => {
       const callId = randomUUID();
       const effectiveVideo = !!video && videoEligible(groupId);
       const others = store.listMemberIds(groupId).filter((id) => id !== userId);
-      const ringing = ringEligible(groupId) && others.length > 0;
-      if (ringing) {
-        // Adapter-aware online check so the starter gets instant "unavailable"
-        // feedback instead of ringing an empty room. Huddles skip it: starting
-        // one alone and waiting for people to join is the whole point.
-        const online = await Promise.all(
-          others.map(async (id) => (await io.in("user:" + id).fetchSockets()).length > 0),
-        );
-        if (!online.some(Boolean)) return reply({ ok: false, reason: "offline" });
+      // Adapter-aware, so this is the real answer across nodes rather than the
+      // one this process happens to know.
+      const presence = await Promise.all(
+        others.map(async (id) => ((await io.in("user:" + id).fetchSockets()).length > 0 ? id : null)),
+      );
+      const online = presence.filter((id): id is string => id !== null);
+      // A 1:1 call with nobody on the other end has failed; a GROUP call with
+      // nobody online is a huddle you can legitimately sit in and wait.
+      if (store.isDm(groupId) && online.length === 0) {
+        return reply({ ok: false, reason: "offline" });
       }
+      const ringing = ringEligible(online);
       socket.join(callRoom(groupId, callId));
       if (ringing) {
-        for (const id of others) {
+        // Only the people who can pick up. Ringing a device that isn't there
+        // achieves nothing, and counting them towards the cap would silence
+        // calls in groups whose roster is mostly dormant.
+        for (const id of online) {
           io.to("user:" + id).emit("call:invite", {
             callId,
             groupId,

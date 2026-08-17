@@ -131,6 +131,10 @@ the decision was meant to prevent. Worth an explicit harness assertion (below).
 
 ### Who rings
 
+**Superseded 2026-08-17 — ringing now follows PRESENCE.** The rule below is kept
+because its reasoning still explains the cap; only the thing being counted
+changed. See [Revision: ring who can answer](#revision-ring-who-can-answer).
+
 Ring only when the group is **private and has ≤6 members** (1 starter + up to 5
 invitees); everything else is a huddle. Concretely: a DM (2 members) rings as it
 does today; a private group of 3–6 rings; a private group of 7+ and **every
@@ -181,6 +185,40 @@ Enforce all of this server-side; the client's copy of the rule is a UI hint only
 
 The first answer must **not** stop the others' ringing: the current `handled`
 fanout has to become per-user (stop *my* other devices), not per-call.
+
+### Revision: ring who can answer
+
+**Changed 2026-08-17.** Ringing now counts the members who are **online** rather
+than the roster, and privacy no longer enters into it:
+
+> Ring the online members, provided they'd all fit in the call (≤5 others).
+> Otherwise it's a huddle.
+
+What went wrong with the original rule: a roster is a poor proxy for
+reachability. Every group in the real workspace was public, so *nothing ever
+rang* — a call in a 3-person group was announced by a silent banner nobody was
+looking at. Meanwhile a 40-person group with three people online is, for the
+purposes of a call, a three-person group; counting the dormant 37 against the cap
+silenced exactly the calls that would have worked.
+
+What survives unchanged is the part that was actually load-bearing. **The cap
+still bounds a ring to at most the voice cap**, so "everyone rung can get in"
+holds and no group, at any size, can be turned into a notification cannon.
+
+What we gave up is the "public groups never ring" defense, and it's worth being
+precise about the delta rather than waving it through. The concern was that
+opening a public group makes you a member (`server.ts:366`), so its roster is
+people who looked, not people who agreed to be reachable — and now those people
+can be rung. The mitigating argument: **a stranger can already ring you one-to-one
+by opening a DM**, so this is an amplification of an existing capability
+(bounded at 5) rather than a new door. If that trade stops looking worth it, the
+narrow fix is to reinstate the public-group check for groups above some size —
+the presence rule and the public rule are independent.
+
+The instability the original rule warned about is real and accepted: whether a
+call rings now depends on who happens to be connected. That is the intended
+behaviour rather than a side effect — ringing people who cannot answer was never
+the goal.
 
 ## Client (`call-context.tsx`)
 
@@ -276,7 +314,7 @@ map, plus the server room protocol. Phases 2–3 are additive.
 | Question | Decision |
 | --- | --- |
 | Participant cap | **6 voice / 4 video.** Covers informal group calling; frequent cap rejections in telemetry are the trigger to build an SFU (hence the counter in Phase 1). |
-| Ring vs huddle | **Ring at ≤6 group members, private groups only** (1 starter + 5 invitees), matching the voice cap so everyone rung can get in. 7+ and all public groups get the silent "Join Call" banner. Calls in 5–6 member groups are voice-only, which is what keeps the video cap from being hit mid-call. |
+| Ring vs huddle | ~~Ring at ≤6 group members, private groups only~~ — **superseded 2026-08-17**: ring the members who are ONLINE, when they'd all fit in the call, regardless of privacy (see [the revision](#revision-ring-who-can-answer)). The cap still matches the voice cap so everyone rung can get in; too many online, or none, gets the silent "Join Call" banner. Calls in 5–6 member groups are voice-only, which is what keeps the video cap from being hit mid-call. |
 | Multi-device | **Migrate on join.** Two live devices per user would loop audio, so the newer join displaces the older via `call:kicked { reason: "joined_on_another_device" }` — completed before the new device is announced. |
 | Roster metadata | **Accepted as standard**, matching Signal/WhatsApp/Matrix, and disclosed in `PrivacyPanel` with the sentence quoted above. |
 

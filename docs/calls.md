@@ -24,8 +24,8 @@ group path. The sizing rules below and the reasoning behind them are in
 | | |
 | --- | --- |
 | Participants | 6 voice, 4 video |
-| Rings | private groups of ≤6 members (a DM is 2) |
-| Huddle — no ring, joinable from the conversation | private groups of 7+, and **every** public group at any size |
+| Rings | the members who are **online**, when they'd all fit in the call (≤5 others). Privacy and roster size don't enter into it |
+| Huddle — no ring, joinable from the conversation | more online members than would fit, or nobody online at all |
 | Video offered | only when the whole group is ≤4 members, so a call can't outgrow the cap mid-session and degrade someone already talking |
 | Devices per user per call | 1 — a second device displaces the first |
 
@@ -93,7 +93,7 @@ wrong, and the thing to revisit if this scales out.
 | Event | Direction | Server does |
 | --- | --- | --- |
 | `call:start` | starter → server | **validates membership**, opens the room, rings if eligible, acks `{callId, video, ringing}` or `offline`/`unauthorized` |
-| `call:invite` | server → members' devices | rings (ring-eligible groups only) |
+| `call:invite` | server → **online** members' devices | rings when they'd all fit in the call |
 | `call:join` | joiner → server | validates membership, refuses `full`/`gone`, displaces the joiner's own other device, acks the current roster |
 | `call:rejoin` | reconnecting device → server | reclaims a held seat after a websocket blip; never displaces another device, announces `call:joined` so peers heal the leg |
 | `call:joined` / `call:left` | server → the room | roster changes, per device |
@@ -105,11 +105,11 @@ wrong, and the thing to revisit if this scales out.
 
 `call:start` and `call:join` are the server-validated steps — they create UI out
 of nothing — and both check **membership**, never `canAccess`: read access to a
-public group must not be enough to place a call in it. The online check uses
-`fetchSockets()` and fast-fails `offline` rather than ringing an empty room;
-huddles skip it, since starting one alone and waiting for people is the point.
-Everything after routes by `callId` and is dropped client-side for ids a client
-doesn't recognize.
+public group must not be enough to place a call in it. Presence is resolved with
+`fetchSockets()` (adapter-aware, so correct across nodes) and decides both who
+rings and whether a **DM** fast-fails `offline`; a group with nobody online is a
+huddle you can legitimately sit in and wait. Everything after routes by `callId`
+and is dropped client-side for ids a client doesn't recognize.
 
 Signaling is addressed **per device**. Routing by user would deliver a peer's
 offer to every device that person has online, which is unsound in a mesh: a
@@ -344,7 +344,8 @@ page init script, so nothing in the app has to expose them for testing.
   [the plan](./group-calls-plan.md#why-not-an-sfu-first)); capacity refusals are
   counted server-side as the trigger to reconsider.
 - **Huddle discovery is start-time only.** `call:ongoing` reaches members' user
-  rooms for ring-eligible groups, but for a huddle it only reaches the group room
+  rooms for groups small enough to fan out to (≤6 members), but for a bigger one
+  it only reaches the group room
   — whoever has the conversation open. Someone who opens a big group *after* a
   huddle started sees no Join bar until the next call event. Fixing it needs
   shared state (or a room scan) rather than a derived rule.

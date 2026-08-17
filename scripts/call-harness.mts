@@ -6,9 +6,10 @@
 // per-call server state. What must hold:
 //   - only MEMBERS may start or join a call (read access to a public group is
 //     not enough)
-//   - who rings: private groups of ≤6 members. Public groups never ring at any
-//     size — anyone who opens one is recorded as a member, so its roster is a
-//     list of people who looked, not people who agreed to be reachable
+//   - who rings: the members who are ONLINE, when they'd all fit in the call.
+//     A roster is a poor proxy for reachability — a 40-person group with three
+//     people online is a three-person group as far as a call is concerned — and
+//     the cap is what stops any group becoming a notification cannon
 //   - video is offered only when the whole group fits under the video cap (4)
 //   - the participant cap (6) is enforced and refusals are counted
 //   - one device per user per call: a second device DISPLACES the first, and the
@@ -267,7 +268,7 @@ async function main() {
   bob.emit("call:leave", { callId, groupId: dmId });
   check((await bobOver)?.callId === callId, "the last participant out ends the call (call:over)");
 
-  // --- who rings: private ≤6, public never, huddle above -----------------------
+  // --- who rings: the ONLINE members, when they'd all fit in the call ----------
 
   const smallGroup = await makeGroup(bob, "call-small-" + Date.now(), true, [ALICE, CAROL]);
   const smallInv = waitFor<InviteRelay>(aliceD1, "call:invite");
@@ -277,7 +278,7 @@ async function main() {
   });
   check(
     smallStart?.ok === true && smallStart.ringing === true,
-    "a private group of 3 rings its members",
+    "a group of 3 with everyone online rings them",
   );
   check(
     smallStart?.ok === true && smallStart.video === true,
@@ -308,7 +309,7 @@ async function main() {
   });
   check(
     bigStart?.ok === true && bigStart.ringing === false,
-    "a private group of 8 does NOT ring — it's a huddle",
+    "8 members all online is past the cap — a huddle, so nobody rings",
   );
   check(
     bigStart?.ok === true && bigStart.video === false,
@@ -328,11 +329,36 @@ async function main() {
     video: false,
   });
   check(
-    pubStart?.ok === true && pubStart.ringing === false,
-    "a PUBLIC group never rings, even at 2 members",
+    pubStart?.ok === true && pubStart.ringing === true,
+    "a PUBLIC group rings too — reachability, not privacy, decides",
   );
-  check((await pubInv) === null, "nobody's device rings in a public group");
+  check((await pubInv) !== null, "a public group member's device actually rings");
   if (pubStart?.ok) bob.emit("call:leave", { callId: pubStart.callId, groupId: publicGroup });
+
+  // The case the whole rule exists for: a group far past the cap on paper, but
+  // with almost nobody actually connected. Under a roster-counted rule this was
+  // a silent huddle; counting who can answer, it rings the one person who can.
+  const dormant = ["z1", "z2", "z3", "z4", "z5"].map((c) => `call-${c}@offline`);
+  const dormantGroup = await makeGroup(bob, "call-dormant-" + Date.now(), false, [
+    ALICE,
+    ...dormant,
+  ]);
+  const dormantInv = waitFor<InviteRelay>(aliceD1, "call:invite");
+  const dormantStart = await emitWithAck<StartResult>(bob, "call:start", {
+    groupId: dormantGroup,
+    video: false,
+  });
+  check(
+    dormantStart?.ok === true && dormantStart.ringing === true,
+    "a 7-member group with one member online RINGS that member",
+  );
+  check(
+    (await dormantInv) !== null,
+    "the online member's device is the one that rings",
+  );
+  if (dormantStart?.ok) {
+    bob.emit("call:leave", { callId: dormantStart.callId, groupId: dormantGroup });
+  }
 
   // --- capacity ----------------------------------------------------------------
   // The huddle group has 8 members; the cap is 6, so the 7th join is refused.
@@ -476,9 +502,9 @@ async function main() {
   // Cleanup: harness users' membership/read rows and the test conversations.
   try {
     const pool = getPool();
-    const groupIds = [dmId, smallGroup, bigGroup, publicGroup];
+    const groupIds = [dmId, smallGroup, bigGroup, publicGroup, dormantGroup];
     await pool.query(`DELETE FROM message WHERE group_id = ANY($1)`, [groupIds]);
-    await pool.query(`DELETE FROM group_member WHERE user_id = ANY($1)`, [ALL]);
+    await pool.query(`DELETE FROM group_member WHERE user_id = ANY($1)`, [[...ALL, ...dormant]]);
     await pool.query(`DELETE FROM read_cursor WHERE user_id = ANY($1)`, [ALL]);
     await pool.query(`DELETE FROM "group" WHERE id = ANY($1)`, [groupIds]);
     await pool.end();
