@@ -163,6 +163,12 @@ const STUN_ONLY: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
  *  the product's central promise for participant headroom. */
 const SFU_ENABLED = process.env.NEXT_PUBLIC_CALL_TRANSPORT === "sfu";
 
+/** How long to wait for a group's MLS state to converge before giving up on an
+ *  encrypted call. Seconds, because establishing it means publishing key
+ *  packages, ordering a commit and delivering Welcomes — not a local lookup. */
+const MLS_KEY_WAIT_MS = 20_000;
+const MLS_KEY_RETRY_MS = 750;
+
 /** A browser that can't do Encoded Transform can't seal frames, and an SFU call
  *  it couldn't seal would be a call the server can read. There is no downgrade
  *  path on purpose — refuse, and say why. */
@@ -388,20 +394,50 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       const fc = frameCryptoRef.current;
       if (!fc) return;
       const derived = await exportCallKey(groupId, callId);
-      if (!derived) {
-        // No MLS state means no key agreement, so there is no safe way to run
-        // this call through a server. Refuse rather than fall back in the clear.
-        if (callRef.current?.callId === callId) {
-          toast.error("This conversation can't hold an encrypted group call");
-          endCallRef.current();
-        }
-        return;
-      }
-      if (keyEpochsRef.current.has(derived.epoch)) return;
+      // A rotation check that finds nothing must NOT end a call that is already
+      // running on a key it holds — the epoch it would rotate to simply isn't
+      // available yet, and the frames in flight are still openable.
+      if (!derived || keyEpochsRef.current.has(derived.epoch)) return;
       keyEpochsRef.current.add(derived.epoch);
       fc.addKey(derived.epoch, derived.key);
     },
     [exportCallKey],
+  );
+
+  /**
+   * Get the FIRST media key, waiting for MLS to converge rather than refusing on
+   * the spot.
+   *
+   * Establishing a group's MLS state is a round trip, not a lookup: key packages
+   * have to be published, a commit ordered and Welcomes delivered. In a group
+   * that was just created — or that this device only just joined — none of that
+   * has happened at the instant somebody presses call, and the old behaviour
+   * (refuse immediately) made "create a group, call in it" fail permanently even
+   * though it would have worked moments later.
+   *
+   * Waiting is safe rather than a compromise: the worker DROPS frames it can't
+   * seal, so a call with no key yet is silent, never readable. The cost of
+   * retrying is latency; the cost of not waiting was the feature.
+   */
+  const awaitFirstKey = useCallback(
+    async (callId: string, groupId: string) => {
+      const deadline = Date.now() + MLS_KEY_WAIT_MS;
+      for (;;) {
+        if (callRef.current?.callId !== callId) return; // call went away
+        if (!frameCryptoRef.current) return;
+        await pumpKeys(callId, groupId);
+        if (keyEpochsRef.current.size > 0) return;
+        if (Date.now() >= deadline) break;
+        await new Promise((r) => setTimeout(r, MLS_KEY_RETRY_MS));
+      }
+      // Out of time. Refusing is still right — running the call through a server
+      // we can't encrypt for is the one thing that isn't allowed — but now it
+      // means "couldn't", not "won't".
+      if (callRef.current?.callId !== callId) return;
+      toast.error("Couldn't set up encryption for this call");
+      endCallRef.current();
+    },
+    [pumpKeys],
   );
 
   /** The socket-backed proxy the SFU transport calls. Every request is scoped
@@ -518,9 +554,10 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       }
       const frameCrypto = createFrameCrypto();
       frameCryptoRef.current = frameCrypto;
-      // Keys arrive a moment later; frames sent before then fail to seal and
-      // are dropped by the worker rather than sent in the clear.
-      void pumpKeys(callId, groupId);
+      // Keys arrive a moment later — possibly several seconds later, if this
+      // group's MLS state has to be established first. Frames until then fail
+      // to seal and are dropped by the worker rather than sent in the clear.
+      void awaitFirstKey(callId, groupId);
       const transport = createSfuTransport({
         ...common,
         api: sfuApi(callId, groupId),
@@ -529,7 +566,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       transportRef.current = transport;
       return transport;
     },
-    [sendSignal, patchCall, sfuApi, pumpKeys],
+    [sendSignal, patchCall, sfuApi, awaitFirstKey],
   );
 
   // Rekey while a call is up. Polling rather than subscribing to MLS commits:

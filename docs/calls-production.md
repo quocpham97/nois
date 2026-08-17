@@ -453,6 +453,16 @@ dashboard.
 | Wire types | `Sfu*` in `src/lib/socket-events.ts` |
 | Selection | `SFU_ENABLED` in `call-context.tsx` (`openTransport`) |
 
+**The media key is established, not looked up** (fixed 2026-08-17). A group
+nobody has messaged in holds no MLS state at all, so the original "no state →
+refuse the call" made *create a group, then call in it* fail permanently even
+though it would have worked a moment later. `exportCallKey` now runs
+`ensureMlsGroup` under the MLS lock — which publishes the commit that creates the
+group — and `awaitFirstKey` retries for `MLS_KEY_WAIT_MS` (20s) before giving up.
+Waiting is safe rather than a compromise: the worker DROPS frames it cannot seal,
+so a call with no key yet is silent, never readable. Rotation checks deliberately
+never end a live call — only the first key can refuse one.
+
 **Two Realtime sessions per client**, each one PeerConnection: a publisher that
 pushes our tracks once no matter how many people listen, and a subscriber that
 pulls everyone else. Splitting them keeps renegotiation — which happens on

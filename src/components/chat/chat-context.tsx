@@ -3456,9 +3456,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
    */
   const exportCallKey = useCallback(
     async (groupId: string, callId: string) => {
-      if (!MLS_ENABLED) return null;
-      const state = await mlsLoadState(groupId);
-      if (!state) return null; // no MLS group (a DM, or we're not a member yet)
+      if (!MLS_ENABLED || isDm(groupId)) return null;
+      // ESTABLISH the group, don't merely read it. A group nobody has messaged
+      // in yet holds no MLS state at all, so waiting for some to appear would
+      // wait forever — `ensureMlsGroup` is what publishes the commit that
+      // creates it. Under the lock, like every other path that can mutate group
+      // state. Still returns null while co-members haven't published their key
+      // packages, which is transient and worth retrying (see call-context).
+      const state = await withMlsLock(groupId, () => ensureMlsGroup(groupId));
+      if (!state) return null;
       const mls = await loadMls();
       return {
         epoch: mls.mlsEpoch(state),
@@ -3470,7 +3476,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         ),
       };
     },
-    [mlsLoadState],
+    [ensureMlsGroup, withMlsLock, isDm],
   );
 
   const logCallEvent = useCallback(
