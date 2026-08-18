@@ -47,6 +47,7 @@ import type {
   CallPeer,
   CallSignalRelay,
   IceServersResult,
+  SfuTracksResponse,
 } from "@/lib/socket-events";
 import {
   type CallTransport,
@@ -168,6 +169,11 @@ const SFU_ENABLED = process.env.NEXT_PUBLIC_CALL_TRANSPORT === "sfu";
  *  packages, ordering a commit and delivering Welcomes — not a local lookup. */
 const MLS_KEY_WAIT_MS = 20_000;
 const MLS_KEY_RETRY_MS = 750;
+
+/** A dropped socket costs the SFU transport its media entirely, where the mesh
+ *  only loses an ICE candidate — so its requests ride out a reconnect. */
+const SFU_RETRIES = 5;
+const SFU_RETRY_MS = 600;
 
 /** A browser that can't do Encoded Transform can't seal frames, and an SFU call
  *  it couldn't seal would be a call the server can read. There is no downgrade
@@ -446,48 +452,84 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   const sfuApi = useCallback(
     (callId: string, groupId: string): SfuApi => {
       const scope = { callId, groupId };
-      const warn = (reason: string) => {
-        console.warn("[call] sfu request failed:", reason);
-        if (reason === "unconfigured") {
-          toast.error("This deployment has no SFU configured");
+
+      /**
+       * One proxied request, retried across a websocket blip.
+       *
+       * Every SFU step is a request/ack round trip where the mesh's signaling
+       * was fire-and-forget, which makes this transport far more brittle than
+       * the mesh in exactly the situation calls meet most: a socket that drops
+       * for a second. The mesh shrugs that off (ICE retries, and `call:rejoin`
+       * puts us back in the room); an SFU setup that lost its ack would leave
+       * the call running with NO media, permanently. The socket comes back on
+       * its own in about a second, so these simply wait for it.
+       *
+       * `unauthorized` is retried too: right after a reconnect we're briefly
+       * out of the call room until `call:rejoin` lands, which looks identical
+       * to a genuine refusal. Only `unconfigured` is treated as final.
+       */
+      const attempt = async <T,>(
+        once: () => Promise<{ value: T } | { fail: string }>,
+      ): Promise<T | null> => {
+        for (let i = 0; i < SFU_RETRIES; i++) {
+          const r = await once();
+          if ("value" in r) return r.value;
+          if (r.fail === "unconfigured") {
+            console.warn("[call] sfu request failed: unconfigured");
+            toast.error("This deployment has no SFU configured");
+            return null;
+          }
+          console.warn(`[call] sfu request failed: ${r.fail} (try ${i + 1}/${SFU_RETRIES})`);
+          await new Promise((res) => setTimeout(res, SFU_RETRY_MS));
         }
+        return null;
       };
+
       return {
         session: () =>
-          new Promise((resolve) => {
-            if (!socket) return resolve(null);
-            socket.timeout(10_000).emit("sfu:session", scope, (err, res) => {
-              if (err || !res || !res.ok) {
-                warn(!err && res && !res.ok ? res.reason : "timeout");
-                return resolve(null);
-              }
-              resolve(res.sessionId);
-            });
-          }),
+          attempt<string>(
+            () =>
+              new Promise((resolve) => {
+                if (!socket) return resolve({ fail: "no socket" });
+                socket.timeout(10_000).emit("sfu:session", scope, (err, res) => {
+                  if (err) return resolve({ fail: String(err) });
+                  if (!res?.ok) return resolve({ fail: res?.reason ?? "error" });
+                  resolve({ value: res.sessionId });
+                });
+              }),
+          ),
         tracks: (sessionId, body) =>
-          new Promise((resolve) => {
-            if (!socket) return resolve(null);
-            socket
-              .timeout(10_000)
-              .emit("sfu:tracks", { ...scope, sessionId, body }, (err, res) => {
-                if (err || !res || !res.ok) {
-                  warn(!err && res && !res.ok ? res.reason : "timeout");
-                  return resolve(null);
-                }
-                resolve(res.result);
-              });
-          }),
-        renegotiate: (sessionId, sessionDescription) =>
-          new Promise((resolve) => {
-            if (!socket) return resolve(false);
-            socket
-              .timeout(10_000)
-              .emit(
-                "sfu:renegotiate",
-                { ...scope, sessionId, body: { sessionDescription } },
-                (err, res) => resolve(!err && !!res?.ok),
-              );
-          }),
+          attempt<SfuTracksResponse>(
+            () =>
+              new Promise((resolve) => {
+                if (!socket) return resolve({ fail: "no socket" });
+                socket
+                  .timeout(10_000)
+                  .emit("sfu:tracks", { ...scope, sessionId, body }, (err, res) => {
+                    if (err) return resolve({ fail: String(err) });
+                    if (!res?.ok) return resolve({ fail: res?.reason ?? "error" });
+                    resolve({ value: res.result });
+                  });
+              }),
+          ),
+        renegotiate: async (sessionId, sessionDescription) =>
+          (await attempt<true>(
+            () =>
+              new Promise((resolve) => {
+                if (!socket) return resolve({ fail: "no socket" });
+                socket
+                  .timeout(10_000)
+                  .emit(
+                    "sfu:renegotiate",
+                    { ...scope, sessionId, body: { sessionDescription } },
+                    (err, res) => {
+                      if (err) return resolve({ fail: String(err) });
+                      if (!res?.ok) return resolve({ fail: res?.reason ?? "error" });
+                      resolve({ value: true });
+                    },
+                  );
+              }),
+          )) === true,
         closeTracks: (sessionId, mids) => {
           socket?.emit("sfu:close", {
             ...scope,

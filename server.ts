@@ -1275,7 +1275,18 @@ app.prepare().then(async () => {
       // be able to probe, and checking it first would also make the
       // authorization tests pass vacuously on a deployment without one.
       if (typeof groupId !== "string" || typeof callId !== "string") return "error";
-      if (!socket.rooms.has(callRoom(groupId, callId))) return "unauthorized";
+      const room = callRoom(groupId, callId);
+      // In the room, OR holding a seat in it. Room membership is per-CONNECTION,
+      // so a websocket blip puts a participant outside it until `call:rejoin`
+      // lands — and unlike the mesh, whose signaling is fire-and-forget, every
+      // SFU step is a request that would be refused in that window and leave the
+      // call with no media. A held seat means "was a participant moments ago and
+      // is expected back", which is the same claim the room makes, minus the
+      // dependency on one TCP connection surviving.
+      const deviceId = (socket.data.deviceId as string | undefined) ?? "";
+      if (!socket.rooms.has(room) && !heldSeatFor(room, userId, deviceId)) {
+        return "unauthorized";
+      }
       if (sessionId !== undefined) {
         if (typeof sessionId !== "string" || !sfuSessions.has(sessionId)) {
           return "unauthorized";
