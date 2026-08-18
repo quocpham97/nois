@@ -23,7 +23,11 @@ import type {
   SfuTracksResponse,
   SfuSessionDescription,
 } from "@/lib/socket-events";
-import type { CallTransport, SignalMsg, TransportEvents } from "./call-transport";
+import type {
+  CallTransport,
+  SignalMsg,
+  TransportEvents,
+} from "./call-transport";
 import type { FrameCrypto } from "./call-frame-crypto";
 
 /** The socket-backed proxy to Cloudflare's Realtime API. The app token is
@@ -33,8 +37,14 @@ export type SfuApi = {
   session: () => Promise<string | null>;
   /** `tracks/new` — publishes when `location: "local"`, subscribes when
    *  `"remote"`. Null on failure. */
-  tracks: (sessionId: string, body: SfuTracksBody) => Promise<SfuTracksResponse | null>;
-  renegotiate: (sessionId: string, sdp: SfuSessionDescription) => Promise<boolean>;
+  tracks: (
+    sessionId: string,
+    body: SfuTracksBody,
+  ) => Promise<SfuTracksResponse | null>;
+  renegotiate: (
+    sessionId: string,
+    sdp: SfuSessionDescription,
+  ) => Promise<boolean>;
   closeTracks: (sessionId: string, mids: string[]) => void;
 };
 
@@ -59,7 +69,9 @@ function preferVp8(transceiver: RTCRtpTransceiver): void {
   const codecs = RTCRtpSender.getCapabilities("video")?.codecs;
   if (!codecs) return;
   const usable = codecs.filter(
-    (c) => /\/vp8$/i.test(c.mimeType) || !/^video\/(vp9|h264|h265|av1)$/i.test(c.mimeType),
+    (c) =>
+      /\/vp8$/i.test(c.mimeType) ||
+      !/^video\/(vp9|h264|h265|av1)$/i.test(c.mimeType),
   );
   if (usable.some((c) => /\/vp8$/i.test(c.mimeType))) {
     try {
@@ -101,10 +113,40 @@ export function createSfuTransport({
    *  and simply wait rather than racing the session setup. */
   let ready: Promise<void> | null = null;
 
+  /**
+   * Serializes everything that touches a Realtime session.
+   *
+   * The SFU keeps ONE signaling state per session, so a `tracks/new` sent while
+   * an earlier offer is still waiting for its answer is rejected outright:
+   *   406 invalid_session_description — "the current signaling state is
+   *   expecting a remote answer... requests were possibly made out-of-order".
+   * Two people joining at once is enough to cause it. pull(B) sits between its
+   * tracks/new and its renegotiate, pull(C) fires in that window, and the
+   * second one is refused — which is exactly how this transport failed.
+   *
+   * One chain rather than one per session: publish and pull are a handful of
+   * operations across a call's life, so the cost of over-serializing is
+   * nothing next to the cost of getting the interleaving wrong.
+   */
+  let chain: Promise<unknown> = Promise.resolve();
+  const serialized = <T>(fn: () => Promise<T>): Promise<T> => {
+    const next = chain.then(fn, fn);
+    chain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  };
+
   const peer = (deviceId: string, userId: string): PeerState => {
     const existing = peers.get(deviceId);
     if (existing) return existing;
-    const state: PeerState = { userId, mids: [], pulled: false, announced: false };
+    const state: PeerState = {
+      userId,
+      mids: [],
+      pulled: false,
+      announced: false,
+    };
     peers.set(deviceId, state);
     return state;
   };
@@ -172,7 +214,10 @@ export function createSfuTransport({
     localTrackNames = tracks.map((t) => t.trackName);
 
     const res = await api.tracks(pubSession, {
-      sessionDescription: { type: "offer", sdp: pub.localDescription?.sdp ?? "" },
+      sessionDescription: {
+        type: "offer",
+        sdp: pub.localDescription?.sdp ?? "",
+      },
       tracks,
     });
     if (!res?.sessionDescription || closed) return;
@@ -203,50 +248,52 @@ export function createSfuTransport({
   };
 
   /** Subscribe to one peer's published tracks. */
-  const pull = async (deviceId: string): Promise<void> => {
-    const state = peers.get(deviceId);
-    const sub = subPc;
-    if (closed || !state || !sub || !subSession) return;
-    if (state.pulled || !state.sessionId || !state.trackNames?.length) return;
-    state.pulled = true;
+  const pull = (deviceId: string): Promise<void> =>
+    serialized(async () => {
+      const state = peers.get(deviceId);
+      const sub = subPc;
+      if (closed || !state || !sub || !subSession) return;
+      if (state.pulled || !state.sessionId || !state.trackNames?.length) return;
+      state.pulled = true;
 
-    const res = await api.tracks(subSession, {
-      tracks: state.trackNames.map((trackName) => ({
-        location: "remote" as const,
-        sessionId: state.sessionId,
-        trackName,
-      })),
-    });
-    if (!res || closed) {
-      state.pulled = false;
-      return;
-    }
-    for (const t of res.tracks ?? []) {
-      if (t.mid) {
-        midToDevice.set(t.mid, deviceId);
-        state.mids.push(t.mid);
-      }
-    }
-    // Pulling always makes the SFU offer, because it is adding transceivers to
-    // our subscriber connection.
-    if (res.requiresImmediateRenegotiation && res.sessionDescription) {
-      await sub.setRemoteDescription(res.sessionDescription);
-      const answer = await sub.createAnswer();
-      await sub.setLocalDescription(answer);
-      if (closed) return;
-      await api.renegotiate(subSession, {
-        type: "answer",
-        sdp: sub.localDescription?.sdp ?? "",
+      const res = await api.tracks(subSession, {
+        tracks: state.trackNames.map((trackName) => ({
+          location: "remote" as const,
+          sessionId: state.sessionId,
+          trackName,
+        })),
       });
-    }
-  };
+      if (!res || closed) {
+        state.pulled = false;
+        return;
+      }
+      for (const t of res.tracks ?? []) {
+        if (t.mid) {
+          midToDevice.set(t.mid, deviceId);
+          state.mids.push(t.mid);
+        }
+      }
+      // Pulling always makes the SFU offer, because it is adding transceivers to
+      // our subscriber connection.
+      if (res.requiresImmediateRenegotiation && res.sessionDescription) {
+        await sub.setRemoteDescription(res.sessionDescription);
+        const answer = await sub.createAnswer();
+        await sub.setLocalDescription(answer);
+        if (closed) return;
+        await api.renegotiate(subSession, {
+          type: "answer",
+          sdp: sub.localDescription?.sdp ?? "",
+        });
+      }
+    });
 
   /** Tell a peer where to pull us from. Both sides send this — unlike the mesh
    *  there is no offerer/answerer asymmetry to exploit, since each side pulls
    *  independently. */
   const announce = (deviceId: string) => {
     const state = peers.get(deviceId);
-    if (!state || state.announced || !pubSession || !localTrackNames.length) return;
+    if (!state || state.announced || !pubSession || !localTrackNames.length)
+      return;
     state.announced = true;
     events.sendSignal(deviceId, {
       type: "sfu-hello",
@@ -283,7 +330,14 @@ export function createSfuTransport({
     removePeer(deviceId) {
       const state = peers.get(deviceId);
       if (!state) return;
-      if (subSession && state.mids.length) api.closeTracks(subSession, state.mids);
+      // Closing tracks moves the session's signaling state too, so it queues
+      // behind any pull in flight for the same reason pulls queue behind each
+      // other. The local bookkeeping is immediate; only the request waits.
+      if (subSession && state.mids.length) {
+        const mids = [...state.mids];
+        const session = subSession;
+        void serialized(async () => api.closeTracks(session, mids));
+      }
       for (const mid of state.mids) midToDevice.delete(mid);
       peers.delete(deviceId);
     },

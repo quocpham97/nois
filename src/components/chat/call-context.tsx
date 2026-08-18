@@ -180,7 +180,9 @@ const SFU_RETRY_MS = 600;
  *  path on purpose — refuse, and say why. */
 function sfuUnavailable(): boolean {
   if (!SFU_ENABLED || frameCryptoSupported()) return false;
-  toast.error("This browser can't encrypt call media — calls need a newer version");
+  toast.error(
+    "This browser can't encrypt call media — calls need a newer version",
+  );
   return true;
 }
 
@@ -235,14 +237,18 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   // call is placed or joined, because the transport is built with them — an
   // RTCPeerConnection's ICE config is fixed at construction, so arriving late
   // would mean a peer built without TURN.
-  const iceRef = useRef<{ servers: RTCIceServer[]; expiresAt: number } | null>(null);
+  const iceRef = useRef<{ servers: RTCIceServer[]; expiresAt: number } | null>(
+    null,
+  );
 
   const ensureIceServers = useCallback(async (): Promise<void> => {
     if (!socket) return;
     const cached = iceRef.current;
     if (cached && cached.expiresAt > Date.now()) return;
     const res = await new Promise<IceServersResult | null>((resolve) => {
-      socket.timeout(5000).emit("ice:servers", (err, r) => resolve(err ? null : r));
+      socket
+        .timeout(5000)
+        .emit("ice:servers", (err, r) => resolve(err ? null : r));
     });
     // No credentials is a DEGRADED call (build-time vars, else STUN only), not
     // a failed one — placing the call must never block on this.
@@ -265,10 +271,16 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 
   /** Patch the live call (no-op if it's already gone or a different call). */
   const patchCall = useCallback(
-    (callId: string, patch: Partial<CallInfo> | ((c: CallInfo) => Partial<CallInfo>)) => {
+    (
+      callId: string,
+      patch: Partial<CallInfo> | ((c: CallInfo) => Partial<CallInfo>),
+    ) => {
       const c = callRef.current;
       if (!c || c.callId !== callId) return;
-      const next = { ...c, ...(typeof patch === "function" ? patch(c) : patch) };
+      const next = {
+        ...c,
+        ...(typeof patch === "function" ? patch(c) : patch),
+      };
       callRef.current = next;
       setCall(next);
     },
@@ -467,11 +479,19 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
        * `unauthorized` is retried too: right after a reconnect we're briefly
        * out of the call room until `call:rejoin` lands, which looks identical
        * to a genuine refusal. Only `unconfigured` is treated as final.
+       *
+       * `tries` is 1 for anything that MUTATES SFU signaling state. A lost ack
+       * doesn't tell us whether the request landed, and re-sending a
+       * `tracks/new` that actually succeeded desynchronises the session — the
+       * SFU then refuses the next one with 406 invalid_session_description.
+       * Creating a session is the only safe thing to repeat: the worst case is
+       * an orphan that carries no tracks.
        */
       const attempt = async <T,>(
         once: () => Promise<{ value: T } | { fail: string }>,
+        tries = SFU_RETRIES,
       ): Promise<T | null> => {
-        for (let i = 0; i < SFU_RETRIES; i++) {
+        for (let i = 0; i < tries; i++) {
           const r = await once();
           if ("value" in r) return r.value;
           if (r.fail === "unconfigured") {
@@ -479,8 +499,11 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
             toast.error("This deployment has no SFU configured");
             return null;
           }
-          console.warn(`[call] sfu request failed: ${r.fail} (try ${i + 1}/${SFU_RETRIES})`);
-          await new Promise((res) => setTimeout(res, SFU_RETRY_MS));
+          console.warn(
+            `[call] sfu request failed: ${r.fail} (try ${i + 1}/${tries})`,
+          );
+          if (i + 1 < tries)
+            await new Promise((res) => setTimeout(res, SFU_RETRY_MS));
         }
         return null;
       };
@@ -491,11 +514,14 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
             () =>
               new Promise((resolve) => {
                 if (!socket) return resolve({ fail: "no socket" });
-                socket.timeout(10_000).emit("sfu:session", scope, (err, res) => {
-                  if (err) return resolve({ fail: String(err) });
-                  if (!res?.ok) return resolve({ fail: res?.reason ?? "error" });
-                  resolve({ value: res.sessionId });
-                });
+                socket
+                  .timeout(10_000)
+                  .emit("sfu:session", scope, (err, res) => {
+                    if (err) return resolve({ fail: String(err) });
+                    if (!res?.ok)
+                      return resolve({ fail: res?.reason ?? "error" });
+                    resolve({ value: res.sessionId });
+                  });
               }),
           ),
         tracks: (sessionId, body) =>
@@ -505,12 +531,18 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
                 if (!socket) return resolve({ fail: "no socket" });
                 socket
                   .timeout(10_000)
-                  .emit("sfu:tracks", { ...scope, sessionId, body }, (err, res) => {
-                    if (err) return resolve({ fail: String(err) });
-                    if (!res?.ok) return resolve({ fail: res?.reason ?? "error" });
-                    resolve({ value: res.result });
-                  });
+                  .emit(
+                    "sfu:tracks",
+                    { ...scope, sessionId, body },
+                    (err, res) => {
+                      if (err) return resolve({ fail: String(err) });
+                      if (!res?.ok)
+                        return resolve({ fail: res?.reason ?? "error" });
+                      resolve({ value: res.result });
+                    },
+                  );
               }),
+            1,
           ),
         renegotiate: async (sessionId, sessionDescription) =>
           (await attempt<true>(
@@ -524,11 +556,13 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
                     { ...scope, sessionId, body: { sessionDescription } },
                     (err, res) => {
                       if (err) return resolve({ fail: String(err) });
-                      if (!res?.ok) return resolve({ fail: res?.reason ?? "error" });
+                      if (!res?.ok)
+                        return resolve({ fail: res?.reason ?? "error" });
                       resolve({ value: true });
                     },
                   );
               }),
+            1,
           )) === true,
         closeTracks: (sessionId, mids) => {
           socket?.emit("sfu:close", {
@@ -576,7 +610,9 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
             // One leg failing is not the whole call failing — drop that peer
             // and keep talking to everyone else. If it was the last one, end.
             patchCall(callId, (c) => ({
-              participants: c.participants.filter((p) => p.deviceId !== deviceId),
+              participants: c.participants.filter(
+                (p) => p.deviceId !== deviceId,
+              ),
             }));
             const c = callRef.current;
             if (c?.callId === callId && c.participants.length === 0) {
@@ -618,7 +654,10 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   const activeGroupId = call?.groupId;
   useEffect(() => {
     if (!SFU_ENABLED || !activeCallId || !activeGroupId) return;
-    const id = setInterval(() => void pumpKeys(activeCallId, activeGroupId), 5000);
+    const id = setInterval(
+      () => void pumpKeys(activeCallId, activeGroupId),
+      5000,
+    );
     return () => clearInterval(id);
   }, [activeCallId, activeGroupId, pumpKeys]);
 
@@ -649,7 +688,11 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 
   /** Someone joined a call we're already in → we offer to them. */
   const onJoined = useCallback(
-    async ({ callId, userId: joinerId, deviceId: joinerDevice }: CallJoinedRelay) => {
+    async ({
+      callId,
+      userId: joinerId,
+      deviceId: joinerDevice,
+    }: CallJoinedRelay) => {
       const c = callRef.current;
       if (!c || c.callId !== callId || !joinerDevice) return;
       if (joinerDevice === deviceIdRef.current) return; // our own echo
@@ -673,7 +716,10 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         const latest = callRef.current;
         if (latest) {
           if (latest.phase === "active") toast("Call ended");
-          recordCall(latest, latest.phase === "active" ? "answered" : "unanswered");
+          recordCall(
+            latest,
+            latest.phase === "active" ? "answered" : "unanswered",
+          );
         }
         socket?.emit("call:leave", { callId, groupId: c.groupId });
         teardown();
@@ -844,53 +890,56 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       // ourselves — their offers can beat our own join ack.
       await ice;
       const transport = openTransport(callId, groupId, stream);
-      socket.timeout(8000).emit("call:join", { callId, groupId }, (err, res) => {
-        if (err || !res?.ok) {
-          const reason = !err && res && !res.ok ? res.reason : "error";
-          toast.error(
-            reason === "full"
-              ? "That call is full"
-              : reason === "gone"
-                ? "That call has ended"
-                : reason === "unauthorized"
-                  ? "You can't join that call"
-                  : "Couldn't join the call",
-          );
-          teardown();
-          return;
-        }
-        const participants = res.participants
-          .filter((p) => p.deviceId && p.deviceId !== deviceIdRef.current)
-          .map((p) => ({
-            userId: p.userId,
-            deviceId: p.deviceId,
-            user: resolveUser(p.userId),
-            stream: null,
-            connected: false,
-          }));
-        setCallBoth({
-          callId,
-          groupId,
-          kind: ch?.type === "group" ? "group" : "dm",
-          title: titleFor(groupId, starterId),
-          starterId,
-          starter: resolveUser(starterId),
-          peer: ch?.type === "dm" ? (ch.user ?? resolveUser(starterId)) : null,
-          video: res.video && video,
-          phase: "connecting",
-          // Derived from the id, not from who clicked: a starter who migrates
-          // devices keeps ownership of the thread record.
-          outgoing: starterId === userId,
-          startedAt: null,
-          participants,
-          peak: participants.length + 1,
+      socket
+        .timeout(8000)
+        .emit("call:join", { callId, groupId }, (err, res) => {
+          if (err || !res?.ok) {
+            const reason = !err && res && !res.ok ? res.reason : "error";
+            toast.error(
+              reason === "full"
+                ? "That call is full"
+                : reason === "gone"
+                  ? "That call has ended"
+                  : reason === "unauthorized"
+                    ? "You can't join that call"
+                    : "Couldn't join the call",
+            );
+            teardown();
+            return;
+          }
+          const participants = res.participants
+            .filter((p) => p.deviceId && p.deviceId !== deviceIdRef.current)
+            .map((p) => ({
+              userId: p.userId,
+              deviceId: p.deviceId,
+              user: resolveUser(p.userId),
+              stream: null,
+              connected: false,
+            }));
+          setCallBoth({
+            callId,
+            groupId,
+            kind: ch?.type === "group" ? "group" : "dm",
+            title: titleFor(groupId, starterId),
+            starterId,
+            starter: resolveUser(starterId),
+            peer:
+              ch?.type === "dm" ? (ch.user ?? resolveUser(starterId)) : null,
+            video: res.video && video,
+            phase: "connecting",
+            // Derived from the id, not from who clicked: a starter who migrates
+            // devices keeps ownership of the thread record.
+            outgoing: starterId === userId,
+            startedAt: null,
+            participants,
+            peak: participants.length + 1,
+          });
+          // We are the joiner, so we do not offer — every incumbent offers to us.
+          // The SFU is the exception and doesn't care: `start` publishes our own
+          // media, which both sides do independently. It waits for the ack
+          // because the server authorizes on call-room membership.
+          void transport.start();
         });
-        // We are the joiner, so we do not offer — every incumbent offers to us.
-        // The SFU is the exception and doesn't care: `start` publishes our own
-        // media, which both sides do independently. It waits for the ack
-        // because the server authorizes on call-room membership.
-        void transport.start();
-      });
     },
     [
       socket,
@@ -1001,7 +1050,9 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       ringTimerRef.current = setTimeout(() => {
         const c = callRef.current;
         if (c?.callId === callId && c.phase === "incoming") {
-          toast(`Missed ${c.video ? "video" : "voice"} call from ${starter.name}`);
+          toast(
+            `Missed ${c.video ? "video" : "voice"} call from ${starter.name}`,
+          );
           teardown();
         }
       }, RING_TIMEOUT_MS);
@@ -1050,32 +1101,37 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     if (!c || !socket || c.phase === "incoming") return;
     socket
       .timeout(8000)
-      .emit("call:rejoin", { callId: c.callId, groupId: c.groupId }, (err, res) => {
-        if (err || !res?.ok) {
-          const reason = !err && res && !res.ok ? res.reason : "error";
-          toast(
-            reason === "gone"
-              ? "The call ended while you were offline"
-              : reason === "full"
-                ? "Couldn't rejoin — the call is full"
-                : "Couldn't rejoin the call",
-          );
-          recordCall(c, c.phase === "active" ? "answered" : "unanswered");
-          teardown();
-          return;
-        }
-        // Anyone who left while we were away really is gone; drop them rather
-        // than keep a tile for a leg that no longer exists.
-        const here = new Set(res.participants.map((p) => p.deviceId));
-        const cur = callRef.current;
-        if (!cur || cur.callId !== c.callId) return;
-        for (const p of cur.participants) {
-          if (!here.has(p.deviceId)) transportRef.current?.removePeer(p.deviceId);
-        }
-        patchCall(c.callId, (cc) => ({
-          participants: cc.participants.filter((p) => here.has(p.deviceId)),
-        }));
-      });
+      .emit(
+        "call:rejoin",
+        { callId: c.callId, groupId: c.groupId },
+        (err, res) => {
+          if (err || !res?.ok) {
+            const reason = !err && res && !res.ok ? res.reason : "error";
+            toast(
+              reason === "gone"
+                ? "The call ended while you were offline"
+                : reason === "full"
+                  ? "Couldn't rejoin — the call is full"
+                  : "Couldn't rejoin the call",
+            );
+            recordCall(c, c.phase === "active" ? "answered" : "unanswered");
+            teardown();
+            return;
+          }
+          // Anyone who left while we were away really is gone; drop them rather
+          // than keep a tile for a leg that no longer exists.
+          const here = new Set(res.participants.map((p) => p.deviceId));
+          const cur = callRef.current;
+          if (!cur || cur.callId !== c.callId) return;
+          for (const p of cur.participants) {
+            if (!here.has(p.deviceId))
+              transportRef.current?.removePeer(p.deviceId);
+          }
+          patchCall(c.callId, (cc) => ({
+            participants: cc.participants.filter((p) => here.has(p.deviceId)),
+          }));
+        },
+      );
   }, [socket, patchCall, recordCall, teardown]);
 
   /** Another of our devices took (or refused) this ring — stop ringing here. */
@@ -1102,10 +1158,13 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     [teardown],
   );
 
-  const onOngoing = useCallback((p: CallOngoingRelay) => {
-    if (p.starterId === userId) return; // our own call — the call UI covers it
-    setOngoing((s) => ({ ...s, [p.groupId]: p }));
-  }, [userId]);
+  const onOngoing = useCallback(
+    (p: CallOngoingRelay) => {
+      if (p.starterId === userId) return; // our own call — the call UI covers it
+      setOngoing((s) => ({ ...s, [p.groupId]: p }));
+    },
+    [userId],
+  );
 
   const onOver = useCallback(
     ({ groupId, callId }: CallOverRelay) => {
@@ -1118,7 +1177,9 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       // Still ringing for a call that's now over (the starter gave up).
       const c = callRef.current;
       if (c?.callId === callId && c.phase === "incoming") {
-        toast(`Missed ${c.video ? "video" : "voice"} call from ${c.starter.name}`);
+        toast(
+          `Missed ${c.video ? "video" : "voice"} call from ${c.starter.name}`,
+        );
         teardown();
       }
     },
@@ -1180,7 +1241,8 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     const invite = (p: CallInviteRelay) => handlersRef.current.onInvite(p);
     const joined = (p: CallJoinedRelay) => void handlersRef.current.onJoined(p);
     const left = (p: CallLeftRelay) => handlersRef.current.onLeft(p);
-    const declined = (p: CallDeclinedRelay) => handlersRef.current.onDeclined(p);
+    const declined = (p: CallDeclinedRelay) =>
+      handlersRef.current.onDeclined(p);
     const handled = (p: CallHandledRelay) => handlersRef.current.onHandled(p);
     const kicked = (p: CallKickedRelay) => handlersRef.current.onKicked(p);
     const live = (p: CallOngoingRelay) => handlersRef.current.onOngoing(p);
