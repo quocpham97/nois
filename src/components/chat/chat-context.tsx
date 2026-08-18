@@ -145,6 +145,22 @@ const KEY_WAIT_MS = 6000;
  *  offline, or nobody holds the plaintext). */
 const REHEAL_WAIT_MS = 8000;
 
+/** The last sealed read-cursor we CONSUMED from a peer device, and what it
+ *  opened to. `readSeq` is absent when the envelope turned out to be
+ *  undecryptable — enough to know never to run it through decrypt again. */
+type ConsumedReceipt = { env: string; readSeq?: number; ts?: number };
+
+/** One of our own outgoing envelopes and the body we sealed into it. */
+type SentEnvelope = {
+  clientId: string;
+  enc: string;
+  body: Partial<Message> & { att?: { key: string; iv: string } };
+};
+/** How many un-acked outgoing envelopes to keep bodies for. Normally 0-1 are
+ *  live at once; the cap just stops a pathological offline burst from growing
+ *  the record without bound. */
+const SENT_PENDING_MAX = 32;
+
 // The nav panels route as top-level paths, e.g. /drafts. They replace the
 // conversation view but don't carry a conversation id. `people` and `archived`
 // are the Messenger rail destinations; the rest live in the Chats options menu.
@@ -985,6 +1001,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const requestedAtRef = useRef<Map<string, number>>(new Map());
   // Plaintext of our own outgoing encrypted messages, keyed by clientId, so we
   // render them without self-decrypting (and never see a ciphertext flash).
+  // Durable twin of sentPlaintextRef. The sender CANNOT decrypt its own
+  // envelope — encrypting consumes that generation of the ratchet and never
+  // retains it — so between send and ack the in-memory copy is the ONLY copy of
+  // our own message body. Anything that loses it (a reload, a dev-server
+  // refresh, an ack that never lands) leaves our own message permanently
+  // unreadable to us: the server replays its ciphertext and every decrypt
+  // attempt fails with "Desired gen in the past". Keyed by the envelope itself,
+  // which the server echoes back verbatim, so nothing has to map a client id
+  // across the reload. `null` = not read from IndexedDB yet.
+  const sentEnvelopesRef = useRef<SentEnvelope[] | null>(null);
   const sentPlaintextRef = useRef<
     Map<
       string,
@@ -1021,11 +1047,28 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const rehealAtRef = useRef<Map<string, number>>(new Map());
   const [rehealVersion, setRehealVersion] = useState(0);
   // E2EE read receipts: per-group read cursors, merged to the max readSeq per
-  // user across their devices. In-memory only — the server replays sealed
-  // cursors on every (re)join, so nothing needs local persistence.
+  // user across their devices. Rehydrated from the server's replay of the
+  // sealed cursors on every (re)join — which only works because the cursor a
+  // replayed envelope decrypted to is remembered in `receiptSeenRef` below.
   const [receiptsByGroup, setReceiptsByGroup] = useState<
     Record<string, Record<string, { readSeq: number; ts: number }>>
   >({});
+  // The sealed cursor most recently consumed per `groupId:deviceId`, with its
+  // plaintext. The server keeps only the LATEST cursor per (group, user, device)
+  // and re-emits it on every (re)join, but a sealed cursor decrypts exactly
+  // ONCE: MLS drops a generation's key as it consumes it (only *skipped*
+  // generations are retained, and only 10 of them) and the sender-keys chain
+  // likewise has no skipped-key cache — so a second decrypt of a replayed
+  // envelope throws "Desired gen in the past" and the cursor is lost, leaving
+  // "seen by" blank after every reconnect. A replay is answered from here
+  // instead of from the ratchet. Persisted (one bounded slot per peer device,
+  // replaced as their cursor advances) because a reload is exactly the case
+  // where the stored ratchet has already moved past everything about to be
+  // replayed. Mirrors mlsPlainRef, which does this for messages by msgId.
+  const receiptSeenRef = useRef<Map<string, ConsumedReceipt>>(new Map());
+  // In-flight receipt decrypts, by `groupId:deviceId|env`, so two deliveries of
+  // one envelope share a single attempt instead of racing the ratchet.
+  const receiptInFlightRef = useRef<Map<string, Promise<boolean>>>(new Map());
   // Highest readSeq we've already sealed per group (skip redundant reseals).
   const lastSealedSeqRef = useRef<Map<string, number>>(new Map());
   // Debounce timers for sealing our own read cursor (one per group).
@@ -1255,6 +1298,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const mlsPlainRef = useRef<
     Map<string, Partial<Message> & { att?: { key: string; iv: string } }>
   >(new Map());
+  // The flip side of mlsPlainRef: envelopes this session has already proven
+  // unopenable. The decrypt effect re-runs on every `groups` change, so several
+  // passes can be in flight over the same message before the first one's lock
+  // lands in state — without this they each pay a decrypt and log a warning.
+  const mlsDeadRef = useRef<Set<string>>(new Set());
 
   // Per-group mutex serializing EVERY ClientState mutation (encrypt advances
   // the sender ratchet, decrypt the receiver chain, commits the epoch) — two
@@ -2017,6 +2065,43 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       }
       return false;
     };
+    // The same "never overwrite what we already hold" rule, applied to STATE.
+    // The server's copy of an E2EE message is ciphertext forever, while the
+    // local row holds the plaintext from whenever we first decrypted it — and a
+    // replay is not a second chance at that envelope: MLS drops a generation's
+    // key as it consumes it, so re-decrypting throws "Desired gen in the past"
+    // and flips an already-readable message to 🔒. That bites on a fresh load
+    // (nothing in state to suppress the merge, mlsPlainRef cold) for any message
+    // the server still counts as unread. Keep the replayed copy for everything
+    // the server owns — reactions, edits, seq — and restore the body from the
+    // local row, exactly as onAck does for our own sends.
+    const withLocalPlaintext = (
+      incoming: Message,
+      local: Message | undefined,
+    ): Message => {
+      if (!local || !incoming.enc) return incoming;
+      // Already read once — the plaintext exists nowhere else.
+      if (!local.enc && !local.locked) {
+        return {
+          ...incoming,
+          text: local.text,
+          rich: local.rich,
+          preview: local.preview,
+          replyTo: local.replyTo,
+          forwarded: local.forwarded,
+          call: local.call,
+          enc: undefined,
+          locked: undefined,
+          // Holds the attachment's decryption key/iv, which the server copy
+          // never carries (they ride inside the envelope).
+          attachment: local.attachment ?? incoming.attachment,
+        };
+      }
+      // Already found unrecoverable — carry the verdict so the decrypt effect
+      // doesn't take another run at an envelope whose keys are gone.
+      if (local.locked) return { ...incoming, text: local.text, locked: true };
+      return incoming;
+    };
     const onHistoryReplay = async ({
       groupId,
       messages,
@@ -2027,28 +2112,41 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       replies: { parentId: string; reply: Message }[];
     }) => {
       let added = false;
+      const resolved: Message[] = [];
       for (const m of messages) {
         const local = await msgdb.getMessage(m.id);
+        // A converged delete/edit deliberately replaced the local body, so the
+        // replayed copy wins there — `local` is the pre-patch snapshot.
+        let converged = false;
         if (!local) {
           await msgdb.putMessage(groupId, m);
           added = true;
         } else if (await mergeStale(local, m)) {
           added = true;
+          converged = true;
         }
+        resolved.push(converged ? m : withLocalPlaintext(m, local));
       }
+      const resolvedReplies: { parentId: string; reply: Message }[] = [];
       for (const { parentId, reply } of replies) {
         const local = await msgdb.getMessage(reply.id);
+        let converged = false;
         if (!local) {
           await msgdb.putReply(groupId, parentId, reply);
           added = true;
         } else if (await mergeStale(local, reply)) {
           added = true;
+          converged = true;
         }
+        resolvedReplies.push({
+          parentId,
+          reply: converged ? reply : withLocalPlaintext(reply, local),
+        });
       }
       // State, not just the store: a client whose store is unavailable has
       // nowhere else to get this from, and loadLocalHistory would read back an
       // empty page for it.
-      mergeReplayed(groupId, messages, replies);
+      mergeReplayed(groupId, resolved, resolvedReplies);
       if (added && groupId === currentGroupIdRef.current) {
         void loadLocalHistory(groupId);
       }
@@ -2902,6 +3000,33 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     [socket, dmPeerId],
   );
 
+  // Load / extend / query the durable outgoing-body cache (see sentEnvelopesRef).
+  // Entries are superseded by the acked message row, and age out through the cap
+  // rather than being deleted on ack — a stale entry can never yield the wrong
+  // body (the envelope is the key), and keeping it is what saves a message whose
+  // ack was lost.
+  const loadSentEnvelopes = useCallback(async (): Promise<SentEnvelope[]> => {
+    if (!sentEnvelopesRef.current) {
+      sentEnvelopesRef.current =
+        (await groupGet<SentEnvelope[]>(userId, "sentpending")) ?? [];
+    }
+    return sentEnvelopesRef.current;
+  }, [userId]);
+  const rememberSent = useCallback(
+    async (clientId: string, enc: string, body: SentEnvelope["body"]) => {
+      const list = await loadSentEnvelopes();
+      const next = [...list.filter((e) => e.enc !== enc), { clientId, enc, body }];
+      sentEnvelopesRef.current = next.slice(-SENT_PENDING_MAX);
+      await groupPut(userId, "sentpending", sentEnvelopesRef.current);
+    },
+    [loadSentEnvelopes, userId],
+  );
+  const sentBodyFor = useCallback(
+    async (enc: string): Promise<SentEnvelope["body"] | undefined> =>
+      (await loadSentEnvelopes()).find((e) => e.enc === enc)?.body,
+    [loadSentEnvelopes],
+  );
+
   const decryptInbound = useCallback(
     async (
       groupId: string,
@@ -2911,9 +3036,22 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
        *  ephemeral receipts, which must not trigger a reheal). */
       msgId?: string,
     ): Promise<
-      (Partial<Message> & { att?: { key: string; iv: string } }) | null
+      | (Partial<Message> & {
+          att?: { key: string; iv: string };
+          /** Locked for good: the key material this envelope needs no longer
+           *  exists, so re-running it later can only fail again. */
+          permanent?: boolean;
+        })
+      | null
     > => {
       const locked = { text: "🔒 Unable to decrypt", enc: undefined, locked: true };
+      // Our own outgoing message: no scheme here can open an envelope we sealed
+      // ourselves, so answer from the body we kept at send. `enc` is cleared
+      // explicitly — the stored body round-trips through JSON, which drops
+      // undefined fields, and leaving `enc` in place would re-queue the message
+      // on every pass.
+      const mine = await sentBodyFor(enc);
+      if (mine) return { ...mine, enc: undefined };
       let parsed: unknown;
       try {
         parsed = JSON.parse(enc);
@@ -2931,6 +3069,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           // the cached plaintext instead of re-ratcheting (which would throw).
           const cached = msgId && mlsPlainRef.current.get(msgId);
           if (cached) return cached;
+          // Same envelope, already known unopenable → don't re-derive the verdict.
+          const deadKey = msgId ?? (parsed as { w: string }).w;
+          if (mlsDeadRef.current.has(deadKey)) return { ...locked, permanent: true };
           const state = await mlsLoadState(groupId);
           if (!state) {
             const since = mlsWaitRef.current.get(groupId);
@@ -2941,8 +3082,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             return Date.now() - since > KEY_WAIT_MS ? locked : null;
           }
           mlsWaitRef.current.delete(groupId);
+          const mls = await loadMls();
           try {
-            const res = await (await loadMls()).mlsDecrypt(state, (parsed as { w: string }).w);
+            const res = await mls.mlsDecrypt(state, (parsed as { w: string }).w);
             if (!res) return locked;
             await mlsSaveState(groupId, res.state);
             if (res.kind !== "application") return null; // control msg — state advanced
@@ -2961,6 +3103,20 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           } catch (err) {
             // ts-mls throws on a message we can't process (wrong epoch, our own
             // message, foreign/stale group) — lock it rather than crash decrypt.
+            // Separate the two kinds: an envelope whose epoch/generation keys are
+            // gone is lost for good and must be locked ONCE (the caller persists
+            // that verdict, or every reconnect re-replays and re-fails it),
+            // while anything else is still waiting on something.
+            if (mls.mlsUnrecoverable(err)) {
+              mlsDeadRef.current.add(deadKey);
+              console.warn(
+                "[mls] message unrecoverable (its key material is gone)",
+                groupId,
+                msgId,
+                (err as Error).message,
+              );
+              return { ...locked, permanent: true };
+            }
             console.warn("[mls] decrypt failed", groupId, msgId, err);
             return locked;
           }
@@ -3047,7 +3203,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         att: res.att ?? undefined,
       };
     },
-    [requestSenderKey, userId, scheduleReplenish, mlsLoadState, mlsSaveState, requestReheal, isDm, withMlsLock],
+    [requestSenderKey, userId, scheduleReplenish, mlsLoadState, mlsSaveState, requestReheal, isDm, withMlsLock, sentBodyFor],
   );
 
   // --- E2EE read receipts (Phase 2) -----------------------------------------
@@ -3065,17 +3221,58 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     [],
   );
 
+  // Read/record the last sealed cursor consumed from a peer device, through the
+  // in-memory map first so a burst of replays doesn't hit IndexedDB per event.
+  const loadSeenReceipt = useCallback(
+    async (key: string): Promise<ConsumedReceipt | undefined> => {
+      const mem = receiptSeenRef.current.get(key);
+      if (mem) return mem;
+      const stored = await groupGet<ConsumedReceipt>(userId, `rcpt:${key}`);
+      if (stored) receiptSeenRef.current.set(key, stored);
+      return stored;
+    },
+    [userId],
+  );
+  const saveSeenReceipt = useCallback(
+    async (key: string, rec: ConsumedReceipt): Promise<void> => {
+      receiptSeenRef.current.set(key, rec);
+      await groupPut(userId, `rcpt:${key}`, rec);
+    },
+    [userId],
+  );
+
   // Decrypt + apply one sealed receipt. Returns false when its sender key hasn't
   // arrived yet (caller parks it for a chainVersion retry); true once handled or
   // definitively undecryptable (dropped). Reuses decryptInbound so a receipt
   // rides the exact same group/DM/MLS path as a message of the same group.
-  const processReceipt = useCallback(
+  const handleReceipt = useCallback(
     async (p: ReceiptRelayPayload): Promise<boolean> => {
       const secrets = await getSecrets();
       if (!secrets) return false;
+      // Replay guard — see receiptSeenRef. The server re-emits a device's latest
+      // sealed cursor on every (re)join, and running an envelope we already
+      // consumed back through decrypt can only fail (single-shot ratchets), so
+      // re-merge the cursor it opened to the first time. Receipts get no help
+      // from decryptInbound's own mlsPlainRef cache: that one is keyed by msgId,
+      // which this path deliberately omits.
+      const seenKey = `${p.groupId}:${p.deviceId}`;
+      const seen = await loadSeenReceipt(seenKey);
+      if (seen?.env === p.env) {
+        if (seen.readSeq !== undefined) {
+          mergeReceipt(p.groupId, p.fromUserId, seen.readSeq, seen.ts ?? 0);
+        }
+        return true;
+      }
       const patch = await decryptInbound(p.groupId, p.env, secrets);
       if (patch === null) return false; // no key yet → park + retry
-      if (patch.locked) return true; // undecryptable → drop
+      // Past here the envelope has been consumed whether or not it opened, so
+      // record it either way — a locked one must not be retried on every
+      // reconnect (it can't start working; the ratchet has moved on).
+      if (patch.locked) {
+        await saveSeenReceipt(seenKey, { env: p.env });
+        return true; // undecryptable → drop
+      }
+      let cursor: ConsumedReceipt = { env: p.env };
       try {
         const c = JSON.parse(patch.text ?? "") as {
           rcpt?: number;
@@ -3084,14 +3281,36 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           ts?: number;
         };
         if (c.rcpt === 1 && c.groupId === p.groupId && typeof c.readSeq === "number") {
-          mergeReceipt(p.groupId, p.fromUserId, c.readSeq, c.ts ?? 0);
+          cursor = { env: p.env, readSeq: c.readSeq, ts: c.ts ?? 0 };
         }
       } catch {
         // Not a receipt payload (shouldn't happen on this event) — ignore.
       }
+      await saveSeenReceipt(seenKey, cursor);
+      if (cursor.readSeq !== undefined) {
+        mergeReceipt(p.groupId, p.fromUserId, cursor.readSeq, cursor.ts ?? 0);
+      }
       return true;
     },
-    [getSecrets, decryptInbound, mergeReceipt],
+    [getSecrets, decryptInbound, mergeReceipt, loadSeenReceipt, saveSeenReceipt],
+  );
+
+  // Coalesce concurrent attempts at the SAME envelope — a reconnect's replay can
+  // race the parked retry of the copy that arrived before its key. Both would
+  // clear the seen check, one would consume the ratchet, and the loser would take
+  // the "gen in the past" failure and record the envelope as undecryptable.
+  const processReceipt = useCallback(
+    async (p: ReceiptRelayPayload): Promise<boolean> => {
+      const key = `${p.groupId}:${p.deviceId}|${p.env}`;
+      const running = receiptInFlightRef.current.get(key);
+      if (running) return running;
+      const run = handleReceipt(p).finally(() => {
+        receiptInFlightRef.current.delete(key);
+      });
+      receiptInFlightRef.current.set(key, run);
+      return run;
+    },
+    [handleReceipt],
   );
 
   // Seal THIS device's read cursor for a group and relay it, debounced. Skips
@@ -3216,11 +3435,14 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       /** Set when the encrypted message is a thread reply under this parent. */
       parentId?: string;
     }[] = [];
+    // `locked` rows carry a persisted verdict: their key material is gone, so a
+    // re-attempt can only fail (and log) again. A path that CAN recover one —
+    // the DM reheal offer — clears `locked` as it swaps in the fresh envelope.
     for (const [cid, ch] of Object.entries(groups)) {
       for (const m of ch.messages) {
-        if (m.enc) pending.push({ groupId: cid, id: m.id, enc: m.enc });
+        if (m.enc && !m.locked) pending.push({ groupId: cid, id: m.id, enc: m.enc });
         for (const r of m.threadReplies || []) {
-          if (r.enc)
+          if (r.enc && !r.locked)
             pending.push({ groupId: cid, id: r.id, enc: r.enc, parentId: m.id });
         }
       }
@@ -3231,9 +3453,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       const secrets = await getSecrets();
       for (const { groupId, id, enc, parentId } of pending) {
         if (cancelled) return;
-        let result:
-          | (Partial<Message> & { att?: { key: string; iv: string } })
-          | null;
+        // Mirrors decryptInbound rather than restating its shape, so the
+        // permanent-lock flag can't drift out of sync here.
+        let result: Awaited<ReturnType<typeof decryptInbound>>;
         if (!secrets) {
           result = { text: "🔒 Encrypted message", enc: undefined, locked: true };
         } else {
@@ -3245,7 +3467,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // Separate the envelope-carried attachment key from the message patch:
         // it's merged onto the message's attachment so an encrypted image can be
         // fetched + decrypted on display.
-        const { att, ...msgPatch } = result;
+        const { att, permanent, ...msgPatch } = result;
         const existing = parentId
           ? groups[groupId]?.messages
               .find((m) => m.id === parentId)
@@ -3273,6 +3495,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           void msgdb.patchMessage(id, patch);
           scheduleBackup(); // decrypted plaintext cached → refresh the backup so
           // this message survives device loss even if its one-time prekey is spent
+        } else if (permanent) {
+          // Record the lock so this envelope is never fed back through decrypt:
+          // the server replays it on every (re)join for as long as it sits before
+          // our read cursor, and without this the failure (and its console noise)
+          // repeats for the life of the message. `enc` is written back
+          // deliberately — patchMessage would otherwise drop it with the rest of
+          // the patch's undefined fields, and it's the only copy of the
+          // ciphertext we hold if a re-encrypt path ever arrives.
+          void msgdb.patchMessage(id, { text: patch.text, locked: true, enc });
         }
         setGroups((s) => {
           const ch = s[groupId];
@@ -3336,7 +3567,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             return rest;
           })()
         : undefined;
-      const sendEnc = (enc: string) =>
+      const sendEnc = (enc: string) => {
+        // Durable copy of what we just sealed, so a reload before the ack can't
+        // strand our own message as 🔒 (see sentEnvelopesRef).
+        void rememberSent(clientId, enc, {
+          text,
+          rich,
+          preview,
+          replyTo,
+          forwarded,
+          call,
+          att,
+        });
         socket?.emit("message:send", {
           groupId,
           text: "",
@@ -3344,6 +3586,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           attachment: strippedAttachment,
           enc,
         });
+      };
       // Default-E2EE: the server only ever sees ciphertext. If we can't encrypt
       // (no recipient has published keys, or WebCrypto is unavailable) we FAIL
       // the message with a reason — never fall back to plaintext.
@@ -3364,7 +3607,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         markFailed(clientId, "Not sent — encryption isn’t available on this device.");
       }
     },
-    [socket, armFailTimer, buildEnvelope, buildGroupEnc, dmPeerId, markFailed, isDm],
+    [socket, armFailTimer, buildEnvelope, buildGroupEnc, dmPeerId, markFailed, isDm, rememberSent],
   );
 
   const sendMessage = useCallback(
@@ -4126,16 +4369,16 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       "Not sent — end-to-end encryption isn’t available yet (they haven’t set up their keys).";
     if (cryptoAvailable() && socket) {
       buildEnvelope(recipientId, { text })
-        .then((enc) =>
-          enc
-            ? socket.emit("dm:create", { recipientId, text: "", clientId, enc })
-            : markFailed(clientId, NO_KEYS),
-        )
+        .then((enc) => {
+          if (!enc) return markFailed(clientId, NO_KEYS);
+          void rememberSent(clientId, enc, { text }); // see sentEnvelopesRef
+          socket.emit("dm:create", { recipientId, text: "", clientId, enc });
+        })
         .catch(() => markFailed(clientId, NO_KEYS));
     } else {
       markFailed(clientId, "Not sent — encryption isn’t available on this device.");
     }
-  }, [composeText, composeRecipients, workspaceMembers, scrollToBottom, socket, myUser, userId, armFailTimer, buildEnvelope, navigateTo, markFailed]);
+  }, [composeText, composeRecipients, workspaceMembers, scrollToBottom, socket, myUser, userId, armFailTimer, buildEnvelope, navigateTo, markFailed, rememberSent]);
 
   const openSearch = useCallback(() => {
     setSearchOpen(true);

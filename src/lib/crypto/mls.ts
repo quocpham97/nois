@@ -58,6 +58,27 @@ import type { MessageContent } from "./types";
 // provider with no extra dependencies.
 const CIPHERSUITE = "MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519" as const;
 
+// One ts-mls client config for the whole app. It must be passed at BOTH ends of
+// a state's life: clientConfig is not part of the serialized group state, so a
+// state reloaded from IndexedDB reverts to ts-mls's defaults unless it is
+// reattached (see mlsDeserializeState) — which silently undid any tuning here.
+//
+// keyRetentionConfig is the knob that decides which late messages still open:
+//   * retainKeysForEpochs (4) — how many past epochs keep their receiver data.
+//     A message from further back than this fails with "epoch too old", forever;
+//     that is what a device offline across several membership commits hits.
+//   * retainKeysForGenerations (10) — how many SKIPPED generations of a sender's
+//     ratchet stay openable, for out-of-order delivery.
+// Raising retainKeysForEpochs is not free: the historical receiver data holds a
+// secret tree AND a ratchet tree per epoch, and the whole state is re-serialized
+// into IndexedDB on every send and every decrypt. Measured serialized sizes:
+//   epochs=4  → 13KB (5 members) / 48KB (20 members)
+//   epochs=16 → 22KB (5 members) / 161KB (20 members)
+//   epochs=32 → 57KB (5 members) / 270KB (20 members)
+// So it trades a per-message write cost (and a longer window in which a stolen
+// local state can open old traffic) for recovering late messages.
+const clientConfig = defaultClientConfig;
+
 let cipherSuiteImpl: Promise<CiphersuiteImpl> | null = null;
 /** Resolve (and cache) the ciphersuite implementation. */
 export function mlsCiphersuite(): Promise<CiphersuiteImpl> {
@@ -191,6 +212,7 @@ export async function mlsCreateGroup(
     kp.privatePackage,
     [],
     cs,
+    clientConfig,
   );
 }
 
@@ -389,7 +411,16 @@ export async function mlsJoinFromWelcome(
   const cs = await mlsCiphersuite();
   const msg = decodeMessage(welcomeB64);
   if (msg?.wireformat !== "mls_welcome") throw new Error("mls: not a welcome");
-  return joinGroup(msg.welcome, kp.publicPackage, kp.privatePackage, emptyPskIndex, cs);
+  return joinGroup(
+    msg.welcome,
+    kp.publicPackage,
+    kp.privatePackage,
+    emptyPskIndex,
+    cs,
+    undefined, // ratchetTree — carried by the Welcome's extension
+    undefined, // resumingFromState — not a reinit/branch
+    clientConfig,
+  );
 }
 
 /** Apply a relayed Commit (membership change) to an existing member's state. */
@@ -427,6 +458,24 @@ export async function mlsEncrypt(
       privateMessage: res.privateMessage,
     }),
   };
+}
+
+/**
+ * True when a decrypt failure can NEVER succeed for this envelope, because the
+ * key material it needs is gone rather than merely absent for now:
+ *   * "epoch too old" — the message's epoch fell out of historicalReceiverData
+ *     (retainKeysForEpochs), or we joined after it and never had that epoch
+ *   * "Desired gen in the past" — that generation's key was consumed (a
+ *     ratchet only moves forward) or evicted past retainKeysForGenerations
+ * Everything else — a message from an epoch AHEAD of ours, a state we haven't
+ * loaded yet — is worth retrying once the missing piece arrives.
+ *
+ * ts-mls raises both as a bare ValidationError with no machine-readable code,
+ * so the message text is the only signal available; matching it is deliberate.
+ */
+export function mlsUnrecoverable(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : "";
+  return msg.includes("epoch too old") || msg.includes("Desired gen in the past");
 }
 
 export type MlsDecryptResult =
@@ -467,5 +516,5 @@ export function mlsSerializeState(state: ClientState): string {
 export function mlsDeserializeState(b64: string): ClientState {
   const decoded = decodeGroupState(fromB64(b64), 0);
   if (!decoded) throw new Error("mls: undecodable group state");
-  return { ...decoded[0], clientConfig: defaultClientConfig };
+  return { ...decoded[0], clientConfig };
 }
