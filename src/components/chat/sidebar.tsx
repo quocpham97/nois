@@ -130,7 +130,7 @@ function ConversationSkeleton() {
 }
 
 /** A round person avatar with a presence dot in the corner (roster/active-now). */
-function PresenceAvatar({
+export function PresenceAvatar({
   user,
   presence,
   size,
