@@ -86,19 +86,18 @@ const thread = async (page: Page) => flat(await page.textContent("main"));
 async function main() {
   const owner = await connect(OWNER);
   await sleep(300);
-  const mkGroup = (name: string) =>
+  const mkGroup = (name: string, memberIds: string[]) =>
     new Promise<string>((resolve, reject) => {
       owner.emit(
         "group:create",
-        { name, topic: "group send fallback", private: true },
+        { name, topic: "group send fallback", memberIds },
         (res: { ok: boolean; groupId?: string }) =>
           res.ok && res.groupId ? resolve(res.groupId) : reject(new Error("create failed")),
       );
     });
-  const groupA = await mkGroup(`gsend-a-${STAMP}`); // nobody else has keys
-  const groupB = await mkGroup(`gsend-b-${STAMP}`); // healthy group, MLS broken later
-  owner.emit("group:addMember", { groupId: groupA, userId: LATECOMER }, () => {});
-  owner.emit("group:addMember", { groupId: groupB, userId: PEER }, () => {});
+  // nobody else has keys / healthy group, MLS broken later
+  const groupA = await mkGroup(`gsend-a-${STAMP}`, [LATECOMER]);
+  const groupB = await mkGroup(`gsend-b-${STAMP}`, [PEER]);
   await sleep(1000);
 
   const browser = await chromium.launch({ headless: !HEADED });

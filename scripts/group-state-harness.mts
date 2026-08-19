@@ -74,22 +74,28 @@ async function main() {
   await sleep(400); // each socket joins its user:<uid> room
 
   const stamp = Date.now();
-  // Private, so this exercises member-room routing rather than the
-  // whole-workspace broadcast public groups get.
+  // Groups are member-only, so this exercises member-room routing throughout —
+  // there is no whole-workspace broadcast to fall back on.
+  const created = waitFor<GroupEvt>(b, "group:created");
   const groupId = await new Promise<string>((resolve, reject) => {
     a.emit(
       "group:create",
-      { name: `gstate-${stamp}`, topic: "group state harness", private: true },
+      {
+        name: `gstate-${stamp}`,
+        topic: "group state harness",
+        memberIds: [B],
+      },
       (res: { ok: boolean; groupId?: string }) =>
         res.ok && res.groupId
           ? resolve(res.groupId)
           : reject(new Error("create failed")),
     );
   });
-
-  const created = waitFor<GroupEvt>(b, "group:created");
-  a.emit("group:addMember", { groupId, userId: B }, () => {});
-  check(!!(await created), "B is told about a private group it was added to");
+  const createdEvt = await created;
+  check(
+    createdEvt?.group.id === groupId,
+    "B is told about a group it was created into",
+  );
   // B deliberately never emits group:join — it is a member, not a viewer.
 
   const msgId = await new Promise<string>((resolve, reject) => {

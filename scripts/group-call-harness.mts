@@ -146,13 +146,15 @@ async function main() {
   const groupId = await new Promise<string>((resolve, reject) => {
     seed.emit(
       "group:create",
-      { name: `gcall-${Date.now()}`, topic: "group call harness", private: true },
+      {
+        name: `gcall-${Date.now()}`,
+        topic: "group call harness",
+        memberIds: [B, C],
+      },
       (res: { ok: boolean; groupId?: string }) =>
         res.ok && res.groupId ? resolve(res.groupId) : reject(new Error("create failed")),
     );
   });
-  seed.emit("group:addMember", { groupId, userId: B }, () => {});
-  seed.emit("group:addMember", { groupId, userId: C }, () => {});
   await sleep(800);
   seed.disconnect();
 

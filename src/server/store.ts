@@ -69,11 +69,13 @@ const workspace: { name: string; members: Set<string> } = {
   members: new Set(),
 };
 
-// Default public groups every signed-in user is auto-joined to, so a brand
-// new user always lands in shared, populated groups (rather than an empty
-// workspace) and — because membership is explicit — E2EE sender keys are
-// distributed to them. Stable ids (not opaque hashes) so they're consistent
-// across restarts; the non-hex slugs can't collide with newGroupId() output.
+// Default groups every signed-in user is auto-joined to, so a brand new user
+// always lands in shared, populated groups (rather than an empty workspace).
+// These are the only groups everyone can see, and they earn it the same way
+// every other group does — an explicit roster entry per user (joinDefaultGroups),
+// which is also what gets them E2EE sender keys. Stable ids (not opaque hashes)
+// so they're consistent across restarts; the non-hex slugs can't collide with
+// newGroupId() output.
 export const DEFAULT_GROUPS: { id: string; name: string; topic: string }[] = [
   { id: "general", name: "general", topic: "Company-wide announcements and general chatter" },
   { id: "random", name: "random", topic: "Non-work banter and watercooler talk" },
@@ -271,7 +273,7 @@ export async function init(): Promise<void> {
   for (const c of DEFAULT_GROUPS) {
     await pool.query(
       `INSERT INTO "group" (id, type, name, icon, topic, private)
-       VALUES ($1,'group',$2,'hash',$3,false) ON CONFLICT (id) DO NOTHING`,
+       VALUES ($1,'group',$2,'hash',$3,true) ON CONFLICT (id) DO NOTHING`,
       [c.id, c.name, c.topic],
     );
   }
@@ -489,11 +491,16 @@ export function getGroupName(groupId: string): string | undefined {
   return meta && meta.type === "group" ? meta.name : undefined;
 }
 
-/** Authorization: may this user see/act in this group? */
+/**
+ * Authorization: may this user see/act in this group?
+ *
+ * Membership is the ONLY gate — for groups exactly as for DMs. There is no
+ * "public group everyone can read": a group created without you is invisible
+ * to you (no roster entry, no snapshot entry, no join, no send). `private` is
+ * kept on the row as a fail-closed marker but is deliberately not read here.
+ */
 export function canAccess(groupId: string, userId: string): boolean {
-  const meta = groups.get(groupId);
-  if (!meta) return false;
-  if (meta.type === "group" && !meta.private) return true; // public group
+  if (!groups.has(groupId)) return false;
   return isMember(groupId, userId);
 }
 
@@ -564,12 +571,11 @@ function toGroup(meta: GroupMeta, viewerId: string): Group {
   };
 }
 
-/** Groups this user may see: all public groups + private/DMs they're in. */
+/** Groups this user may see: exactly the groups + DMs they're a member of. */
 export function listGroupsForUser(userId: string): Group[] {
   const out: Group[] = [];
   for (const meta of groups.values()) {
-    const isPublic = meta.type === "group" && !meta.private;
-    if (isPublic || isMember(meta.id, userId)) out.push(toGroup(meta, userId));
+    if (isMember(meta.id, userId)) out.push(toGroup(meta, userId));
   }
   return out;
 }
@@ -736,11 +742,15 @@ export function toggleReaction(
 
 /**
  * Create a new group. The id is an opaque hash; the slug is the display name.
- * Private groups record the creator as their first member.
+ *
+ * The roster is the group's visibility (see `canAccess`), so it is seeded here:
+ * the creator plus whoever they picked. `private` is set on every group as a
+ * fail-closed marker — nothing reads it for access — while the icon stays
+ * "hash", since a lock badge on every single group carries no information.
  */
 export function createGroup(
   name: string,
-  opts: { topic?: string; private?: boolean; creatorId?: string } = {},
+  opts: { topic?: string; creatorId?: string; memberIds?: string[] } = {},
 ): Group | null {
   const slug = name
     .trim()
@@ -756,13 +766,16 @@ export function createGroup(
     id,
     type: "group",
     name: slug,
-    icon: opts.private ? "lock" : "hash",
+    icon: "hash",
     ...(opts.topic?.trim() ? { topic: opts.topic.trim() } : {}),
-    ...(opts.private ? { private: true } : {}),
+    private: true,
   };
   groups.set(id, meta);
   persistGroup(meta);
   if (opts.creatorId) addMember(id, opts.creatorId);
+  for (const memberId of opts.memberIds ?? []) {
+    if (memberId && memberId !== opts.creatorId) addMember(id, memberId);
+  }
   return getGroup(id, opts.creatorId ?? "") ?? null;
 }
 
@@ -922,11 +935,6 @@ export function unreadState(userId: string): Record<string, number> {
     out[ch.id] = getUnread(ch.id, userId);
   }
   return out;
-}
-
-export function isPublicGroup(groupId: string): boolean {
-  const meta = groups.get(groupId);
-  return Boolean(meta && meta.type === "group" && !meta.private);
 }
 
 // --- message deletion ------------------------------------------------------

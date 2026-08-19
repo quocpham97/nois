@@ -124,10 +124,12 @@ async function main() {
   const bob = new Device(BOB, "dev-b1", await connect(BOB), await mls.mlsGenerateKeyPackage(BOB, "dev-b1"));
   check(true, "three sockets authenticated + connected (alice ×2 devices, bob)");
 
-  // Fresh public group per run; alice + bob join (carol joins later).
+  // Fresh group per run, created with bob on the roster (carol is added later).
+  // Groups are member-only: group:join opens a conversation you're already in,
+  // it does NOT grant membership — so the roster has to be set at creation.
   const mk = await emitAck<{ ok: boolean; groupId?: string }>(
     aliceD1.socket, "group:create",
-    { name: "mlstest-" + Math.random().toString(36).slice(2, 8) });
+    { name: "mlstest-" + Math.random().toString(36).slice(2, 8), memberIds: [BOB] });
   CH = mk?.groupId ?? "";
   check(!!CH, `created fresh test group (${CH})`);
   aliceD1.socket.emit("group:join", { groupId: CH });
@@ -194,6 +196,10 @@ async function main() {
   const carolKp = mls.mlsImportKeyPair(mls.mlsExportKeyPair(carolKpOrig));
   check(!!carolKp, "KeyPackage keypair survives export → import (persistence)");
   const carol = new Device(CAROL, "dev-c1", await connect(CAROL), carolKp!);
+  // Alice adds her to the roster — that (not the join) is what makes her a
+  // member, and what mlsSyncMembership diffs against.
+  aliceD1.socket.emit("group:addMember", { groupId: CH, userId: CAROL }, () => {});
+  await sleep(300);
   carol.socket.emit("group:join", { groupId: CH });
   await sleep(300);
   carol.publish();

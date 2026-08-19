@@ -390,16 +390,12 @@ app.prepare().then(async () => {
   });
 
   // Notify everyone who can see a group — but isn't currently in its room
-  // (i.e. not viewing it) — that it has a new unread message. Public groups
-  // reach the whole workspace; private groups only their members' rooms.
+  // (i.e. not viewing it) — that it has a new unread message. "Everyone who can
+  // see it" IS the member roster, for groups exactly as for DMs.
   const bumpUnread = (groupId: string) => {
-    if (store.isPublicGroup(groupId)) {
-      io.except(groupId).emit("unread:bump", { groupId });
-    } else {
-      const rooms = store.listMemberIds(groupId).map((id) => "user:" + id);
-      if (rooms.length) {
-        io.to(rooms).except(groupId).emit("unread:bump", { groupId });
-      }
+    const rooms = store.listMemberIds(groupId).map((id) => "user:" + id);
+    if (rooms.length) {
+      io.to(rooms).except(groupId).emit("unread:bump", { groupId });
     }
   };
 
@@ -420,14 +416,11 @@ app.prepare().then(async () => {
   // still holds this group in memory, and a room-only broadcast left them with
   // stale pins/reactions until they reloaded.
   //
-  // Public groups go to the whole workspace (anyone may open one, so anyone may
-  // be showing its state); private groups and DMs go to their members' user
-  // rooms. Null when a private group has no members to notify — `io.to([])`
-  // would broadcast to EVERY socket, not none.
-  const groupAudience = (groupId: string, rooms = memberRooms(groupId)) => {
-    if (store.isPublicGroup(groupId)) return io;
-    return rooms.length ? io.to(rooms) : null;
-  };
+  // Always the members' user rooms — a group is visible only to its roster.
+  // Null when there are no members to notify: `io.to([])` would broadcast to
+  // EVERY socket, not none.
+  const groupAudience = (groupId: string, rooms = memberRooms(groupId)) =>
+    rooms.length ? io.to(rooms) : null;
 
   // --- Web Push (Phase 6) ----------------------------------------------------
   const pushReady = !!(
@@ -572,18 +565,13 @@ app.prepare().then(async () => {
     // Authorization guard for room-scoped actions.
     const authorized = (groupId: string) => store.canAccess(groupId, userId);
 
-    // Broadcast a group's updated meta/roster: to the whole workspace for
-    // public groups (everyone can see them), else to each member individually.
-    // Strip messages throughout — recipients keep their own viewer-correct
-    // history; this only carries meta + roster.
+    // Broadcast a group's updated meta/roster to its members. Strip messages
+    // throughout — recipients keep their own viewer-correct history; this only
+    // carries meta + roster.
     const emitGroupUpdated = (group: Group) => {
-      if (group.type === "group" && !group.private) {
-        io.emit("group:updated", { group: { ...group, messages: [] } });
-        return;
-      }
-      // Private group or DM: every member, not just the sockets currently in the
-      // room — and each gets its OWN view, since a DM's `name`/`user` are the
-      // other participant and the client merges this over its roster entry.
+      // Every member, not just the sockets currently in the room — and each gets
+      // its OWN view, since a DM's `name`/`user` are the other participant and
+      // the client merges this over its roster entry.
       for (const memberId of store.listMemberIds(group.id)) {
         const view = store.getGroup(group.id, memberId) ?? group;
         io.to("user:" + memberId).emit("group:updated", {
@@ -602,18 +590,13 @@ app.prepare().then(async () => {
     // Join a group's room, then replay durable history from Postgres to this
     // socket (backfills messages missed while offline / on a new device). The
     // client merges it into its local cache and decrypts locally.
+    //
+    // Joining means opening a conversation you're already in — it never grants
+    // access. `authorized` (= membership) is the gate; a non-member's join is a
+    // no-op, and they were never told the group exists in the first place.
     socket.on("group:join", ({ groupId }) => {
       if (!authorized(groupId)) return;
       socket.join(groupId);
-      // Public-group access is implicit (anyone may read), but E2EE
-      // sender-key distribution targets the *explicit* member roster. Record
-      // the joiner as a member so they receive sender keys (and senders see the
-      // roster change and re-key on their next message). Without this, viewers
-      // of a public group who never created it only ever see 🔒.
-      if (store.isPublicGroup(groupId) && store.addMember(groupId, userId)) {
-        const group = store.getGroup(groupId, userId);
-        if (group) emitGroupUpdated(group);
-      }
       void replayGroup(groupId);
     });
 
@@ -781,23 +764,42 @@ app.prepare().then(async () => {
       maybePush(dmId, userId, me.name);
     });
 
-    // Create a group. Public groups are announced to the whole workspace so
-    // they appear in everyone's sidebar; private groups only to the creator.
-    socket.on("group:create", ({ name, topic, private: isPrivate }, ack) => {
+    // Create a group. A group is visible only to its roster, so it is announced
+    // to exactly the people it was created with — never to the workspace.
+    socket.on("group:create", ({ name, topic, memberIds }, ack) => {
+      // Shape-validate only (non-empty, deduped, creator excluded — they're
+      // added unconditionally). Deliberately NOT checked against the workspace
+      // roster: that roster is process-memory and refills as users reconnect, so
+      // after a restart it would silently drop an invitee who simply hasn't
+      // reconnected yet. `dm:create` accepts any recipient key for the same
+      // reason, and membership grants nothing a client couldn't already do.
+      const invited = [
+        ...new Set(
+          (Array.isArray(memberIds) ? memberIds : [])
+            .filter((id): id is string => typeof id === "string" && !!id.trim())
+            .map((id) => id.trim()),
+        ),
+      ].filter((id) => id !== userId);
+      if (!invited.length) {
+        ack?.({ ok: false, error: "Add at least one person to the group." });
+        return;
+      }
       const group = store.createGroup(name, {
         topic,
-        private: isPrivate,
         creatorId: userId,
+        memberIds: invited,
       });
       if (!group) {
         ack?.({ ok: false, error: "Enter a valid group name." });
         return;
       }
       socket.join(group.id);
-      if (isPrivate) {
-        io.to("user:" + userId).emit("group:created", { group });
-      } else {
-        io.emit("group:created", { group });
+      // Each member gets their own view (toGroup is viewer-relative) in their
+      // user room — so an invitee sees the group appear without having to be
+      // looking at anything in particular, and nobody else learns it exists.
+      for (const memberId of store.listMemberIds(group.id)) {
+        const view = store.getGroup(group.id, memberId) ?? group;
+        io.to("user:" + memberId).emit("group:created", { group: view });
       }
       ack?.({ ok: true, groupId: group.id });
     });
@@ -826,14 +828,12 @@ app.prepare().then(async () => {
         ack?.({ ok: false, error: "This group can't be deleted." });
         return;
       }
-      const isPublic = !group.private;
       // Capture the roster BEFORE deleting — afterwards there are no members
-      // left to address, and a private group's removal has to reach members who
-      // aren't currently viewing it.
+      // left to address, and the removal has to reach members who aren't
+      // currently viewing the group.
       const rooms = memberRooms(groupId);
       store.deleteGroup(groupId);
-      if (isPublic) io.emit("group:deleted", { groupId });
-      else groupAudience(groupId, rooms)?.emit("group:deleted", { groupId });
+      groupAudience(groupId, rooms)?.emit("group:deleted", { groupId });
       ack?.({ ok: true });
     });
 
@@ -843,17 +843,23 @@ app.prepare().then(async () => {
         ack?.({ ok: false, error: "You can't manage this group." });
         return;
       }
-      store.addMember(groupId, memberId);
+      // Already a member (or a DM, which refuses a third) — nothing changed, so
+      // don't re-announce: a redundant roster broadcast makes every member's
+      // client re-diff its MLS membership for no reason.
+      if (!store.addMember(groupId, memberId)) {
+        ack?.({ ok: true });
+        return;
+      }
       const group = store.getGroup(groupId, userId);
       if (group) {
         emitGroupUpdated(group);
-        // A new private-group member needs the group surfaced for them
-        // (messages stripped — they'll load fresh history when they open it).
-        if (group.private) {
-          io.to("user:" + memberId).emit("group:created", {
-            group: { ...group, messages: [] },
-          });
-        }
+        // The new member has never seen this group — surface it for them, in
+        // their own view (messages stripped: they'll load fresh history when
+        // they open it).
+        const view = store.getGroup(groupId, memberId) ?? group;
+        io.to("user:" + memberId).emit("group:created", {
+          group: { ...view, messages: [] },
+        });
       }
       ack?.({ ok: true });
     });
@@ -864,14 +870,14 @@ app.prepare().then(async () => {
         ack?.({ ok: false, error: "You can't manage this group." });
         return;
       }
-      const wasPrivate = store.getGroup(groupId, userId)?.private;
       store.removeMember(groupId, memberId);
       const group = store.getGroup(groupId, userId);
       if (group) emitGroupUpdated(group);
-      // A removed private-group member loses access — drop it from their UI.
-      if (wasPrivate) {
-        io.to("user:" + memberId).emit("group:deleted", { groupId });
-      }
+      // A removed member loses access — drop the group from their UI, and evict
+      // their sockets from its room so room-scoped traffic (typing, and the
+      // unread-bump exclusion) stops reaching them mid-session.
+      io.to("user:" + memberId).emit("group:deleted", { groupId });
+      void io.in("user:" + memberId).socketsLeave(groupId);
       ack?.({ ok: true });
     });
 

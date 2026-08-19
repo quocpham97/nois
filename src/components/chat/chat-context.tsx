@@ -491,7 +491,7 @@ type ChatContextValue = {
   createGroup: (
     name: string,
     topic: string,
-    isPrivate: boolean,
+    memberIds: string[],
     onError?: (msg: string) => void,
   ) => void;
   /** Group management (edit meta, delete, membership). */
@@ -2005,8 +2005,24 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
     // Authorized roster from the server — drives the sidebar lists.
     const onGroupsList = ({ groups: roster }: { groups: Group[] }) => {
+      const visible = new Set(roster.map((c) => c.id));
+      // The roster is the COMPLETE list of conversations this user may see, so
+      // anything else in state is one we've since been removed from (or, on the
+      // move to member-only groups, a public group we were never actually in).
+      // Clear its local history for the same reason onGroupDeleted does — we
+      // can no longer open it, so its ciphertext shouldn't sit on disk.
+      for (const id of Object.keys(groupsRef.current)) {
+        if (!visible.has(id)) void msgdb.removeGroup(id);
+      }
       setGroups((s) => {
-        const next = { ...s };
+        // Drop what's no longer visible before merging: the sidebar reads the
+        // roster-derived order (so it would hide these anyway), but the
+        // Mentions/Threads badges count Object.values(groups) and would keep
+        // scoring messages from conversations that are gone.
+        const next: GroupMap = {};
+        for (const [id, ch] of Object.entries(s)) {
+          if (visible.has(id)) next[id] = ch;
+        }
         for (const c of roster) {
           // Apply server meta (incl. viewer-correct DM partner) but keep any
           // messages already loaded for this group. When none are loaded, seed
@@ -4261,7 +4277,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     (
       name: string,
       topic: string,
-      isPrivate: boolean,
+      memberIds: string[],
       onError?: (msg: string) => void,
     ) => {
       const trimmed = name.trim();
@@ -4269,9 +4285,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         onError?.("Enter a group name.");
         return;
       }
+      if (!memberIds.length) {
+        onError?.("Add at least one person to the group.");
+        return;
+      }
       socket?.emit(
         "group:create",
-        { name: trimmed, topic: topic.trim() || undefined, private: isPrivate },
+        { name: trimmed, topic: topic.trim() || undefined, memberIds },
         (res) => {
           if (res.ok) {
             setCreateGroupOpen(false);

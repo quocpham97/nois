@@ -4,8 +4,8 @@
 // A call is a socket room, `call:<groupId>:<callId>`, and every rule below is
 // derived from the group's roster or the room's occupancy rather than from any
 // per-call server state. What must hold:
-//   - only MEMBERS may start or join a call (read access to a public group is
-//     not enough)
+//   - only MEMBERS may start or join a call — and since groups are member-only,
+//     a non-member can't so much as see the conversation to try
 //   - who rings: the members who are ONLINE, when they'd all fit in the call.
 //     A roster is a poor proxy for reachability — a 40-person group with three
 //     people online is a three-person group as far as a call is concerned — and
@@ -119,18 +119,14 @@ type SignalRelay = { callId: string; fromUserId: string; fromDeviceId: string; d
 async function makeGroup(
   s: Socket,
   name: string,
-  isPrivate: boolean,
   memberIds: string[],
 ): Promise<string> {
   const res = await emitWithAck<{ ok: boolean; groupId?: string }>(s, "group:create", {
     name,
     topic: "call harness",
-    private: isPrivate,
+    memberIds,
   });
   if (!res?.ok || !res.groupId) throw new Error(`group:create failed for ${name}`);
-  for (const id of memberIds) {
-    s.emit("group:addMember", { groupId: res.groupId, userId: id }, () => {});
-  }
   await sleep(250);
   return res.groupId;
 }
@@ -273,7 +269,7 @@ async function main() {
 
   // --- who rings: the ONLINE members, when they'd all fit in the call ----------
 
-  const smallGroup = await makeGroup(bob, "call-small-" + Date.now(), true, [ALICE, CAROL]);
+  const smallGroup = await makeGroup(bob, "call-small-" + Date.now(), [ALICE, CAROL]);
   const smallInv = waitFor<InviteRelay>(aliceD1, "call:invite");
   const smallStart = await emitWithAck<StartResult>(bob, "call:start", {
     groupId: smallGroup,
@@ -290,7 +286,7 @@ async function main() {
   check((await smallInv) !== null, "a member's device actually rings");
   if (smallStart?.ok) bob.emit("call:leave", { callId: smallStart.callId, groupId: smallGroup });
 
-  const bigGroup = await makeGroup(bob, "call-big-" + Date.now(), true, [
+  const bigGroup = await makeGroup(bob, "call-big-" + Date.now(), [
     ALICE,
     CAROL,
     ...CROWD,
@@ -325,24 +321,15 @@ async function main() {
     "a huddle is announced to the conversation instead (call:ongoing)",
   );
 
-  const publicGroup = await makeGroup(bob, "call-public-" + Date.now(), false, [ALICE]);
-  const pubInv = waitFor<InviteRelay>(aliceD1, "call:invite", 1200);
-  const pubStart = await emitWithAck<StartResult>(bob, "call:start", {
-    groupId: publicGroup,
-    video: false,
-  });
-  check(
-    pubStart?.ok === true && pubStart.ringing === true,
-    "a PUBLIC group rings too — reachability, not privacy, decides",
-  );
-  check((await pubInv) !== null, "a public group member's device actually rings");
-  if (pubStart?.ok) bob.emit("call:leave", { callId: pubStart.callId, groupId: publicGroup });
+  // (A "public group rings too" case lived here. Groups are member-only now —
+  // there is no privacy flag left for ringing to be independent of, and it was
+  // otherwise a duplicate of the small-group case above.)
 
   // The case the whole rule exists for: a group far past the cap on paper, but
   // with almost nobody actually connected. Under a roster-counted rule this was
   // a silent huddle; counting who can answer, it rings the one person who can.
   const dormant = ["z1", "z2", "z3", "z4", "z5"].map((c) => `call-${c}@offline`);
-  const dormantGroup = await makeGroup(bob, "call-dormant-" + Date.now(), false, [
+  const dormantGroup = await makeGroup(bob, "call-dormant-" + Date.now(), [
     ALICE,
     ...dormant,
   ]);
@@ -454,7 +441,7 @@ async function main() {
   // Video eligibility follows presence now, so the group can no longer guarantee
   // the cap on its own: people who were offline when the call started can come
   // online, see the banner and join. The ceiling has to hold at JOIN instead.
-  const growGroup = await makeGroup(bob, "call-grow-" + Date.now(), true, [
+  const growGroup = await makeGroup(bob, "call-grow-" + Date.now(), [
     ALICE,
     CAROL,
     CROWD[0],
@@ -557,7 +544,7 @@ async function main() {
   // Cleanup: harness users' membership/read rows and the test conversations.
   try {
     const pool = getPool();
-    const groupIds = [dmId, smallGroup, bigGroup, publicGroup, dormantGroup, growGroup];
+    const groupIds = [dmId, smallGroup, bigGroup, dormantGroup, growGroup];
     await pool.query(`DELETE FROM message WHERE group_id = ANY($1)`, [groupIds]);
     await pool.query(`DELETE FROM group_member WHERE user_id = ANY($1)`, [[...ALL, ...dormant]]);
     await pool.query(`DELETE FROM read_cursor WHERE user_id = ANY($1)`, [ALL]);

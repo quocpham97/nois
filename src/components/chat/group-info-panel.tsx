@@ -312,9 +312,7 @@ export function GroupInfoPanel() {
                 {ch.topic || <span className="text-app-muted">No topic set.</span>}
               </div>
               <div className="mt-1.5 text-[12.5px] leading-[1.5] text-app-muted">
-                {ch.private
-                  ? "Private group — only invited members can see it."
-                  : "Open to everyone in the workspace."}
+                Only the members below can see this group.
               </div>
             </Section>
           ))}

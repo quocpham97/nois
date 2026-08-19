@@ -65,13 +65,18 @@ async function main() {
   const pinner = await connect(PINNER);
   await sleep(300);
 
-  // A throwaway public group, deleted at the end so it doesn't linger in
-  // anyone's sidebar.
+  // A throwaway group with the viewer on its roster from the start (groups are
+  // member-only — a viewer who was never added can't open it at all), deleted at
+  // the end so it doesn't linger in either sidebar.
   const stamp = Date.now();
   const groupId = await new Promise<string>((resolve, reject) => {
     pinner.emit(
       "group:create",
-      { name: `pinviz-${stamp}`, topic: "pin visibility harness" },
+      {
+        name: `pinviz-${stamp}`,
+        topic: "pin visibility harness",
+        memberIds: [VIEWER],
+      },
       (res: { ok: boolean; groupId?: string }) =>
         res.ok && res.groupId ? resolve(res.groupId) : reject(new Error("create failed")),
     );

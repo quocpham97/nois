@@ -99,6 +99,13 @@ export function ensureSchema(): Promise<void> {
       await pool.query(
         `ALTER TABLE "group" ADD COLUMN IF NOT EXISTS bubble_theme text`,
       );
+      // Groups are member-only: visibility comes from group_member, and
+      // store.canAccess no longer reads `private` at all. Backfill it anyway so
+      // rows left over from the public-group era are fail-closed rather than
+      // fail-open if a reader ever returns (or this ships alongside a rollback).
+      await pool.query(
+        `UPDATE "group" SET private = true WHERE type = 'group' AND private = false`,
+      );
       await pool.query(
         `CREATE TABLE IF NOT EXISTS group_member (
            group_id text NOT NULL,

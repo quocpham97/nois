@@ -79,7 +79,9 @@ export type DmCreatePayload = {
 export type GroupCreatePayload = {
   name: string;
   topic?: string;
-  private?: boolean;
+  /** Workspace members to seed the roster with (the creator is added by the
+   *  server). A group is visible ONLY to its roster, so this can't be empty. */
+  memberIds: string[];
 };
 
 /** Ack for group:create — carries the server-assigned id on success. */

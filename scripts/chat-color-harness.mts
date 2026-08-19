@@ -78,12 +78,15 @@ async function main() {
   const groupId = await new Promise<string>((resolve, reject) => {
     setter.emit(
       "group:create",
-      { name: `color-${stamp}`, topic: "chat color harness", private: true },
+      {
+        name: `color-${stamp}`,
+        topic: "chat color harness",
+        memberIds: [VIEWER],
+      },
       (res: { ok: boolean; groupId?: string }) =>
         res.ok && res.groupId ? resolve(res.groupId) : reject(new Error("create failed")),
     );
   });
-  setter.emit("group:addMember", { groupId, userId: VIEWER }, () => {});
   setter.emit("message:send", { groupId, text: `hello-${stamp}`, clientId: `c-${stamp}` });
   await sleep(600);
 

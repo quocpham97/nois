@@ -64,12 +64,11 @@ async function main() {
   const groupId = await new Promise<string>((resolve, reject) => {
     sender.emit(
       "group:create",
-      { name: `layout-${stamp}`, topic: "layout harness", private: true },
+      { name: `layout-${stamp}`, topic: "layout harness", memberIds: [VIEWER] },
       (res: { ok: boolean; groupId?: string }) =>
         res.ok && res.groupId ? resolve(res.groupId) : reject(new Error("create failed")),
     );
   });
-  sender.emit("group:addMember", { groupId, userId: VIEWER }, () => {});
   for (let i = 0; i < MESSAGES; i++) {
     sender.emit("message:send", {
       groupId,
