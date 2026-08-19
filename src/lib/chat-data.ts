@@ -322,6 +322,13 @@ export const QUICK_EMOJI = ["👍", "❤️", "😂", "🔥", "🎉", "☕"];
 
 export type GroupMap = Record<string, Group>;
 
+/**
+ * A conversation WITHOUT its message list — what a header, banner or avatar
+ * actually needs. Views take this so they don't re-render on every new message
+ * (see stores/chat-selectors `useGroupMeta`). `Group` is assignable to it.
+ */
+export type GroupMeta = Omit<Group, "messages"> & { messages?: Message[] };
+
 export type Workspace = {
   name: string;
   initials: string;
@@ -348,13 +355,14 @@ export function presenceLabel(p?: Presence): string {
  * aren't membership-tracked server-side, so this is the truthful participant
  * set — shared by the header avatars and the group-info panel so they match.
  */
-export function groupMembers(ch: Group, me: User): User[] {
+export function groupMembers(ch: GroupMeta, me: User): User[] {
   // Prefer the server's authoritative roster; fall back to participants seen in
-  // loaded history (e.g. before the roster has arrived, or optimistic state).
+  // loaded history (e.g. before the roster has arrived, or optimistic state) —
+  // which a meta-only caller simply doesn't have.
   if (ch.memberList) return ch.memberList;
   const byName = new Map<string, User>();
   byName.set(me.name, me);
-  for (const m of ch.messages) byName.set(m.author.name, m.author);
+  for (const m of ch.messages ?? []) byName.set(m.author.name, m.author);
   if (ch.type === "dm" && ch.user) byName.set(ch.user.name, ch.user);
   return [...byName.values()];
 }

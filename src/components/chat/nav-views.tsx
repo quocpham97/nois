@@ -2,8 +2,9 @@
 
 import { AtSign, FileText, Trash2, X } from "lucide-react";
 import type { Group, Message } from "@/lib/chat-data";
-import { useChat } from "./chat-context";
-import { useSocket } from "./socket-context";
+import { useSessionStore } from "@/stores/session-store";
+import { useChatStore } from "@/stores/chat-store";
+import { useChatActions } from "./chat-actions";
 
 const groupLabel = (ch: Group) =>
   ch.type === "dm" ? "@" + (ch.user?.name ?? ch.name) : "#" + ch.name;
@@ -20,7 +21,7 @@ function PanelShell({
   count?: number;
   children: React.ReactNode;
 }) {
-  const { closePanel } = useChat();
+  const { closePanel } = useChatActions();
   return (
     <>
       <div className="flex items-center gap-2.5 border-b border-app-border px-6 pb-3 pt-3.5">
@@ -100,8 +101,9 @@ function MessageRow({
 }
 
 export function MentionsView() {
-  const { groups, selectGroup, jumpToMessage } = useChat();
-  const { user } = useSocket();
+  const groups = useChatStore((s) => s.groups);
+  const { selectGroup, jumpToMessage } = useChatActions();
+  const user = useSessionStore((s) => s.user);
   const me = user.name;
   const rows: { chId: string; ch: Group; msg: Message }[] = [];
   Object.entries(groups).forEach(([chId, ch]) => {
@@ -142,7 +144,9 @@ export function MentionsView() {
 }
 
 export function DraftsView() {
-  const { groups, drafts, clearDraft, selectGroup } = useChat();
+  const groups = useChatStore((s) => s.groups);
+  const drafts = useChatStore((s) => s.drafts);
+  const { clearDraft, selectGroup } = useChatActions();
   const entries = Object.entries(drafts);
 
   return (

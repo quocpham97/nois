@@ -1,32 +1,39 @@
 "use client";
 
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { Search, SquarePen } from "lucide-react";
-import { useChat } from "../chat/chat-context";
 import { previewOf, ConvAvatar } from "../chat/sidebar";
 import { Avatar } from "../chat/bits";
 import type { Group } from "@/lib/chat-data";
+import { useShallow } from "zustand/react/shallow";
+import { useChatStore } from "@/stores/chat-store";
+import { useArchivedIds, useMyUser } from "@/stores/chat-selectors";
+import { useChatActions } from "../chat/chat-actions";
 
 // Chats tab — the mobile home. Mirrors the "Chats" screen of Messenger Mobile:
 // big title + compose, a search pill, an "active now" avatar strip, then the
-// conversation rows. All data is live from useChat(); rows reuse the desktop
+// conversation rows. All data is live from the chat store; rows reuse the desktop
 // sidebar's previewOf() and ConvAvatar so previews/avatars stay identical.
 function lastTs(ch: Group): number {
   return ch.messages[ch.messages.length - 1]?.ts ?? 0;
 }
 
 export function ChatsScreen() {
-  const {
-    groups,
-    groupOrder,
-    dmOrder,
-    isArchived,
-    unreadByGroup,
-    selectGroup,
-    openCompose,
-    openSearch,
-    myUser,
-  } = useChat();
+  const { groups, groupOrder, dmOrder, unreadByGroup } = useChatStore(
+    useShallow((s) => ({
+      groups: s.groups,
+      groupOrder: s.groupOrder,
+      dmOrder: s.dmOrder,
+      unreadByGroup: s.unreadByGroup,
+    })),
+  );
+  const myUser = useMyUser();
+  const archivedIds = useArchivedIds();
+  const isArchived = useCallback(
+    (id: string) => archivedIds.includes(id),
+    [archivedIds],
+  );
+  const { selectGroup, openCompose, openSearch } = useChatActions();
 
   const rows = useMemo(() => {
     const ids = [...groupOrder, ...dmOrder].filter(

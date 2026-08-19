@@ -4,43 +4,38 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Info, Phone, Pin, Search, Video, X } from "lucide-react";
 import {
   gradientFor,
-  type Group,
   type Message as Msg,
   groupMembers,
   deriveUser,
   presenceColor,
   presenceLabel,
 } from "@/lib/chat-data";
-import { useChat } from "./chat-context";
-import { useSocket } from "./socket-context";
-import { useCall } from "./call-context";
+import { useSessionStore } from "@/stores/session-store";
+import { useCallStore } from "@/stores/call-store";
+import { useCallActions } from "./call-actions";
 import { Avatar, GroupIcon } from "./bits";
 import { ConvAvatar } from "./sidebar";
 import { Message } from "./message";
 import { Composer } from "./composer";
+import { useChatStore } from "@/stores/chat-store";
+import {
+  useBubbleTheme,
+  useGroupMeta,
+  useGroupMessages,
+  useMyUser,
+} from "@/stores/chat-selectors";
+import { useChatActions } from "./chat-actions";
 
-function GroupHeader({ ch }: { ch: Group }) {
-  const {
-    openSearch,
-    pinnedPanelFor,
-    togglePinnedPanel,
-    togglePin,
-    jumpToMessage,
-    groupInfoOpen,
-    toggleGroupInfo,
-  } = useChat();
-  const { user: me } = useSocket();
-  const { startCall, call } = useCall();
-  const inCall = call != null;
-  const isDm = ch.type === "dm";
-  const members = groupMembers(ch, me);
-  // Mirrors the server's rules (server.ts CALL_MAX_VIDEO / CALL_RING_MAX) — the
-  // server is authoritative; these just shape the affordances.
-  const memberCount = ch.members ?? members.length;
-  const videoEligible = memberCount <= 4;
-  const ringEligible = !(ch.type === "group" && ch.private === false) && memberCount <= 6;
-  const pins = ch.pinned || [];
-  const panelOpen = pinnedPanelFor === ch.id;
+function GroupHeader({ groupId }: { groupId: string }) {
+  const ch = useGroupMeta(groupId);
+  const pinnedPanelFor = useChatStore((s) => s.pinnedPanelFor);
+  const groupInfoOpen = useChatStore((s) => s.groupInfoOpen);
+  const { openSearch, togglePinnedPanel, togglePin, jumpToMessage, toggleGroupInfo } =
+    useChatActions();
+  const me = useSessionStore((s) => s.user);
+  const call = useCallStore((s) => s.call);
+  const { startCall } = useCallActions();
+  const panelOpen = pinnedPanelFor === groupId;
 
   // Close the pinned-list popover on a click outside it (ignoring its trigger).
   const panelRef = useRef<HTMLDivElement>(null);
@@ -50,11 +45,22 @@ function GroupHeader({ ch }: { ch: Group }) {
       const t = e.target as HTMLElement;
       if (panelRef.current?.contains(t) || t.closest("[data-pin-trigger]"))
         return;
-      togglePinnedPanel(ch.id);
+      togglePinnedPanel(groupId);
     };
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
-  }, [panelOpen, ch.id, togglePinnedPanel]);
+  }, [panelOpen, groupId, togglePinnedPanel]);
+
+  if (!ch) return null;
+  const inCall = call != null;
+  const isDm = ch.type === "dm";
+  const members = groupMembers(ch, me);
+  // Mirrors the server's rules (server.ts CALL_MAX_VIDEO / CALL_RING_MAX) — the
+  // server is authoritative; these just shape the affordances.
+  const memberCount = ch.members ?? members.length;
+  const videoEligible = memberCount <= 4;
+  const ringEligible = !(ch.type === "group" && ch.private === false) && memberCount <= 6;
+  const pins = ch.pinned || [];
   return (
     // app-drag: in the Electron shell this header doubles as the title bar.
     <div className="app-drag flex h-16 shrink-0 items-center gap-3 border-b border-app-border px-4">
@@ -250,9 +256,11 @@ function GroupHeader({ ch }: { ch: Group }) {
  * NB the design comp has no state for this; the bar is modelled on the pinned
  * bar below it and should get a proper design pass.
  */
-function OngoingCallBar({ ch }: { ch: Group }) {
-  const { ongoing, joinOngoing, call } = useCall();
-  const live = ongoing[ch.id];
+function OngoingCallBar({ groupId }: { groupId: string }) {
+  const ongoing = useCallStore((s) => s.ongoing);
+  const call = useCallStore((s) => s.call);
+  const { joinOngoing } = useCallActions();
+  const live = ongoing[groupId];
   // Once we're in it, the call panel is the UI — don't offer to join twice.
   if (!live || call) return null;
   return (
@@ -268,7 +276,7 @@ function OngoingCallBar({ ch }: { ch: Group }) {
         <span className="font-semibold">Ongoing {live.video ? "video" : "voice"} call</span>
       </div>
       <button
-        onClick={() => void joinOngoing(ch.id)}
+        onClick={() => void joinOngoing(groupId)}
         className="shrink-0 rounded-full bg-app-accent px-3.5 py-1.5 text-[12.5px] font-semibold text-white hover:bg-app-accent-hover"
       >
         Join
@@ -277,15 +285,19 @@ function OngoingCallBar({ ch }: { ch: Group }) {
   );
 }
 
-function PinnedBar({ ch }: { ch: Group }) {
-  const { clearPins, jumpToMessage } = useChat();
-  const pins = ch.pinned ?? [];
+function PinnedBar({ groupId }: { groupId: string }) {
+  const { clearPins, jumpToMessage } = useChatActions();
+  const pins = useChatStore((s) => s.groups[groupId]?.pinned) ?? [];
+  const label = useChatStore((s) => {
+    const ch = s.groups[groupId];
+    return ch?.type === "dm" ? "this chat" : (ch?.name ?? "this group");
+  });
   // Dismissing unpins for the whole group, so it confirms first — the same
   // two-step inline pattern as deleting a group. The confirm is keyed to this
   // group's current pin set, so switching conversation or any pin change drops
   // it rather than leaving a stale confirm over fresh pins.
   const [confirmFor, setConfirmFor] = useState<string | null>(null);
-  const pinKey = `${ch.id}:${pins.length}:${pins[0]?.id ?? ""}`;
+  const pinKey = `${groupId}:${pins.length}:${pins[0]?.id ?? ""}`;
   const confirming = confirmFor === pinKey;
   if (!pins.length) return null;
   const p = pins[0];
@@ -298,10 +310,10 @@ function PinnedBar({ ch }: { ch: Group }) {
         </span>
         <span className="min-w-0 flex-1 text-app-text">
           Unpin {pins.length === 1 ? "this message" : `all ${pins.length}`} for
-          everyone in {ch.type === "dm" ? "this chat" : ch.name}?
+          everyone in {label}?
         </span>
         <button
-          onClick={() => clearPins(ch.id)}
+          onClick={() => clearPins(groupId)}
           className="shrink-0 rounded-full px-3 py-1 text-[12.5px] font-semibold text-white"
           style={{ background: "var(--app-red)" }}
         >
@@ -322,7 +334,7 @@ function PinnedBar({ ch }: { ch: Group }) {
         <Pin size={14} strokeWidth={1.8} />
       </span>
       <button
-        onClick={() => jumpToMessage(ch.id, p.id)}
+        onClick={() => jumpToMessage(groupId, p.id)}
         title="Jump to pinned message"
         className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
       >
@@ -357,9 +369,10 @@ function firstName(uid: string): string {
 }
 
 /** Messenger-style typing indicator: the typer's avatar + a dots bubble. */
-function TypingIndicator({ ch }: { ch: Group }) {
-  const { typingByGroup, userId } = useChat();
-  const typers = (typingByGroup[ch.id] || []).filter((u) => u !== userId);
+function TypingIndicator({ groupId }: { groupId: string }) {
+  const typing = useChatStore((s) => s.typingByGroup[groupId]);
+  const userId = useSessionStore((s) => s.userId);
+  const typers = (typing || []).filter((u) => u !== userId);
   if (typers.length === 0) {
     return <div className="h-2" />;
   }
@@ -391,10 +404,14 @@ function TypingIndicator({ ch }: { ch: Group }) {
 }
 
 /** Intro block at the very start of a conversation's history. */
-function ConvIntro({ ch }: { ch: Group }) {
-  const { myUser } = useChat();
+function ConvIntro({ groupId }: { groupId: string }) {
+  const ch = useGroupMeta(groupId);
+  const myUser = useMyUser();
+  if (!ch) return null;
   const isDm = ch.type === "dm";
-  const members = groupMembers(ch, myUser);
+  // The server's count is authoritative; the roster-derived length is the
+  // fallback while `groups:list` hasn't landed.
+  const memberCount = ch.members ?? groupMembers(ch, myUser).length;
   return (
     <div className="flex flex-col items-center px-5 pb-3 pt-6 text-center">
       <ConvAvatar ch={ch} me={myUser} size={72} />
@@ -404,14 +421,16 @@ function ConvIntro({ ch }: { ch: Group }) {
       <div className="mt-0.5 text-[13px] text-app-muted">
         {isDm
           ? "You're connected on Nois"
-          : `Group · ${members.length} ${members.length === 1 ? "member" : "members"}`}
+          : `Group · ${memberCount} ${memberCount === 1 ? "member" : "members"}`}
       </div>
     </div>
   );
 }
 
-function EmptyState({ ch }: { ch: Group }) {
-  const { sendMessage } = useChat();
+function EmptyState({ groupId }: { groupId: string }) {
+  const ch = useGroupMeta(groupId);
+  const { sendMessage } = useChatActions();
+  if (!ch) return null;
   const isDm = ch.type === "dm";
   return (
     <div className="flex flex-1 flex-col items-center justify-center p-10 text-center">
@@ -454,25 +473,19 @@ function EmptyState({ ch }: { ch: Group }) {
   );
 }
 
-export function GroupView({ ch }: { ch: Group }) {
-  const {
-    scrollRef,
-    historyCursor,
-    loadOlder,
-    highlightMsgId,
-    clearHighlight,
-    bubbleTheme,
-  } = useChat();
+export function GroupView({ groupId }: { groupId: string }) {
+  const all = useGroupMessages(groupId);
+  const convTheme = useChatStore((s) => s.groups[groupId]?.bubbleTheme);
+  const hasOlder = useChatStore((s) => s.historyCursor[groupId] != null);
+  const highlightMsgId = useChatStore((s) => s.highlightMsgId);
+  const bubbleTheme = useBubbleTheme();
+  const { scrollRef, loadOlder, clearHighlight } = useChatActions();
   // The sidebar's cached preview line rides in `messages` as a placeholder so
   // the conversation list can paint before the socket connects (see the roster
-  // cache in chat-context). It holds a rendered snippet, not a body, so the
+  // cache in lib/roster-cache). It holds a rendered snippet, not a body, so the
   // thread must never render it — history/live arrivals supersede it by id.
-  const messages = useMemo(
-    () => ch.messages.filter((m) => !m.snapshot),
-    [ch.messages],
-  );
+  const messages = useMemo(() => all.filter((m) => !m.snapshot), [all]);
   const empty = messages.length === 0;
-  const hasOlder = historyCursor[ch.id] != null;
 
   // Pin to the latest message on group open / history load / new bottom
   // message — but not when older pages are prepended (same last id) or while
@@ -483,15 +496,15 @@ export function GroupView({ ch }: { ch: Group }) {
     const el = scrollRef.current;
     if (!el) return;
     const prev = lastSeen.current;
-    const groupChanged = prev.chId !== ch.id;
+    const groupChanged = prev.chId !== groupId;
     const newBottom = prev.lastId !== lastId;
-    lastSeen.current = { chId: ch.id, lastId };
+    lastSeen.current = { chId: groupId, lastId };
     if ((groupChanged || newBottom) && !highlightMsgId) {
       requestAnimationFrame(() => {
         el.scrollTop = el.scrollHeight;
       });
     }
-  }, [ch.id, lastId, highlightMsgId, scrollRef]);
+  }, [groupId, lastId, highlightMsgId, scrollRef]);
 
   // Scroll to and briefly highlight a jumped-to message (e.g. from a pin).
   useEffect(() => {
@@ -528,33 +541,33 @@ export function GroupView({ ch }: { ch: Group }) {
       className="flex min-h-0 min-w-0 flex-1 flex-col"
       style={
         {
-          "--sent-grad": gradientFor(ch.bubbleTheme ?? bubbleTheme),
+          "--sent-grad": gradientFor(convTheme ?? bubbleTheme),
         } as React.CSSProperties
       }
     >
-      <GroupHeader ch={ch} />
-      <OngoingCallBar ch={ch} />
-      <PinnedBar ch={ch} />
+      <GroupHeader groupId={groupId} />
+      <OngoingCallBar groupId={groupId} />
+      <PinnedBar groupId={groupId} />
       <div
         ref={scrollRef}
         className="app-scroll flex flex-1 flex-col overflow-y-auto"
       >
         {empty ? (
-          <EmptyState ch={ch} />
+          <EmptyState groupId={groupId} />
         ) : (
           <>
             <div className="flex-1" />
             {hasOlder ? (
               <div className="flex justify-center py-2">
                 <button
-                  onClick={() => loadOlder(ch.id)}
+                  onClick={() => loadOlder(groupId)}
                   className="rounded-full border border-app-border bg-panel-2 px-3 py-1 text-[12px] font-medium text-app-muted hover:bg-panel-hover hover:text-app-text"
                 >
                   Load older messages
                 </button>
               </div>
             ) : (
-              <ConvIntro ch={ch} />
+              <ConvIntro groupId={groupId} />
             )}
             {groups.map((g, i) => (
               <div key={i}>
@@ -567,8 +580,8 @@ export function GroupView({ ch }: { ch: Group }) {
           </>
         )}
       </div>
-      {!empty && <TypingIndicator ch={ch} />}
-      <Composer group={ch} inThread={false} />
+      {!empty && <TypingIndicator groupId={groupId} />}
+      <Composer groupId={groupId} inThread={false} />
     </div>
   );
 }

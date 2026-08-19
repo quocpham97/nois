@@ -3,11 +3,15 @@
 import { useState } from "react";
 import { signOut } from "next-auth/react";
 import { ShieldCheck, KeyRound, ShieldAlert } from "lucide-react";
-import { useSocket } from "./socket-context";
-import { useChat } from "./chat-context";
+import { useShallow } from "zustand/react/shallow";
+import { useSessionStore } from "@/stores/session-store";
+import { useSessionActions } from "./session-actions";
 import { clearDeviceIdentity } from "@/lib/crypto/identity";
 import { clearAll as clearMessages } from "@/lib/message-db";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { useChatStore } from "@/stores/chat-store";
+import { useKeyAlerts } from "@/stores/chat-selectors";
+import { useChatActions } from "./chat-actions";
 
 function relTime(iso: string | null): string {
   if (!iso) return "never";
@@ -42,7 +46,8 @@ function generateRecoveryCode(): string {
  * identity is created and old history stays 🔒).
  */
 export function RestoreKeysModal() {
-  const { needsRestore, runRestore, skipRestore } = useSocket();
+  const needsRestore = useSessionStore((s) => s.needsRestore);
+  const { runRestore, skipRestore } = useSessionActions();
   const [pass, setPass] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -58,7 +63,7 @@ export function RestoreKeysModal() {
     try {
       await runRestore(pass);
       setPass("");
-      // Reload so chat-context re-reads the restored keys + message history from
+      // Reload so the chat hooks re-read the restored keys + message history from
       // storage and 🔒 history re-renders as plaintext (mirrors the Settings
       // "Restore from backup" path).
       window.location.reload();
@@ -133,15 +138,15 @@ export function RestoreKeysModal() {
  *  (opened via the shared context flag) so it can also be popped from the nudge
  *  banner without opening Settings. */
 export function BackupPanel() {
-  const {
-    backupUpdatedAt,
-    backupEnabled,
-    backupNow,
-    deleteBackup,
-    runRestore,
-    unlockBackup,
-  } = useSocket();
-  const { setBackupSetupOpen } = useChat();
+  const { backupUpdatedAt, backupEnabled } = useSessionStore(
+    useShallow((s) => ({
+      backupUpdatedAt: s.backupUpdatedAt,
+      backupEnabled: s.backupEnabled,
+    })),
+  );
+  const { backupNow, deleteBackup, runRestore, unlockBackup } =
+    useSessionActions();
+  const { setBackupSetupOpen } = useChatActions();
   const [backingUp, setBackingUp] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -446,16 +451,19 @@ export function BackupPanel() {
  * (chat-app.tsx). Doubles as "Change PIN" when a backup already exists.
  */
 export function BackupSetupModal() {
-  const {
-    backupUpdatedAt,
-    createBackup,
-    changeBackupPin,
-    status,
-    deviceId,
-    needsRestore,
-    recovering,
-  } = useSocket();
-  const { backupSetupOpen: open, setBackupSetupOpen: setOpen } = useChat();
+  const { backupUpdatedAt, status, deviceId, needsRestore, recovering } =
+    useSessionStore(
+      useShallow((s) => ({
+        backupUpdatedAt: s.backupUpdatedAt,
+        status: s.status,
+        deviceId: s.deviceId,
+        needsRestore: s.needsRestore,
+        recovering: s.recovering,
+      })),
+    );
+  const { createBackup, changeBackupPin } = useSessionActions();
+  const open = useChatStore((s) => s.backupSetupOpen);
+  const { setBackupSetupOpen: setOpen } = useChatActions();
   // Changing an existing backup requires proving the current secret first, so a
   // backup's PIN can't be silently replaced by someone who doesn't know it.
   const changing = !!backupUpdatedAt;
@@ -662,7 +670,8 @@ export function BackupSetupModal() {
  * time with the new safety number and an Acknowledge action that re-pins.
  */
 export function KeyChangeBanner() {
-  const { keyAlerts, acknowledgeKeyAlert } = useChat();
+  const keyAlerts = useKeyAlerts();
+  const { acknowledgeKeyAlert } = useChatActions();
   if (!keyAlerts.length) return null;
   const a = keyAlerts[0];
   return (
@@ -692,7 +701,7 @@ export function KeyChangeBanner() {
  * devices to approve and hand over the group keys. On success the app reloads.
  */
 export function RecoveryWaitingBanner() {
-  const { recovering } = useSocket();
+  const recovering = useSessionStore((s) => s.recovering);
   if (!recovering) return null;
   return (
     <div className="flex items-center gap-2 border-b border-app-border bg-panel-2 px-4 py-1.5">
@@ -712,7 +721,8 @@ export function RecoveryWaitingBanner() {
  * ONLY on a match; the new device gets the group history keys, not the identity.
  */
 export function DeviceApprovalModal() {
-  const { pendingApproval, approveDevice, denyDevice } = useSocket();
+  const pendingApproval = useSessionStore((s) => s.pendingApproval);
+  const { approveDevice, denyDevice } = useSessionActions();
   if (!pendingApproval) return null;
   return (
     <Dialog open onOpenChange={(o) => !o && denyDevice()}>
@@ -769,8 +779,15 @@ export function SignOutDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const { userId, backupUpdatedAt, backupEnabled, backupNow } = useSocket();
-  const { setBackupSetupOpen } = useChat();
+  const { userId, backupUpdatedAt, backupEnabled } = useSessionStore(
+    useShallow((s) => ({
+      userId: s.userId,
+      backupUpdatedAt: s.backupUpdatedAt,
+      backupEnabled: s.backupEnabled,
+    })),
+  );
+  const { backupNow } = useSessionActions();
+  const { setBackupSetupOpen } = useChatActions();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const hasBackup = backupUpdatedAt !== null;

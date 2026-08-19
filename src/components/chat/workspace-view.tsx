@@ -3,8 +3,10 @@
 import { useState } from "react";
 import { Check, UserPlus, X } from "lucide-react";
 import type { User } from "@/lib/chat-data";
-import { useChat } from "./chat-context";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { useShallow } from "zustand/react/shallow";
+import { useChatStore } from "@/stores/chat-store";
+import { useChatActions } from "./chat-actions";
 
 const memberId = (u: User) => u.id ?? u.name.split(" ")[0].toLowerCase();
 
@@ -20,14 +22,18 @@ function Avatar({ user, size = 32 }: { user: User; size?: number }) {
 }
 
 export function WorkspaceView() {
+  const { workspaceName, workspaceMembers } = useChatStore(
+    useShallow((s) => ({
+      workspaceName: s.workspaceName,
+      workspaceMembers: s.workspaceMembers,
+    })),
+  );
   const {
-    workspaceName,
-    workspaceMembers,
     closeWorkspace,
     renameWorkspace,
     inviteWorkspaceMember,
     removeWorkspaceMember,
-  } = useChat();
+  } = useChatActions();
 
   const [name, setName] = useState(workspaceName);
   const [savedFlash, setSavedFlash] = useState(false);

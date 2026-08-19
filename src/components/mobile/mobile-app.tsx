@@ -1,7 +1,6 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useChat } from "../chat/chat-context";
 import { ComposeView } from "../chat/compose-view";
 import { SettingsView } from "../chat/settings-view";
 import { MentionsView, DraftsView } from "../chat/nav-views";
@@ -19,6 +18,8 @@ import { PeopleScreen } from "./people-screen";
 import { CallsScreen } from "./calls-screen";
 import { ProfileScreen } from "./profile-screen";
 import { TabBar, type MobileTab } from "./tab-bar";
+import { useShallow } from "zustand/react/shallow";
+import { useChatStore } from "@/stores/chat-store";
 
 // Phone-optimized shell — the mobile counterpart of desktop Shell(), rendered
 // by ChatApp/RootShell when the layout is mobile. It reuses the same providers,
@@ -37,7 +38,17 @@ export function MobileApp() {
     activePanel,
     statusOpen,
     unreadByGroup,
-  } = useChat();
+  } = useChatStore(
+    useShallow((s) => ({
+      groups: s.groups,
+      currentGroupId: s.currentGroupId,
+      composeOpen: s.composeOpen,
+      settingsOpen: s.settingsOpen,
+      activePanel: s.activePanel,
+      statusOpen: s.statusOpen,
+      unreadByGroup: s.unreadByGroup,
+    })),
+  );
   const [tab, setTab] = useState<MobileTab>("chats");
 
   const unreadCount = useMemo(

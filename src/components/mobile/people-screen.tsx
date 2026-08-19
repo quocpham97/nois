@@ -8,8 +8,11 @@ import {
   presenceColor,
   presenceLabel,
 } from "@/lib/chat-data";
-import { useChat } from "../chat/chat-context";
 import { Avatar } from "../chat/bits";
+import { useShallow } from "zustand/react/shallow";
+import { useChatStore } from "@/stores/chat-store";
+import { useMyUser } from "@/stores/chat-selectors";
+import { useChatActions } from "../chat/chat-actions";
 
 // People tab. Same model as the desktop sidebar's People panel: fold DM-group
 // presence into a by-user lookup, list the workspace roster alphabetically, and
@@ -44,15 +47,15 @@ function PresenceAvatar({
 }
 
 export function PeopleScreen() {
-  const {
-    workspaceMembers,
-    myUser,
-    groups,
-    dmOrder,
-    selectGroup,
-    openCompose,
-    addRecipient,
-  } = useChat();
+  const { workspaceMembers, groups, dmOrder } = useChatStore(
+    useShallow((s) => ({
+      workspaceMembers: s.workspaceMembers,
+      groups: s.groups,
+      dmOrder: s.dmOrder,
+    })),
+  );
+  const myUser = useMyUser();
+  const { selectGroup, openCompose, addRecipient } = useChatActions();
   const [q, setQ] = useState("");
 
   const presenceOf = useMemo(() => {

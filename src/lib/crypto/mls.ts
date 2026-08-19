@@ -10,7 +10,7 @@
 //
 // MIGRATION NOTE: this implements the same conceptual surface as
 // crypto/group.ts (a per-group group cipher) and is intended to replace it
-// behind chat-context. The cutover swaps three things vs. sender keys:
+// behind hooks/use-mls. The cutover swaps three things vs. sender keys:
 //   * published key material: an MLS KeyPackage instead of prekeys (Phase 0)
 //   * membership: a Commit + Welcome (relayed) instead of a sender-key rotation
 //   * per message: an MLS application message instead of a sender-key ciphertext

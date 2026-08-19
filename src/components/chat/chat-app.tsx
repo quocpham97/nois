@@ -1,8 +1,10 @@
 "use client";
 
-import { ChatProvider, useChat } from "./chat-context";
-import { SocketProvider } from "./socket-context";
-import { CallProvider } from "./call-context";
+import { useShallow } from "zustand/react/shallow";
+import { useChatStore } from "@/stores/chat-store";
+import { ChatProvider } from "./chat-provider";
+import { SessionProvider } from "./session-provider";
+import { CallProvider } from "./call-provider";
 import { CallUI } from "./call-view";
 import { WorkspaceRail } from "./workspace-rail";
 import { Sidebar } from "./sidebar";
@@ -28,14 +30,18 @@ import { useMobileLayout } from "../mobile/use-mobile-layout";
 import { MobileApp } from "../mobile/mobile-app";
 
 function MainView() {
-  const {
-    composeOpen,
-    settingsOpen,
-    createGroupOpen,
-    activePanel,
-    groups,
-    currentGroupId,
-  } = useChat();
+  const { composeOpen, settingsOpen, createGroupOpen, activePanel, groupId } =
+    useChatStore(
+      useShallow((s) => ({
+        composeOpen: s.composeOpen,
+        settingsOpen: s.settingsOpen,
+        createGroupOpen: s.createGroupOpen,
+        activePanel: s.activePanel,
+        // The id only — GroupView subscribes to the conversation itself, so a
+        // new message doesn't re-render this switch.
+        groupId: s.groups[s.currentGroupId] ? s.currentGroupId : "",
+      })),
+    );
 
   if (composeOpen) return <ComposeView />;
   if (settingsOpen) return <SettingsView />;
@@ -44,9 +50,8 @@ function MainView() {
   if (activePanel === "drafts") return <DraftsView />;
   // "people" / "archived" take over the sidebar column (see Sidebar), leaving
   // the main area to show the open conversation or the empty state.
-  const ch = groups[currentGroupId];
-  if (!ch) return <EmptyChatView />;
-  return <GroupView ch={ch} />;
+  if (!groupId) return <EmptyChatView />;
+  return <GroupView groupId={groupId} />;
 }
 
 function Shell() {
@@ -59,7 +64,18 @@ function Shell() {
     workspaceOpen,
     statusOpen,
     activePanel,
-  } = useChat();
+  } = useChatStore(
+    useShallow((s) => ({
+      groupInfoOpen: s.groupInfoOpen,
+      searchOpen: s.searchOpen,
+      composeOpen: s.composeOpen,
+      settingsOpen: s.settingsOpen,
+      createGroupOpen: s.createGroupOpen,
+      workspaceOpen: s.workspaceOpen,
+      statusOpen: s.statusOpen,
+      activePanel: s.activePanel,
+    })),
+  );
   // The group view is what's showing when no full-pane view has taken over
   // (search is a modal overlay now, so it doesn't count).
   const groupActive =
@@ -100,12 +116,12 @@ function RootShell() {
 
 export function ChatApp({ meId, meName }: { meId: string; meName?: string }) {
   return (
-    <SocketProvider meId={meId} meName={meName}>
+    <SessionProvider meId={meId} meName={meName}>
       <ChatProvider>
         <CallProvider>
           <RootShell />
         </CallProvider>
       </ChatProvider>
-    </SocketProvider>
+    </SessionProvider>
   );
 }

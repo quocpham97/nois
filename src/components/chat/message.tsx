@@ -20,15 +20,19 @@ import {
 } from "lucide-react";
 import type { Attachment, Message as Msg, ReplyRef } from "@/lib/chat-data";
 import { callEventTitle, formatMsgTime } from "@/lib/chat-data";
-import { useCall } from "./call-context";
+import { useCallStore } from "@/stores/call-store";
+import { useCallActions } from "./call-actions";
 import { decryptToBlob } from "@/lib/crypto/attachment";
 import { renderRichText } from "@/lib/rich-text";
 import { EmojiPickerPopup } from "./emoji-picker";
 import { richToHtml } from "@/lib/lexical-render";
-import { useChat } from "./chat-context";
 import { Avatar } from "./bits";
 import { AudioPlayer } from "./audio-player";
 import { VideoPlayer } from "./video-player";
+import { useShallow } from "zustand/react/shallow";
+import { useChatStore } from "@/stores/chat-store";
+import { useMyUser, useSeenByMsgId } from "@/stores/chat-selectors";
+import { useChatActions } from "./chat-actions";
 import {
   Popover,
   PopoverContent,
@@ -384,8 +388,11 @@ function AttachmentBlock({ a }: { a: Attachment }) {
  * ones are tinted red, Messenger-style.
  */
 function CallEventRow({ msg }: { msg: Msg }) {
-  const { currentGroupId, groups, retrySend } = useChat();
-  const { startCall, call: activeCall } = useCall();
+  const currentGroupId = useChatStore((s) => s.currentGroupId);
+  const groups = useChatStore((s) => s.groups);
+  const { retrySend } = useChatActions();
+  const activeCall = useCallStore((s) => s.call);
+  const { startCall } = useCallActions();
   const [hovered, setHovered] = useState(false);
   const call = msg.call!;
   const me = msg.self;
@@ -510,26 +517,37 @@ function CallEventRow({ msg }: { msg: Msg }) {
 export function Message({ msg }: { msg: Msg }) {
   const {
     hoverMsgId,
-    setHoverMsgId,
     pickerOpenFor,
+    currentGroupId,
+    groups,
+    highlightMsgId,
+    moreOpenFor,
+  } = useChatStore(
+    useShallow((s) => ({
+      hoverMsgId: s.hoverMsgId,
+      pickerOpenFor: s.pickerOpenFor,
+      currentGroupId: s.currentGroupId,
+      groups: s.groups,
+      highlightMsgId: s.highlightMsgId,
+      moreOpenFor: s.moreOpenFor,
+    })),
+  );
+  const myUser = useMyUser();
+  const seenByMsgId = useSeenByMsgId();
+  const {
+    setHoverMsgId,
     togglePicker,
     toggleReaction,
     retrySend,
-    currentGroupId,
-    groups,
     togglePin,
-    highlightMsgId,
     deleteMessage,
     startEdit,
-    seenByMsgId,
     openForward,
     startReply,
     jumpToMessage,
-    myUser,
-    moreOpenFor,
     toggleMore,
     closeMore,
-  } = useChat();
+  } = useChatActions();
 
   const me = msg.self;
   const seenBy = seenByMsgId[msg.id] ?? [];

@@ -11,7 +11,7 @@
 // async-proxy OPFS VFS that requires them).
 //
 // The public API is byte-for-byte the same as the previous IndexedDB version so
-// callers (chat-context, key-backup) need no changes. Every export is async and
+// callers (the chat hooks, key-backup) need no changes. Every export is async and
 // degrades to a no-op / empty result when Workers/OPFS are unavailable (SSR, or
 // an old browser). One record per message: top-level messages carry
 // conv_id = groupId (parent_id NULL); thread replies carry parent_id

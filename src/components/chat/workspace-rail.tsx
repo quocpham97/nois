@@ -4,9 +4,13 @@ import { useState } from "react";
 import { useTheme } from "next-themes";
 import { Archive, LogOut, MessageCircle, Moon, Settings, Sun, Users } from "lucide-react";
 import { useMounted } from "@/lib/use-mounted";
-import { useChat, type NavPanel } from "./chat-context";
 import { Avatar } from "./bits";
 import { SignOutDialog } from "./key-backup";
+import { useShallow } from "zustand/react/shallow";
+import { useChatStore } from "@/stores/chat-store";
+import { useArchivedIds, useMyUser } from "@/stores/chat-selectors";
+import { useChatActions } from "./chat-actions";
+import type { NavPanel } from "./lib/types";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,16 +28,16 @@ const NAV: { key: NavPanel | null; icon: typeof MessageCircle; label: string }[]
 ];
 
 export function WorkspaceRail() {
-  const {
-    openSettings,
-    myUser,
-    workspaceName,
-    activePanel,
-    openPanel,
-    closePanel,
-    settingsOpen,
-    archivedIds,
-  } = useChat();
+  const { workspaceName, activePanel, settingsOpen } = useChatStore(
+    useShallow((s) => ({
+      workspaceName: s.workspaceName,
+      activePanel: s.activePanel,
+      settingsOpen: s.settingsOpen,
+    })),
+  );
+  const myUser = useMyUser();
+  const archivedIds = useArchivedIds();
+  const { openSettings, openPanel, closePanel } = useChatActions();
   const { resolvedTheme, setTheme } = useTheme();
   const mounted = useMounted();
   const [signOutOpen, setSignOutOpen] = useState(false);

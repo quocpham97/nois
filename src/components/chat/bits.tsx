@@ -1,14 +1,14 @@
 "use client";
 
 import { Lock, Megaphone } from "lucide-react";
-import type { Group, User } from "@/lib/chat-data";
+import type { GroupMeta, User } from "@/lib/chat-data";
 
 export function GroupIcon({
   group,
   color = "currentColor",
   size = 13,
 }: {
-  group: Group;
+  group: GroupMeta;
   color?: string;
   size?: number;
 }) {

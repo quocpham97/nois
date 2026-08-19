@@ -22,10 +22,13 @@ import {
   presenceColor,
   presenceLabel,
 } from "@/lib/chat-data";
-import { useChat } from "./chat-context";
 import { Avatar } from "./bits";
 import { ConvAvatar } from "./sidebar";
 import { useDecryptedImage } from "./message";
+import { useShallow } from "zustand/react/shallow";
+import { useChatStore } from "@/stores/chat-store";
+import { useLikeEmoji, useMyUser } from "@/stores/chat-selectors";
+import { useChatActions } from "./chat-actions";
 
 /** Stable id for a member/user — the server-provided uid (email for real
  * users, seeded key otherwise). Falls back to the first name only for legacy
@@ -85,21 +88,25 @@ function MediaThumb({ a }: { a: Attachment }) {
 }
 
 export function GroupInfoPanel() {
+  const { groups, currentGroupId, workspaceMembers } = useChatStore(
+    useShallow((s) => ({
+      groups: s.groups,
+      currentGroupId: s.currentGroupId,
+      workspaceMembers: s.workspaceMembers,
+    })),
+  );
+  const me = useMyUser();
+  const likeEmoji = useLikeEmoji();
   const {
-    groups,
-    currentGroupId,
     closeGroupInfo,
     updateGroup,
     deleteGroup,
     addGroupMember,
     removeGroupMember,
-    myUser: me,
-    workspaceMembers,
     setGroupTheme,
-    likeEmoji,
     setLikeEmoji,
     openSearch,
-  } = useChat();
+  } = useChatActions();
 
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState("");

@@ -1,23 +1,31 @@
 "use client";
 
 import { Send, X } from "lucide-react";
-import { useChat } from "./chat-context";
 import { Avatar } from "./bits";
+import { useShallow } from "zustand/react/shallow";
+import { useChatStore } from "@/stores/chat-store";
+import { useMyUser } from "@/stores/chat-selectors";
+import { useChatActions } from "./chat-actions";
 
 export function ComposeView() {
+  const { composeQuery, composeText, composeRecipients, workspaceMembers } =
+    useChatStore(
+      useShallow((s) => ({
+        composeQuery: s.composeQuery,
+        composeText: s.composeText,
+        composeRecipients: s.composeRecipients,
+        workspaceMembers: s.workspaceMembers,
+      })),
+    );
+  const myUser = useMyUser();
   const {
     closeCompose,
-    composeQuery,
     setComposeQuery,
-    composeText,
     setComposeText,
-    composeRecipients,
     addRecipient,
     removeRecipient,
     sendCompose,
-    workspaceMembers,
-    myUser,
-  } = useChat();
+  } = useChatActions();
 
   // Lean 1:1: a single recipient per conversation. Candidates are the live
   // workspace roster (every real/seeded member the server knows about), minus

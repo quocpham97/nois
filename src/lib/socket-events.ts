@@ -423,7 +423,7 @@ export type RecoveryOfferPayload = { toDeviceId: string; env: string };
 export type RecoveryOfferRelay = { fromDeviceId: string; env: string };
 
 // MLS (RFC 9420) group encryption — Phase 4, feature-flagged (see MLS_ENABLED in
-// chat-context; sender-keys stays the default). Payloads are opaque wire-encoded
+// hooks/use-mls; sender-keys stays the default). Payloads are opaque wire-encoded
 // MLSMessages the server ORDERS but can't read (see server/mls-ds.ts, the MLS
 // Delivery Service). Commits are submitted with the epoch they were built
 // against; the server accepts one per epoch and assigns a global `seq`.

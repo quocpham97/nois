@@ -17,7 +17,7 @@
 // DISTRIBUTION POLICY (chosen for this app — reliability over secrecy): a
 // sender keeps ONE stable seed (index 0) per group and distributes THAT seed
 // to every member device, re-distributing on membership change and on demand
-// when a member can't decrypt (pull-on-miss; see chat-context). A recipient
+// when a member can't decrypt (pull-on-miss; see hooks/use-key-events). A recipient
 // therefore decrypts every message from a sender by ratcheting a copy forward
 // from the seed to the message index WITHOUT advancing its stored state
 // (decryptGroupMessage) — so decryption is order-independent, survives reloads,
@@ -163,7 +163,7 @@ export async function encryptGroupMessage(
 /**
  * Decrypt a group message using the stored sender-key SEED for its sender. The
  * stored `state` is a stable seed (see the distribution policy in
- * chat-context): we ratchet a COPY forward from the seed's index to the
+ * hooks/use-decrypt): we ratchet a COPY forward from the seed's index to the
  * message's index and decrypt, WITHOUT advancing or discarding the stored
  * state. That makes decryption order-independent and repeatable — messages
  * decrypt no matter what order they arrive in, and stay decryptable across

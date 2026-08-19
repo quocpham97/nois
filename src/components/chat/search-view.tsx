@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Clock,
   FileText,
@@ -11,10 +11,13 @@ import {
   X,
 } from "lucide-react";
 import { presenceLabel, type Attachment, type User } from "@/lib/chat-data";
-import { useChat } from "./chat-context";
 import { Avatar } from "./bits";
 import { ConvAvatar, previewOf } from "./sidebar";
 import { useDecryptedImage } from "./message";
+import { useShallow } from "zustand/react/shallow";
+import { useChatStore } from "@/stores/chat-store";
+import { useArchivedIds, useMyUser, useUserId } from "@/stores/chat-selectors";
+import { useChatActions } from "./chat-actions";
 import {
   searchMedia,
   searchMessages,
@@ -145,22 +148,31 @@ function GroupHead({ label, count }: { label: string; count?: number }) {
  *  on-device FTS index (all history), people from the workspace roster, and
  *  media from the local message store. */
 export function SearchView() {
+  const { groups, groupOrder, dmOrder, searchQ, workspaceMembers } =
+    useChatStore(
+      useShallow((s) => ({
+        groups: s.groups,
+        groupOrder: s.groupOrder,
+        dmOrder: s.dmOrder,
+        searchQ: s.searchQ,
+        workspaceMembers: s.workspaceMembers,
+      })),
+    );
+  const userId = useUserId();
+  const myUser = useMyUser();
+  const archivedIds = useArchivedIds();
+  const isArchived = useCallback(
+    (id: string) => archivedIds.includes(id),
+    [archivedIds],
+  );
   const {
-    groups,
-    groupOrder,
-    dmOrder,
-    isArchived,
-    searchQ,
     setSearchQ,
     closeSearch,
     selectGroup,
     jumpToMessage,
-    workspaceMembers,
-    myUser,
     openCompose,
     addRecipient,
-    userId,
-  } = useChat();
+  } = useChatActions();
   const q = searchQ.trim();
 
   const [filter, setFilter] = useState<Filter>("all");

@@ -4,9 +4,11 @@ import { useMemo, useState } from "react";
 import { Hash, X } from "lucide-react";
 import type { Presence, User } from "@/lib/chat-data";
 import { presenceLabel } from "@/lib/chat-data";
-import { useChat } from "./chat-context";
 import { GroupAvatar } from "./bits";
 import { PresenceAvatar } from "./sidebar";
+import { useChatStore } from "@/stores/chat-store";
+import { useMyUser } from "@/stores/chat-selectors";
+import { useChatActions } from "./chat-actions";
 
 /** Mirror of the server's slug rule, for a live preview of the group id. */
 const toSlug = (s: string) =>
@@ -36,8 +38,10 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
  * this is the same act as starting a chat — with more than one person in it.
  */
 export function CreateGroupView() {
-  const { closeCreateGroup, createGroup, workspaceMembers, myUser, groups } =
-    useChat();
+  const workspaceMembers = useChatStore((s) => s.workspaceMembers);
+  const groups = useChatStore((s) => s.groups);
+  const myUser = useMyUser();
+  const { closeCreateGroup, createGroup } = useChatActions();
   const [name, setName] = useState("");
   const [topic, setTopic] = useState("");
   const [query, setQuery] = useState("");

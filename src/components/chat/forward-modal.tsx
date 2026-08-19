@@ -3,20 +3,24 @@
 import { useMemo, useState } from "react";
 import { Check, Search, Send, X } from "lucide-react";
 import { messageExcerpt } from "@/lib/chat-data";
-import { useChat } from "./chat-context";
 import { ConvAvatar } from "./sidebar";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { useShallow } from "zustand/react/shallow";
+import { useChatStore } from "@/stores/chat-store";
+import { useMyUser } from "@/stores/chat-selectors";
+import { useChatActions } from "./chat-actions";
 
 export function ForwardModal() {
-  const {
-    forwardSource,
-    closeForward,
-    forwardMessage,
-    groups,
-    groupOrder,
-    dmOrder,
-    myUser,
-  } = useChat();
+  const { forwardSource, groups, groupOrder, dmOrder } = useChatStore(
+    useShallow((s) => ({
+      forwardSource: s.forwardSource,
+      groups: s.groups,
+      groupOrder: s.groupOrder,
+      dmOrder: s.dmOrder,
+    })),
+  );
+  const myUser = useMyUser();
+  const { closeForward, forwardMessage } = useChatActions();
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
 

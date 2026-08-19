@@ -11,8 +11,10 @@ import {
   enablePush,
   type PushState,
 } from "@/lib/push";
-import { useChat } from "./chat-context";
-import { useSocket } from "./socket-context";
+import { useChatStore } from "@/stores/chat-store";
+import { useBubbleTheme, useMyUser } from "@/stores/chat-selectors";
+import { useChatActions } from "./chat-actions";
+import { useSessionStore } from "@/stores/session-store";
 import { BackupPanel } from "./key-backup";
 import { Avatar } from "./bits";
 import { AvatarCropModal } from "./avatar-crop-modal";
@@ -140,7 +142,10 @@ function ToggleRow({
 }
 
 function ProfilePanel() {
-  const { myUser, profile, updateProfile, workspaceName, openStatus } = useChat();
+  const myUser = useMyUser();
+  const profile = useChatStore((s) => s.profile);
+  const workspaceName = useChatStore((s) => s.workspaceName);
+  const { updateProfile, openStatus } = useChatActions();
   const subtitle = profile.title ?? "";
   const fileRef = useRef<HTMLInputElement>(null);
   const [cropSrc, setCropSrc] = useState<string | null>(null);
@@ -295,7 +300,8 @@ function ProfilePanel() {
 // CHANGES for peer devices are surfaced separately by the KeyChangeBanner (the
 // only actionable event); we don't render a passive per-device directory here.
 function SecurityCard() {
-  const { deviceId, fingerprint } = useSocket();
+  const deviceId = useSessionStore((s) => s.deviceId);
+  const fingerprint = useSessionStore((s) => s.fingerprint);
   return (
     <>
       <h3 className="mb-2.5 mt-8 text-[14px] font-semibold">Security</h3>
@@ -345,7 +351,8 @@ function SecurityCard() {
 
 function AppearancePanel() {
   const { theme, resolvedTheme, setTheme } = useTheme();
-  const { bubbleTheme, setBubbleTheme } = useChat();
+  const bubbleTheme = useBubbleTheme();
+  const { setBubbleTheme } = useChatActions();
   const mounted = useMounted();
   const current = mounted ? theme : "light";
 
@@ -424,7 +431,9 @@ const GENERAL_DEFAULTS: GeneralPrefs = {
 };
 
 function GeneralPanel() {
-  const { userId, profile, updateProfile } = useChat();
+  const userId = useSessionStore((s) => s.userId);
+  const profile = useChatStore((s) => s.profile);
+  const { updateProfile } = useChatActions();
   const key = `chat:general:${userId}`;
   const [prefs, setPrefs] = useState<GeneralPrefs>(() => {
     if (typeof window === "undefined") return GENERAL_DEFAULTS;
@@ -539,7 +548,8 @@ function PushToggle() {
 }
 
 function NotificationsPanel() {
-  const { profile, updateProfile } = useChat();
+  const profile = useChatStore((s) => s.profile);
+  const { updateProfile } = useChatActions();
   const prefs: NotifPrefs = { ...NOTIF_DEFAULTS, ...(profile.notif ?? {}) };
   const set = (patch: Partial<NotifPrefs>) =>
     updateProfile({ notif: { ...prefs, ...patch } });
@@ -599,7 +609,8 @@ function NotificationsPanel() {
 }
 
 export function SettingsView() {
-  const { settingsTab, setSettingsTab, closeSettings } = useChat();
+  const settingsTab = useChatStore((s) => s.settingsTab);
+  const { setSettingsTab, closeSettings } = useChatActions();
   return (
     <div className="flex flex-1 overflow-hidden">
       <aside className="w-[220px] shrink-0 border-r border-app-border px-3 py-5">

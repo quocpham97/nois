@@ -8,13 +8,15 @@ import {
   presenceColor,
   presenceLabel,
 } from "@/lib/chat-data";
-import { useChat } from "../chat/chat-context";
-import { useSocket } from "../chat/socket-context";
-import { useCall } from "../chat/call-context";
+import { useSessionStore } from "@/stores/session-store";
+import { useCallStore } from "@/stores/call-store";
+import { useCallActions } from "../chat/call-actions";
 import { GroupIcon } from "../chat/bits";
 import { Message } from "../chat/message";
 import { Composer } from "../chat/composer";
 import { KeyChangeBanner, RecoveryWaitingBanner } from "../chat/key-backup";
+import { useBubbleTheme } from "@/stores/chat-selectors";
+import { useChatActions } from "../chat/chat-actions";
 
 // Full-screen conversation (the "isChat" screen). The tab bar is hidden while
 // this is open (see MobileApp). Header + composer are mobile-shaped, but the
@@ -22,9 +24,11 @@ import { KeyChangeBanner, RecoveryWaitingBanner } from "../chat/key-backup";
 // real <Composer>, so E2EE decrypt, reactions, replies, edits and drafts are
 // exactly the desktop behavior — nothing about messaging is re-implemented.
 export function ConversationScreen({ ch }: { ch: Group }) {
-  const { selectGroup, toggleGroupInfo, scrollRef, bubbleTheme } = useChat();
-  const { user: me } = useSocket();
-  const { startCall, call } = useCall();
+  const bubbleTheme = useBubbleTheme();
+  const { selectGroup, toggleGroupInfo, scrollRef } = useChatActions();
+  const me = useSessionStore((s) => s.user);
+  const call = useCallStore((s) => s.call);
+  const { startCall } = useCallActions();
 
   const isDm = ch.type === "dm";
   const inCall = call != null;
@@ -122,7 +126,7 @@ export function ConversationScreen({ ch }: { ch: Group }) {
         <div className="h-1" />
       </div>
 
-      <Composer group={ch} />
+      <Composer groupId={ch.id} />
     </div>
   );
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   Archive,
   ArchiveRestore,
@@ -15,6 +15,7 @@ import {
   SquarePen,
 } from "lucide-react";
 import {
+  type GroupMeta,
   callEventTitle,
   groupMembers,
   presenceColor,
@@ -23,9 +24,13 @@ import {
   type Presence,
   type User,
 } from "@/lib/chat-data";
-import { useChat, type ChatFilter, type NavPanel } from "./chat-context";
-import { ConnectionStatus } from "./socket-context";
+import { ConnectionStatus } from "./connection-status";
 import { Avatar, GroupIcon, GroupAvatar } from "./bits";
+import { useShallow } from "zustand/react/shallow";
+import { useChatStore } from "@/stores/chat-store";
+import { useArchivedIds, useMyUser } from "@/stores/chat-selectors";
+import { useChatActions } from "./chat-actions";
+import type { ChatFilter, NavPanel } from "./lib/types";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -74,7 +79,7 @@ export function ConvAvatar({
   me,
   size = 40,
 }: {
-  ch: Group;
+  ch: GroupMeta;
   me: User;
   size?: number;
 }) {
@@ -166,15 +171,15 @@ export function PresenceAvatar({
  * strip plus an alphabetical Contacts list. Clicking a row opens (or starts) a DM.
  */
 function PeopleSidebarBody() {
-  const {
-    workspaceMembers,
-    myUser,
-    groups,
-    dmOrder,
-    selectGroup,
-    openCompose,
-    addRecipient,
-  } = useChat();
+  const { workspaceMembers, groups, dmOrder } = useChatStore(
+    useShallow((s) => ({
+      workspaceMembers: s.workspaceMembers,
+      groups: s.groups,
+      dmOrder: s.dmOrder,
+    })),
+  );
+  const myUser = useMyUser();
+  const { selectGroup, openCompose, addRecipient } = useChatActions();
   const [q, setQ] = useState("");
 
   // Presence is tracked per DM group, keyed by the partner's id; fold those
@@ -316,8 +321,10 @@ function PeopleSidebarBody() {
 
 /** Sidebar "Archived" mode: archived chats; unarchive or jump back in. */
 function ArchivedSidebarBody() {
-  const { groups, archivedIds, toggleArchived, selectGroup, myUser } =
-    useChat();
+  const groups = useChatStore((s) => s.groups);
+  const archivedIds = useArchivedIds();
+  const myUser = useMyUser();
+  const { toggleArchived, selectGroup } = useChatActions();
   // Newest-archived first — toggleArchived appends, so reverse for recency.
   const rows = useMemo(
     () => [...archivedIds].reverse().filter((id) => groups[id]),
@@ -383,30 +390,53 @@ export function Sidebar() {
   const {
     groups,
     currentGroupId,
-    selectGroup,
     settingsOpen,
     composeOpen,
-    openCompose,
-    openSearch,
-    openCreateGroup,
     dmOrder,
     groupOrder,
     rosterLoaded,
     activePanel,
-    openPanel,
     createGroupOpen,
     drafts,
     workspaceName,
-    openWorkspace,
     unreadByGroup,
-    myUser,
     profile,
-    openStatus,
     chatFilter,
+  } = useChatStore(
+    useShallow((s) => ({
+      groups: s.groups,
+      currentGroupId: s.currentGroupId,
+      settingsOpen: s.settingsOpen,
+      composeOpen: s.composeOpen,
+      dmOrder: s.dmOrder,
+      groupOrder: s.groupOrder,
+      rosterLoaded: s.rosterLoaded,
+      activePanel: s.activePanel,
+      createGroupOpen: s.createGroupOpen,
+      drafts: s.drafts,
+      workspaceName: s.workspaceName,
+      unreadByGroup: s.unreadByGroup,
+      profile: s.profile,
+      chatFilter: s.chatFilter,
+    })),
+  );
+  const myUser = useMyUser();
+  const archivedIds = useArchivedIds();
+  const isArchived = useCallback(
+    (id: string) => archivedIds.includes(id),
+    [archivedIds],
+  );
+  const {
+    selectGroup,
+    openCompose,
+    openSearch,
+    openCreateGroup,
+    openPanel,
+    openWorkspace,
+    openStatus,
     setChatFilter,
-    isArchived,
     toggleArchived,
-  } = useChat();
+  } = useChatActions();
 
   // Live counts for the options-menu badges, from in-memory group state.
   let threadsCount = 0;

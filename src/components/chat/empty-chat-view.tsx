@@ -1,7 +1,7 @@
 "use client";
 
 import { MessageCircle, Plus, Users } from "lucide-react";
-import { useChat } from "./chat-context";
+import { useChatActions } from "./chat-actions";
 
 /** One of the two primary calls-to-action (New message / New group). */
 function ActionCard({
@@ -40,7 +40,7 @@ function ActionCard({
 
 /** Main pane when no conversation is selected (no group matches the URL). */
 export function EmptyChatView() {
-  const { openCompose } = useChat();
+  const { openCompose } = useChatActions();
 
   return (
     <div className="flex flex-1 flex-col items-center justify-center p-10 text-center">

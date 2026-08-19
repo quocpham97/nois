@@ -28,11 +28,9 @@ import {
   VideoOff,
 } from "lucide-react";
 import { type User } from "@/lib/chat-data";
-import {
-  useCall,
-  type CallInfo,
-  type CallParticipant,
-} from "./call-context";
+import { useCallStore } from "@/stores/call-store";
+import { useCallActions } from "./call-actions";
+import type { CallInfo, CallParticipant } from "./lib/call-types";
 import { useCallPopout } from "./call-window";
 
 /** Attach a MediaStream to a <video>. `mirror` for the self-view. */
@@ -313,7 +311,8 @@ function DockButton({
  * are the only two things worth doing while you wait.
  */
 function CallDock({ call }: { call: CallInfo }) {
-  const { acceptCall, declineCall, endCall, toggleMic, micOn } = useCall();
+  const micOn = useCallStore((s) => s.micOn);
+  const { acceptCall, declineCall, endCall, toggleMic } = useCallActions();
   const incoming = call.phase === "incoming";
   useRingTone(incoming ? "incoming" : "outgoing");
 
@@ -461,7 +460,10 @@ function CallPanel({
   onPopOut: () => void;
   onPopIn: () => void;
 }) {
-  const { localStream, micOn, camOn, endCall, toggleMic, toggleCam } = useCall();
+  const localStream = useCallStore((s) => s.localStream);
+  const micOn = useCallStore((s) => s.micOn);
+  const camOn = useCallStore((s) => s.camOn);
+  const { endCall, toggleMic, toggleCam } = useCallActions();
   // Placing a call rings from the dock, so by the time the panel is on screen
   // somebody has answered — what's left is waiting for their media.
   const ringing = call.phase === "connecting";
@@ -678,7 +680,7 @@ function CallPanel({
  * and if the popup ends up behind the main window, nothing would say otherwise.
  */
 function PoppedOutCard({ call, onPopIn }: { call: CallInfo; onPopIn: () => void }) {
-  const { endCall } = useCall();
+  const { endCall } = useCallActions();
   return (
     <div
       data-call-dock="popped"
@@ -732,7 +734,7 @@ function PoppedOutCard({ call, onPopIn }: { call: CallInfo; onPopIn: () => void 
 
 /** Mounted once in the Shell — renders whichever call surface applies. */
 export function CallUI() {
-  const { call } = useCall();
+  const call = useCallStore((s) => s.call);
   const { container, popOut, popIn } = useCallPopout();
 
   // A popped-out window must not outlive the call it belongs to. CallUI stays

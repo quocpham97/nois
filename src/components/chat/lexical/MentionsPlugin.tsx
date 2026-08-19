@@ -11,8 +11,8 @@ import {
 } from "@lexical/react/LexicalTypeaheadMenuPlugin";
 import { $createTextNode, type TextNode } from "lexical";
 import { type User } from "@/lib/chat-data";
-import { useChat } from "../chat-context";
 import { $createMentionNode } from "./MentionNode";
+import { useChatStore } from "@/stores/chat-store";
 
 class MentionOption extends MenuOption {
   user: User;
@@ -89,7 +89,7 @@ export function MentionsPlugin({
 }) {
   const [editor] = useLexicalComposerContext();
   const [query, setQuery] = useState<string | null>(null);
-  const { workspaceMembers } = useChat();
+  const workspaceMembers = useChatStore((s) => s.workspaceMembers);
 
   const triggerFn = useBasicTypeaheadTriggerMatch("@", { minLength: 0 });
 

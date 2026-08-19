@@ -3,9 +3,11 @@
 import { useTheme } from "next-themes";
 import { signOut } from "next-auth/react";
 import { Bell, LogOut, Moon, ShieldCheck, UserRound } from "lucide-react";
-import { useChat } from "../chat/chat-context";
 import { Avatar } from "../chat/bits";
 import { useMounted } from "@/lib/use-mounted";
+import { useChatStore } from "@/stores/chat-store";
+import { useMyUser } from "@/stores/chat-selectors";
+import { useChatActions } from "../chat/chat-actions";
 
 function Row({
   icon,
@@ -48,7 +50,9 @@ function Row({
 // deep-link into the real SettingsView tabs, "Dark mode" toggles next-themes
 // directly, and "Log out" runs the NextAuth sign-out (same as key-backup.tsx).
 export function ProfileScreen() {
-  const { myUser, profile, openSettings, setSettingsTab } = useChat();
+  const myUser = useMyUser();
+  const profile = useChatStore((s) => s.profile);
+  const { openSettings, setSettingsTab } = useChatActions();
   const { resolvedTheme, setTheme } = useTheme();
   const mounted = useMounted();
   const isDark = mounted && resolvedTheme === "dark";

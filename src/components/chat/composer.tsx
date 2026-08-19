@@ -36,7 +36,6 @@ import {
   X,
 } from "lucide-react";
 import {
-  type Group,
   type LinkPreview,
   type Message,
   messageExcerpt,
@@ -44,12 +43,15 @@ import {
 import { cryptoAvailable } from "@/lib/crypto/identity";
 import { encryptFile } from "@/lib/crypto/attachment";
 import { useUploadThing } from "@/lib/uploadthing";
-import { useChat } from "./chat-context";
 import { EmojiPickerPopup } from "./emoji-picker";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { EDITOR_NODES, EDITOR_THEME } from "./lexical/config";
 import { MentionsPlugin } from "./lexical/MentionsPlugin";
 import { useVoiceRecorder } from "./use-voice-recorder";
+import { useShallow } from "zustand/react/shallow";
+import { useChatStore } from "@/stores/chat-store";
+import { useEditingMessage, useLikeEmoji } from "@/stores/chat-selectors";
+import { useChatActions } from "./chat-actions";
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -101,35 +103,40 @@ async function inlinePreviewImage(remoteUrl: string): Promise<string | undefined
 
 // Lexical editor + toolbar + bottom bar. Lives inside <LexicalComposer>.
 function ComposerInner({
-  group,
+  groupId,
   inThread,
   editingMsg,
 }: {
-  group: Group;
+  groupId: string;
   inThread: boolean;
   /** When set, the composer EDITS this message instead of sending a new one. */
   editingMsg: Message | null;
 }) {
   const [editor] = useLexicalComposerContext();
+  const { composerActive, composerAttachment, drafts, profile, replyingTo } =
+    useChatStore(
+      useShallow((s) => ({
+        composerActive: s.composerActive,
+        composerAttachment: s.composerAttachment,
+        drafts: s.drafts,
+        profile: s.profile,
+        replyingTo: s.replyingTo,
+      })),
+    );
+  const likeEmoji = useLikeEmoji();
   const {
     sendMessage,
     sendThreadMessage,
     submitEdit,
     cancelEdit,
-    composerActive,
     setComposerActive,
     notifyTyping,
-    composerAttachment,
     setComposerAttachment,
-    drafts,
     saveDraft,
     clearDraft,
-    likeEmoji,
-    profile,
     updateProfile,
-    replyingTo,
     cancelReply,
-  } = useChat();
+  } = useChatActions();
 
   // Constant for a given mount: entering/leaving edit mode remounts the editor
   // via the LexicalComposer key (so the seed/draft logic never has to switch).
@@ -330,7 +337,7 @@ function ComposerInner({
     !transcoding;
 
   // Clear the local attachment chip/preview (the Attachment itself is consumed
-  // and cleared by chat-context on send).
+  // and cleared by useMessageActions on send).
   const resetAttachmentUI = () => {
     setPreviewUrl((u) => {
       if (u) URL.revokeObjectURL(u);
@@ -373,7 +380,7 @@ function ComposerInner({
       // Sent — drop any saved draft for this group and cancel a pending save.
       if (draftTimer.current) clearTimeout(draftTimer.current);
       draftRef.current = { text: "" };
-      clearDraft(group.id);
+      clearDraft(groupId);
     }
     editor.update(() => {
       $getRoot().clear();
@@ -418,7 +425,7 @@ function ComposerInner({
       t = $getRoot().getTextContent();
     });
     setHasText(t.trim().length > 0);
-    if (t.trim()) notifyTyping(group.id);
+    if (t.trim()) notifyTyping(groupId);
     // Track the first URL for the link-preview flow (opt-in fetch happens in
     // the debounced effect above, never here).
     setUrlInText((prev) => {
@@ -434,7 +441,7 @@ function ComposerInner({
       draftRef.current = { text: t, rich: JSON.stringify(state.toJSON()) };
       if (draftTimer.current) clearTimeout(draftTimer.current);
       draftTimer.current = setTimeout(
-        () => saveDraft(group.id, draftRef.current),
+        () => saveDraft(groupId, draftRef.current),
         500,
       );
     }
@@ -446,15 +453,15 @@ function ComposerInner({
     if (inThread || isEditing) return;
     return () => {
       if (draftTimer.current) clearTimeout(draftTimer.current);
-      saveDraft(group.id, draftRef.current);
+      saveDraft(groupId, draftRef.current);
     };
-  }, [inThread, isEditing, group.id, saveDraft]);
+  }, [inThread, isEditing, groupId, saveDraft]);
 
   // Restore the group's saved draft into the editor. Runs once per group,
   // re-firing when `drafts` hydrates from storage after mount (the initial-load
   // case, where the editor mounted before the draft was available). Only fills
   // an empty editor so it never stomps on what the user is typing.
-  const draftRich = inThread || isEditing ? undefined : drafts[group.id]?.rich;
+  const draftRich = inThread || isEditing ? undefined : drafts[groupId]?.rich;
   useEffect(() => {
     if (inThread || isEditing || restored.current || !draftRich) return;
     let empty = true;
@@ -608,7 +615,7 @@ function ComposerInner({
 
     // E2EE: encrypt client-side and upload the ciphertext as an opaque blob, so
     // the storage host only ever holds ciphertext. The key/iv ride out in the
-    // message envelope at send time (see chat-context emitSend). Plaintext
+    // message envelope at send time (see useMessageActions emitSend). Plaintext
     // upload only when WebCrypto is unavailable.
     if (cryptoAvailable()) {
       try {
@@ -944,18 +951,25 @@ function ComposerInner({
 }
 
 export function Composer({
-  group,
+  groupId,
   inThread = false,
 }: {
-  group: Group;
+  groupId: string;
   inThread?: boolean;
 }) {
-  const { drafts, editing, editingMessage, threadFor } = useChat();
+  const { drafts, editing, threadFor } = useChatStore(
+    useShallow((s) => ({
+      drafts: s.drafts,
+      editing: s.editing,
+      threadFor: s.threadFor,
+    })),
+  );
+  const editingMessage = useEditingMessage();
   // Edit mode is claimed by exactly one composer: the group composer for
   // top-level messages, the open thread's composer for replies.
   const editingHere =
     editing &&
-    editing.groupId === group.id &&
+    editing.groupId === groupId &&
     (inThread ? editing.parentId === threadFor : !editing.parentId)
       ? editingMessage
       : null;
@@ -963,7 +977,7 @@ export function Composer({
   // per group via `key`, so this only runs on entry). Threads don't persist.
   // Edit mode seeds the message being edited instead (rich here; plain text is
   // inserted by ComposerInner's edit effect).
-  const draftState = inThread ? undefined : drafts[group.id]?.rich;
+  const draftState = inThread ? undefined : drafts[groupId]?.rich;
   const seedState = editingHere ? editingHere.rich : draftState;
   const initialConfig = {
     namespace: "composer",
@@ -977,14 +991,14 @@ export function Composer({
     // entering/leaving edit mode also remounts (fresh seed, draft untouched).
     <LexicalComposer
       key={
-        group.id +
+        groupId +
         (inThread ? ":thread" : "") +
         (editingHere ? `:edit:${editing!.msgId}` : "")
       }
       initialConfig={initialConfig}
     >
       <ComposerInner
-        group={group}
+        groupId={groupId}
         inThread={inThread}
         editingMsg={editingHere}
       />

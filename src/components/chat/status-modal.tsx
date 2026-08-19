@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { useChat } from "./chat-context";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { useChatStore } from "@/stores/chat-store";
+import { useChatActions } from "./chat-actions";
 
 const PRESETS = [
   { emoji: "📅", text: "In a meeting" },
@@ -18,7 +19,9 @@ const EMOJIS = [
 ];
 
 export function StatusModal() {
-  const { profile, updateProfile, closeStatus, workspaceName } = useChat();
+  const profile = useChatStore((s) => s.profile);
+  const workspaceName = useChatStore((s) => s.workspaceName);
+  const { updateProfile, closeStatus } = useChatActions();
   const [emoji, setEmoji] = useState(profile.statusEmoji || "💬");
   const [text, setText] = useState(profile.statusText || "");
   const [pickerOpen, setPickerOpen] = useState(false);

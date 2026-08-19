@@ -2,10 +2,11 @@
 
 import { useMemo } from "react";
 import { Phone, Video } from "lucide-react";
-import { useChat } from "../chat/chat-context";
-import { useCall } from "../chat/call-context";
+import { useCallStore } from "@/stores/call-store";
+import { useCallActions } from "../chat/call-actions";
 import { Avatar } from "../chat/bits";
 import { presenceColor } from "@/lib/chat-data";
+import { useChatStore } from "@/stores/chat-store";
 
 // Calls tab. The design shows a call-history list. This surfaces the real,
 // actionable thing instead: your DM contacts with one-tap voice/video call,
@@ -17,8 +18,10 @@ import { presenceColor } from "@/lib/chat-data";
 // message store rather than needing anything new server-side. Deliberately not
 // done yet; this tab still lists contacts, not calls.
 export function CallsScreen() {
-  const { groups, dmOrder } = useChat();
-  const { startCall, call } = useCall();
+  const groups = useChatStore((s) => s.groups);
+  const dmOrder = useChatStore((s) => s.dmOrder);
+  const call = useCallStore((s) => s.call);
+  const { startCall } = useCallActions();
   const inCall = call != null;
 
   const dms = useMemo(
