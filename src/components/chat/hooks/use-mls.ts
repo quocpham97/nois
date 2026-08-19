@@ -28,6 +28,10 @@ import { isDm } from "@/stores/chat-selectors";
 import type { TypedSocket } from "@/stores/session-store";
 import { MLS_ENABLED, loadMls, mlsAddCandidates } from "../lib/mls-directory";
 
+/** Ceiling on leaf removals folded into one membership commit — see the note at
+ *  the removal pass in syncMembership. */
+const MAX_EVICTIONS_PER_COMMIT = 32;
+
 export type Mls = ReturnType<typeof useMls>;
 
 export function useMls({
@@ -277,11 +281,16 @@ export function useMls({
       syncedAtRef.current.set(groupId, now);
       const secrets = await getSecrets();
       if (!secrets) return state;
-      const { packages, memberIds } = await fetchGroup(groupId);
+      const { packages, memberIds, liveDevices } = await fetchGroup(groupId);
       if (!memberIds.length) return state;
       const mls = await loadMls();
       const me = mls.mlsIdentity(userId, secrets.deviceId);
       const memberSet = new Set(memberIds);
+      // Devices the directory has heard from recently. Absent on an older
+      // server, in which case device eviction is skipped entirely.
+      const liveSet = new Set(
+        (liveDevices ?? []).map((d) => mls.mlsIdentity(d.userId, d.deviceId)),
+      );
       let cur = state;
       for (let attempt = 0; attempt < 2; attempt++) {
         const leaves = mls.mlsGroupMembers(cur);
@@ -304,15 +313,48 @@ export function useMls({
           adds.push(c.kp);
           targets.push({ toUserId: c.userId, toDeviceId: c.deviceId });
         }
+        // Expiries are collected apart from the removes above, which are PAIRED
+        // with an add (a reset device's stale leaf must go in the same commit as
+        // its re-add). Capping a combined list could drop one of those and leave
+        // the commit holding two leaves for one client, which MLS rejects
+        // outright — so only this list is ever truncated.
+        const expired: number[] = [];
         for (const l of leaves) {
           if (l.identity === me) continue;
-          // Never self-evict on a roster hiccup; drop only leaves whose USER is
+          // Never self-evict on a roster hiccup; drop leaves whose USER is
           // genuinely not a member anymore.
           if (l.userId !== userId && !memberSet.has(l.userId)) {
             removes.push(l.leafIndex);
+            continue;
+          }
+          // A leaf whose DEVICE is gone. Every browser profile that ever signed
+          // in is a distinct device, and its leaf used to stay in the tree for
+          // good — so the tree only grew, and since a Welcome embeds the whole
+          // tree, every join blob grew with it (quadratic in queued bytes).
+          // Expiring the leaf is what bounds both.
+          //
+          // Self-healing rather than destructive: a device that comes back
+          // republishes, becomes live, and is re-added by the add pass above —
+          // at the current epoch, so it reads from then on and recovers older
+          // messages from the user's own encrypted history store.
+          //
+          // Legacy leaves (bare-userId identity, deviceId "") are left alone:
+          // a live device may still hold a legacy keypair, and evicting one the
+          // add pass would immediately re-add would commit in a loop.
+          if (liveSet.size && l.deviceId && !liveSet.has(l.identity)) {
+            expired.push(l.leafIndex);
           }
         }
-        const res = await mls.mlsSyncCommit(cur, adds, removes);
+        // A huge commit is the shape that has hurt before (a 30 MB frame took the
+        // socket down), and a long-accumulated backlog is exactly when this runs.
+        // Clearing it over several syncs costs nothing — each is a normal commit.
+        if (expired.length > MAX_EVICTIONS_PER_COMMIT) {
+          console.warn(
+            `[mls] ${expired.length} expired leaves in ${groupId}; evicting ${MAX_EVICTIONS_PER_COMMIT} this commit`,
+          );
+          expired.length = MAX_EVICTIONS_PER_COMMIT;
+        }
+        const res = await mls.mlsSyncCommit(cur, adds, [...removes, ...expired]);
         if (!res) return cur; // membership already in sync
         const ack = await submitCommit(
           groupId,

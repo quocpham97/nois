@@ -1436,12 +1436,18 @@ app.prepare().then(async () => {
       if (!authorized(groupId)) return ack({ packages: [], memberIds: [] });
       const memberIds = store.listMemberIds(groupId);
       const packages: { userId: string; deviceId: string; keyPackage: string }[] = [];
+      const liveDevices: { userId: string; deviceId: string }[] = [];
       for (const id of memberIds) {
+        // fetchKeyPackages returns only devices that have republished inside the
+        // TTL. A KeyPackage outlives the browser profile that published it, so
+        // offering every one ever published is what let dead devices become
+        // permanent group leaves.
         for (const p of await mlsDs.fetchKeyPackages(id)) {
           packages.push({ userId: id, deviceId: p.deviceId, keyPackage: p.keyPackage });
+          liveDevices.push({ userId: id, deviceId: p.deviceId });
         }
       }
-      ack({ packages, memberIds });
+      ack({ packages, memberIds, liveDevices });
     });
     socket.on("mls:commit", async ({ groupId, fromEpoch, commit, welcomes, welcomeFor }, ack) => {
       const reply = (r: Parameters<typeof ack>[0]) => {

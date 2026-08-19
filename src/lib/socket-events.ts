@@ -435,10 +435,17 @@ export type MlsPublishKeyPackagePayload = { deviceId: string; keyPackage: string
 export type MlsFetchGroupPayload = { groupId: string };
 export type MlsMemberPackage = { userId: string; deviceId: string; keyPackage: string };
 export type MlsFetchGroupResult = {
-  /** Every member's published packages, INCLUDING the requester's other devices. */
+  /** Every member's published packages, INCLUDING the requester's other devices.
+   *  Restricted to devices the directory has heard from recently, so a committer
+   *  never adds a leaf for a device that is never coming back. */
   packages: MlsMemberPackage[];
   /** The group's member user ids (roster), including the requester. */
   memberIds: string[];
+  /** Member devices still considered live (see key-store DEVICE_TTL_MS). A leaf
+   *  whose device is absent from this is expired and should be removed — which is
+   *  what stops the ratchet tree, and therefore every Welcome, growing forever.
+   *  Absent on an older server, and the client then skips device eviction. */
+  liveDevices?: { userId: string; deviceId: string }[];
 };
 // Submit a commit (+ any Welcomes for newly-added member devices). Ack tells the
 // client whether it was accepted (with its ordering `seq`+new `epoch`) or
