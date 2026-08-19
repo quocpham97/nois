@@ -168,18 +168,35 @@ const SFU_ENABLED = process.env.NEXT_PUBLIC_CALL_TRANSPORT === "sfu";
  *  encrypted call. Seconds, because establishing it means publishing key
  *  packages, ordering a commit and delivering Welcomes — not a local lookup. */
 const MLS_KEY_WAIT_MS = 20_000;
+/** First delay between attempts, then doubling to MLS_KEY_RETRY_MAX_MS.
+ *
+ *  Backoff rather than a fixed interval because a retry is not a cheap poll: in
+ *  a group with no MLS state yet, every attempt fetches key packages, creates a
+ *  group and submits a commit — WASM crypto on the main thread, with all the
+ *  callers racing to be the one that wins. Hammering that at a fixed 750ms
+ *  starved the event loop enough to drop the websocket, which on the SFU path
+ *  (where every setup step needs an ack) cost the call its media. */
 const MLS_KEY_RETRY_MS = 750;
+const MLS_KEY_RETRY_MAX_MS = 5_000;
 
 /** A dropped socket costs the SFU transport its media entirely, where the mesh
  *  only loses an ICE candidate — so its requests ride out a reconnect. */
 const SFU_RETRIES = 5;
 const SFU_RETRY_MS = 600;
+/** Budget for requests that provably never happened, so are safe to repeat —
+ *  wide enough to ride out a reconnect plus the `call:rejoin` that follows it. */
+const SFU_REFUSAL_RETRIES = 10;
+/** How long to wait for a reconnect before placing an SFU request anyway. */
+const SFU_SOCKET_WAIT_MS = 5_000;
 
 /** A browser that can't do Encoded Transform can't seal frames, and an SFU call
  *  it couldn't seal would be a call the server can read. There is no downgrade
- *  path on purpose — refuse, and say why. */
-function sfuUnavailable(): boolean {
-  if (!SFU_ENABLED || frameCryptoSupported()) return false;
+ *  path on purpose — refuse, and say why.
+ *
+ *  Asked per call rather than per build, because a DM never reaches the SFU:
+ *  its media is peer-to-peer, so an old browser can still place one. */
+function sfuUnavailable(usesSfu: boolean): boolean {
+  if (!usesSfu || frameCryptoSupported()) return false;
   toast.error(
     "This browser can't encrypt call media — calls need a newer version",
   );
@@ -232,6 +249,28 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     membersRef.current = workspaceMembers;
     deviceIdRef.current = deviceId;
   }, [groups, workspaceMembers, deviceId]);
+
+  /**
+   * Does THIS call go through the SFU?
+   *
+   * Groups only, even with the flag on. A DM has no MLS group behind it, so
+   * `exportCallKey` has nothing to derive a media key from — and the SFU is
+   * only safe to use because every frame is sealed before it leaves the
+   * browser. Routed through it anyway, a DM call would seal nothing, drop every
+   * frame it couldn't seal, and die after MLS_KEY_WAIT_MS. Mesh is not a
+   * fallback here but the right answer: a two-party call has no uplink problem
+   * to solve, so nothing is given up by keeping the server out of the media
+   * path entirely.
+   *
+   * Frame encryption therefore follows the transport, not the flag. Sealing a
+   * mesh DM would add nothing — DTLS-SRTP already makes it end-to-end — so
+   * there is no key to establish and no wait before the call connects.
+   */
+  const sfuFor = useCallback(
+    (groupId: string) =>
+      SFU_ENABLED && groupsRef.current[groupId]?.type === "group",
+    [],
+  );
 
   // Server-minted ICE servers, held until they near expiry. Resolved BEFORE a
   // call is placed or joined, because the transport is built with them — an
@@ -440,13 +479,15 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   const awaitFirstKey = useCallback(
     async (callId: string, groupId: string) => {
       const deadline = Date.now() + MLS_KEY_WAIT_MS;
+      let wait = MLS_KEY_RETRY_MS;
       for (;;) {
         if (callRef.current?.callId !== callId) return; // call went away
         if (!frameCryptoRef.current) return;
         await pumpKeys(callId, groupId);
         if (keyEpochsRef.current.size > 0) return;
         if (Date.now() >= deadline) break;
-        await new Promise((r) => setTimeout(r, MLS_KEY_RETRY_MS));
+        await new Promise((r) => setTimeout(r, wait));
+        wait = Math.min(wait * 2, MLS_KEY_RETRY_MAX_MS);
       }
       // Out of time. Refusing is still right — running the call through a server
       // we can't encrypt for is the one thing that isn't allowed — but now it
@@ -464,6 +505,26 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   const sfuApi = useCallback(
     (callId: string, groupId: string): SfuApi => {
       const scope = { callId, groupId };
+      /**
+       * Hold a request until the socket is actually up.
+       *
+       * socket.io fails an ack emit immediately when the socket is down, so a
+       * request placed mid-blip is never sent at all — and on the mutating
+       * steps, which cannot be repeated blind, that used to end the call. The
+       * socket comes back on its own in about a second, so wait for it.
+       */
+      const awaitSocket = async (): Promise<void> => {
+        if (!socket || socket.connected) return;
+        await new Promise<void>((resolve) => {
+          const finish = () => {
+            clearTimeout(timer);
+            socket.off("connect", finish);
+            resolve();
+          };
+          const timer = setTimeout(finish, SFU_SOCKET_WAIT_MS);
+          socket.on("connect", finish);
+        });
+      };
 
       /**
        * One proxied request, retried across a websocket blip.
@@ -476,22 +537,38 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
        * the call running with NO media, permanently. The socket comes back on
        * its own in about a second, so these simply wait for it.
        *
-       * `unauthorized` is retried too: right after a reconnect we're briefly
-       * out of the call room until `call:rejoin` lands, which looks identical
-       * to a genuine refusal. Only `unconfigured` is treated as final.
+       * Two budgets, because the two failures mean different things:
        *
-       * `tries` is 1 for anything that MUTATES SFU signaling state. A lost ack
+       * `tries` covers AMBIGUOUS failures — a lost ack, a dropped socket. It is
+       * 1 for anything that mutates SFU signaling state, because a lost ack
        * doesn't tell us whether the request landed, and re-sending a
-       * `tracks/new` that actually succeeded desynchronises the session — the
-       * SFU then refuses the next one with 406 invalid_session_description.
-       * Creating a session is the only safe thing to repeat: the worst case is
-       * an orphan that carries no tracks.
+       * `tracks/new` that actually succeeded desynchronises the session (the
+       * SFU then refuses the next one with 406
+       * invalid_session_description). Creating a session is the only safe thing
+       * to repeat blind: the worst case is an orphan carrying no tracks.
+       *
+       * `SFU_REFUSAL_RETRIES` covers `unauthorized`, which is the one failure
+       * that is provably a NO-OP: the guard runs before configuration and
+       * before any upstream call, so nothing at Cloudflare moved and repeating
+       * the request cannot desynchronise anything. That matters because a
+       * reconnect puts us briefly outside the call room until `call:rejoin`
+       * lands, and a mutating request that met that window used to end the
+       * call outright. Upstream failures ack `error`, never `unauthorized`, so
+       * they stay under the strict limit. Only `unconfigured` is final.
        */
       const attempt = async <T,>(
         once: () => Promise<{ value: T } | { fail: string }>,
         tries = SFU_RETRIES,
       ): Promise<T | null> => {
-        for (let i = 0; i < tries; i++) {
+        let ambiguous = 0;
+        let refused = 0;
+        for (;;) {
+          await awaitSocket();
+          // Read BEFORE the request: a socket that was already down could not
+          // have transmitted anything, which is what makes repeating the
+          // request safe. An ack error on a socket that WAS up is ambiguous —
+          // the server may have acted on it and only the reply was lost.
+          const sent = !!socket?.connected;
           const r = await once();
           if ("value" in r) return r.value;
           if (r.fail === "unconfigured") {
@@ -499,13 +576,19 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
             toast.error("This deployment has no SFU configured");
             return null;
           }
+          // `unauthorized` comes from the guard, which runs before any upstream
+          // call, so nothing at Cloudflare moved. `!sent` means the request
+          // never left this browser. Both are no-ops, and repeating a no-op
+          // cannot desynchronise a session.
+          const refusal = r.fail === "unauthorized" || !sent;
+          const budget = refusal ? SFU_REFUSAL_RETRIES : tries;
+          const used = refusal ? ++refused : ++ambiguous;
           console.warn(
-            `[call] sfu request failed: ${r.fail} (try ${i + 1}/${tries})`,
+            `[call] sfu request failed: ${r.fail} (${refusal ? "no-op" : "no ack"} ${used}/${budget})`,
           );
-          if (i + 1 < tries)
-            await new Promise((res) => setTimeout(res, SFU_RETRY_MS));
+          if (used >= budget) return null;
+          await new Promise((res) => setTimeout(res, SFU_RETRY_MS));
         }
-        return null;
       };
 
       return {
@@ -622,10 +705,11 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
           },
         },
       };
-      // The one line that chooses how media travels. Default is the mesh,
-      // where media never reaches a server at all; the SFU pairs with
-      // per-frame encryption so it can forward what it cannot read.
-      if (!SFU_ENABLED) {
+      // The one line that chooses how media travels. The mesh is the default
+      // and the only path for DMs, and media never reaches a server on it; the
+      // SFU pairs with per-frame encryption so it can forward what it cannot
+      // read, and needs the group's MLS state to key that.
+      if (!sfuFor(groupId)) {
         const transport = createMeshTransport(common);
         transportRef.current = transport;
         return transport;
@@ -644,7 +728,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       transportRef.current = transport;
       return transport;
     },
-    [sendSignal, patchCall, sfuApi, awaitFirstKey],
+    [sendSignal, patchCall, sfuApi, awaitFirstKey, sfuFor],
   );
 
   // Rekey while a call is up. Polling rather than subscribing to MLS commits:
@@ -652,14 +736,17 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   // commit lands while we're mid-call regardless of how it got there.
   const activeCallId = call?.callId;
   const activeGroupId = call?.groupId;
+  const activeKind = call?.kind;
   useEffect(() => {
-    if (!SFU_ENABLED || !activeCallId || !activeGroupId) return;
+    // A DM is on the mesh with no frame crypto to rekey, so don't poll for one.
+    if (!SFU_ENABLED || activeKind !== "group") return;
+    if (!activeCallId || !activeGroupId) return;
     const id = setInterval(
       () => void pumpKeys(activeCallId, activeGroupId),
       5000,
     );
     return () => clearInterval(id);
-  }, [activeCallId, activeGroupId, pumpKeys]);
+  }, [activeCallId, activeGroupId, activeKind, pumpKeys]);
 
   /** Add a participant row (idempotent) and keep the peak count. */
   const addParticipant = useCallback(
@@ -760,7 +847,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         toast.error("You're already in a call");
         return;
       }
-      if (!socket || sfuUnavailable()) return;
+      if (!socket || sfuUnavailable(sfuFor(groupId))) return;
       // Fetched alongside the permission prompt rather than before it, so a
       // cold credential cache costs nothing the user can perceive.
       const ice = ensureIceServers();
@@ -853,6 +940,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       teardown,
       ensureIceServers,
       openTransport,
+      sfuFor,
     ],
   );
 
@@ -866,7 +954,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       /** Media we already hold (accepting a ring acquires it first). */
       stream?: MediaStream;
     }) => {
-      if (!socket || sfuUnavailable()) return;
+      if (!socket || sfuUnavailable(sfuFor(target.groupId))) return;
       const ice = ensureIceServers();
       const { callId, groupId, video, starterId } = target;
       let stream = target.stream ?? null;
@@ -950,6 +1038,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       teardown,
       ensureIceServers,
       openTransport,
+      sfuFor,
     ],
   );
 

@@ -96,18 +96,29 @@ async function inboundBytes(page: Page): Promise<number[]> {
     const out: number[] = [];
     for (const pc of pcs) {
       if (pc.connectionState !== "connected") continue;
-      let bytes = 0;
       const stats = await pc.getStats();
       stats.forEach((r) => {
         if (r.type === "inbound-rtp" && typeof r.bytesReceived === "number") {
-          bytes += r.bytesReceived;
+          out.push(r.bytesReceived);
         }
       });
-      out.push(bytes);
     }
     return out;
   });
 }
+
+/**
+ * How many remote participants are actually reaching this page, measured as
+ * inbound RTP streams carrying bytes.
+ *
+ * Counting STREAMS rather than peer connections is what makes this work on both
+ * transports, and it is the stronger check on either: a mesh has one connection
+ * per peer, an SFU has ONE subscriber connection carrying everybody (plus a
+ * publisher connection that receives nothing by design, which is why
+ * per-connection counting reported a spurious 0 there). Either way, media from
+ * N remote participants is N inbound streams with bytes on them.
+ */
+const sources = (bytes: number[]) => bytes.filter((b) => b > 0).length;
 
 const callRows = (page: Page) =>
   page.locator("[data-call-status]").evaluateAll((els) =>
@@ -270,7 +281,7 @@ async function main() {
     inboundBytes(pageB),
     inboundBytes(pageC),
   ]);
-  const flowing = (bytes: number[]) => bytes.length >= 2 && bytes.every((b) => b > 0);
+  const flowing = (bytes: number[]) => sources(bytes) >= 2;
   check(flowing(ba), `starter receives media from both peers (${ba.join(", ")} bytes)`);
   check(flowing(bb), `late joiner receives media from both peers (${bb.join(", ")} bytes)`);
   check(flowing(bc), `early joiner receives media from both peers (${bc.join(", ")} bytes)`);
@@ -329,7 +340,7 @@ async function main() {
   );
   const vBytes = await inboundBytes(pageB);
   check(
-    vBytes.length >= 1 && vBytes.every((b) => b > 0),
+    sources(vBytes) >= 1,
     `video call media flows (${vBytes.join(", ")} bytes)`,
   );
   if (process.argv.includes("--shots")) {

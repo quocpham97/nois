@@ -141,6 +141,53 @@ const SFU_APP_ID = process.env.SFU_APP_ID;
 const SFU_APP_TOKEN = process.env.SFU_APP_TOKEN;
 const SFU_BASE = "https://rtc.live.cloudflare.com/v1";
 
+/**
+ * Who owns each Realtime session: sessionId → the device that opened it, in the
+ * call it opened it for.
+ *
+ * Module scope, and keyed by DEVICE rather than by socket, for the same reason
+ * seats are held: a websocket blip must not cost a live call its sessions. This
+ * used to be a `Set` inside the connection handler, which meant a reconnected
+ * socket denied owning sessions it had just created — and since every
+ * `tracks/new` and `renegotiate` names one, the whole call was refused
+ * `unauthorized` from that moment on, permanently. Room membership already
+ * survived a blip via `heldSeatFor`; this is the other half of that fix.
+ *
+ * The binding stays strictly stronger than group membership: a session can only
+ * be named by the device that opened it, and only inside the call it was opened
+ * for, so `tracks/close` against someone else's session remains impossible.
+ */
+const sfuSessionOwners = new Map<
+  string,
+  { userId: string; deviceId: string; callId: string; expiresAt: number }
+>();
+/** Sliding, so an active call keeps its sessions however long it runs, while an
+ *  abandoned one cannot pin the entry forever. */
+const SFU_SESSION_TTL_MS = 60 * 60 * 1000;
+const rememberSfuSession = (
+  sessionId: string,
+  owner: { userId: string; deviceId: string; callId: string },
+): void => {
+  const now = Date.now();
+  for (const [id, o] of sfuSessionOwners) {
+    if (o.expiresAt <= now) sfuSessionOwners.delete(id);
+  }
+  sfuSessionOwners.set(sessionId, { ...owner, expiresAt: now + SFU_SESSION_TTL_MS });
+};
+const ownsSfuSession = (
+  sessionId: string,
+  userId: string,
+  deviceId: string,
+  callId: string,
+): boolean => {
+  const owner = sfuSessionOwners.get(sessionId);
+  if (!owner || owner.expiresAt <= Date.now()) return false;
+  if (owner.userId !== userId || owner.deviceId !== deviceId) return false;
+  if (owner.callId !== callId) return false;
+  owner.expiresAt = Date.now() + SFU_SESSION_TTL_MS;
+  return true;
+};
+
 /** One proxied Realtime API call. Throws on transport or HTTP failure; the
  *  caller turns that into an `ok: false` ack rather than a dropped call. */
 async function sfuFetch<T>(
@@ -1260,11 +1307,10 @@ app.prepare().then(async () => {
     // the roster uses, and it is strictly stronger than group membership: a
     // member who never joined the call cannot pull anyone's media.
     //
-    // Sessions are additionally bound to the socket that created them, because
-    // `tracks/close` against someone else's session is exactly the abuse
-    // Cloudflare's docs warn about. A client never gets to name a session it
-    // did not open.
-    const sfuSessions = new Set<string>();
+    // Sessions are additionally bound to the DEVICE that created them (see
+    // sfuSessionOwners), because `tracks/close` against someone else's session
+    // is exactly the abuse Cloudflare's docs warn about. A client never gets to
+    // name a session it did not open.
     const sfuGuard = (
       groupId: unknown,
       callId: unknown,
@@ -1284,11 +1330,18 @@ app.prepare().then(async () => {
       // is expected back", which is the same claim the room makes, minus the
       // dependency on one TCP connection surviving.
       const deviceId = (socket.data.deviceId as string | undefined) ?? "";
+      // Sessions are owned per device, so an unannounced one could never own
+      // what it opens. Fail closed rather than mint a session nobody can use;
+      // `device:announce` lands on connect, and the client retries.
+      if (!deviceId) return "unauthorized";
       if (!socket.rooms.has(room) && !heldSeatFor(room, userId, deviceId)) {
         return "unauthorized";
       }
       if (sessionId !== undefined) {
-        if (typeof sessionId !== "string" || !sfuSessions.has(sessionId)) {
+        if (
+          typeof sessionId !== "string" ||
+          !ownsSfuSession(sessionId, userId, deviceId, callId)
+        ) {
           return "unauthorized";
         }
       }
@@ -1302,7 +1355,11 @@ app.prepare().then(async () => {
       if (bad) return ack({ ok: false, reason: bad });
       try {
         const res = await sfuFetch<{ sessionId: string }>("/sessions/new", "POST");
-        sfuSessions.add(res.sessionId);
+        rememberSfuSession(res.sessionId, {
+          userId,
+          deviceId: (socket.data.deviceId as string | undefined) ?? "",
+          callId,
+        });
         ack({ ok: true, sessionId: res.sessionId });
       } catch (e) {
         console.warn("[sfu] session failed:", (e as Error).message);
@@ -1380,7 +1437,7 @@ app.prepare().then(async () => {
       }
       ack({ packages, memberIds });
     });
-    socket.on("mls:commit", async ({ groupId, fromEpoch, commit, welcomes }, ack) => {
+    socket.on("mls:commit", async ({ groupId, fromEpoch, commit, welcomes, welcomeFor }, ack) => {
       const reply = (r: Parameters<typeof ack>[0]) => {
         if (typeof ack === "function") ack(r);
       };
@@ -1390,7 +1447,15 @@ app.prepare().then(async () => {
       // Accepted: fan the commit out to members in order, and deliver Welcomes
       // (live to online targets + queued so offline members get them on connect).
       socket.to(memberRooms(groupId)).emit("mls:commit", { groupId, seq: res.seq, commit });
-      for (const w of welcomes ?? []) {
+      // Both shapes flatten to the same per-device delivery; `welcomeFor` just
+      // stops the sender repeating one blob per device on the wire.
+      const targeted = [
+        ...(welcomes ?? []),
+        ...(welcomeFor ?? []).flatMap((w) =>
+          (w.targets ?? []).map((t) => ({ ...t, welcome: w.welcome })),
+        ),
+      ];
+      for (const w of targeted) {
         if (!w.toUserId || !w.toDeviceId) continue;
         mlsDs.queueWelcome(groupId, w.toUserId, w.toDeviceId, w.welcome, res.seq);
         socket.to("user:" + w.toUserId).emit("mls:welcome", {

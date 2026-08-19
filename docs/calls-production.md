@@ -5,9 +5,11 @@ Short version:
 - **TURN** is a real, required piece of configuration and it is **not** something
   the current Render deployment can host. Use a managed provider, or run coturn
   on a VM.
-- **SFU**: there is nothing to configure. The app has no SFU and doesn't call one
-  — media is a peer-to-peer mesh. Adopting one is a project, not a setting; the
-  trigger and the shape of that work are at the bottom.
+- **SFU**: nothing to configure for the shipping path — calls are a peer-to-peer
+  mesh by default and no media server is involved. A working, frame-encrypted SFU
+  transport for **group** calls exists behind a build flag and two credentials
+  (verified 2026-08-19); it is off by default for the reasons in
+  [Phase C/D, as built](#phase-c-as-built).
 
 ## TURN and SFU solve different problems
 
@@ -360,10 +362,12 @@ are exactly the ones you don't have at home.
 
 ## SFU
 
-**Nothing to configure.** Calls are a full mesh: every participant connects
-directly to every other one, and no media server is involved. There is no SFU
-endpoint, token, or setting anywhere in the codebase, and adding env vars would
-not change that.
+**Nothing to configure by default.** Calls are a full mesh: every participant
+connects directly to every other one, and no media server is involved. Setting
+`NEXT_PUBLIC_CALL_TRANSPORT=sfu` plus `SFU_APP_ID`/`SFU_APP_TOKEN` switches
+**group** calls onto Cloudflare Realtime with per-frame encryption — verified
+working, still off by default — and DMs stay on the mesh regardless. See
+[Phase C/D, as built](#phase-c-as-built).
 
 That was a deliberate decision — see
 [group-calls-plan.md](./group-calls-plan.md#why-not-an-sfu-first). The short form:
@@ -430,10 +434,16 @@ rotation and a fallback path for clients without Encoded Transform).
 
 ### Phase C, as built
 
-**Do not enable this in production.** Until phase D lands, media is decrypted at
-the SFU and the product's central promise does not hold. It is off by default
-and gated on a build-time flag precisely so it can't be turned on by accident
-from a dashboard.
+**Phase D landed, and the media path now works** — verified 2026-08-19 against
+the real Cloudflare app: `group-call-harness.mts` passes on the SFU with two
+distinct frame-encrypted media sources per participant. Media is sealed before it
+leaves the browser, so the SFU forwards what it cannot read.
+
+**Still off by default, deliberately.** Two things argue against shipping it:
+failure is all-or-nothing (one dead connection drops the whole roster) with no
+session re-establishment, and the 6/4 caps — the reason to want an SFU at all —
+are still enforced as written. It also applies to **group calls only**: a DM has
+no MLS group to key frames from, so it stays on the mesh whatever the flag says.
 
 ```bash
 NEXT_PUBLIC_CALL_TRANSPORT=sfu   # client: route media through the SFU
@@ -492,13 +502,32 @@ dies; here one dead connection is every leg, so `failAll` drops the whole roster
 and the engine above reports "Call connection lost". Session re-establishment is
 not implemented and should be part of any move toward shipping this.
 
-**What is verified, and what is not.** `scripts/call-harness.mts` covers the
-authorization gate (non-participant refused, forged session id refused,
-participant clears it), and the mesh path is unchanged across all three call
-harnesses. **The media path is entirely unverified** — it has never been run
-against a real Cloudflare SFU app, so treat the publish/pull/renegotiate
-sequence as written-to-spec, not working. Reading the spec is not the same as
-having seen a frame arrive.
+**What is verified.** `scripts/call-harness.mts` covers the authorization gate
+(non-participant refused, forged session id refused, participant clears it), and
+`group-call-harness.mts` now runs the whole publish/pull/renegotiate sequence
+against the real Cloudflare app with media asserted per inbound RTP **stream**
+rather than per peer connection — the change that lets one harness check both
+transports, since an SFU has one subscriber connection carrying everybody and a
+publisher that receives nothing by design.
+
+Three bugs stood between "written to spec" and "frames arrive", all fixed
+2026-08-19:
+
+1. **Sessions died with the connection.** `sfuSessions` was a `Set` in the
+   per-connection closure, so a reconnected socket denied owning the sessions it
+   had just opened and every later `tracks/new` was refused `unauthorized`,
+   permanently. Ownership is now module-level and bound to the device and the
+   call (`sfuSessionOwners`), the same reasoning that already let a held seat
+   survive a blip.
+2. **A 30 MB `mls:commit` tore the websocket down.** An add-commit yields one
+   Welcome, but the payload carried a copy per target device (242 devices ×
+   125 KB). `ws` does not reject an oversized frame, it kills the connection — so
+   the SFU setup that depended on acks died with it. The shared blob now goes
+   once with its recipients (`welcomeFor`).
+3. **Retries could not tell "never sent" from "no reply".** Mutating requests
+   stay capped at one blind attempt, but `unauthorized` (refused before any
+   upstream call) and emits placed on a down socket are provably no-ops and now
+   retry on their own budget, after waiting for the socket to come back.
 
 ### What that means in practice
 

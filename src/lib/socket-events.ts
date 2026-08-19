@@ -445,7 +445,22 @@ export type MlsCommitPayload = {
   groupId: string;
   fromEpoch: number;
   commit: string;
-  welcomes: { toUserId: string; toDeviceId: string; welcome: string }[];
+  /** Legacy shape: one entry per target device, each carrying its own copy of
+   *  the blob. Still accepted, because an older client may send it. */
+  welcomes?: { toUserId: string; toDeviceId: string; welcome: string }[];
+  /**
+   * Preferred shape: each distinct Welcome once, with the devices it is for.
+   *
+   * One add-commit produces ONE Welcome covering every member it adds, so the
+   * legacy shape multiplied the payload by the device count. With members that
+   * had accumulated many devices that reached 30 MB for a three-person group —
+   * past `ws`'s frame limit, which does not reject the message but tears the
+   * SOCKET down, so every call and commit riding on it died too.
+   */
+  welcomeFor?: {
+    welcome: string;
+    targets: { toUserId: string; toDeviceId: string }[];
+  }[];
 };
 export type MlsCommitAck =
   | { ok: true; seq: number; epoch: number }

@@ -1419,9 +1419,27 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     ): Promise<MlsCommitAck> =>
       new Promise((resolve) => {
         if (!socket) return resolve({ ok: false, reason: "error", currentEpoch: 0 });
+        // One add-commit yields ONE Welcome for everyone it adds, so callers
+        // naturally hand us the same blob once per target device. Send each
+        // distinct blob once with the devices it is for: the old shape put a
+        // full copy per device on the wire, which reached 30 MB in a group whose
+        // three members had accumulated many devices — past `ws`'s frame limit,
+        // which drops the SOCKET rather than the message and so took down every
+        // call and commit riding on it.
+        const byWelcome = new Map<string, { toUserId: string; toDeviceId: string }[]>();
+        for (const w of welcomes) {
+          const targets = byWelcome.get(w.welcome);
+          const target = { toUserId: w.toUserId, toDeviceId: w.toDeviceId };
+          if (targets) targets.push(target);
+          else byWelcome.set(w.welcome, [target]);
+        }
+        const welcomeFor = [...byWelcome].map(([welcome, targets]) => ({
+          welcome,
+          targets,
+        }));
         socket
           .timeout(8000)
-          .emit("mls:commit", { groupId, fromEpoch, commit, welcomes }, (err, r) =>
+          .emit("mls:commit", { groupId, fromEpoch, commit, welcomeFor }, (err, r) =>
             resolve(err || !r ? { ok: false, reason: "error", currentEpoch: 0 } : r),
           );
       }),
