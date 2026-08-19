@@ -65,10 +65,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const decrypt = useDecrypt({ socket, userId, keys, mls, outbox });
   const { scheduleReceipt } = useReceipts({ socket, userId, keys, decrypt, seal });
 
-  // --- local history + live events -----------------------------------------
+  // --- local history + the actions the live events lean on ------------------
   const history = useHistory({ scrollToBottom });
   const pending = usePendingMessages();
   const typing = useTyping({ socket });
+  // Before the event hooks: the reconnect resend in useSessionSync goes through
+  // the ordinary retry path, so a resent message is sealed like any other.
+  const messages = useMessageActions({ socket, outbox, seal, typing, scrollToBottom });
 
   useMessageEvents({
     socket,
@@ -81,14 +84,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   });
   useRosterEvents({ socket, history, pending });
   useKeyEvents({ socket, userId, keys });
-  useSessionSync({ socket, status, history, outbox, scheduleReceipt });
+  useSessionSync({
+    socket,
+    status,
+    history,
+    retrySend: messages.retrySend,
+    scheduleReceipt,
+  });
 
   // --- view-facing concerns ------------------------------------------------
   useChatRouting();
   useRosterCache({ userId });
   useDrafts({ userId });
 
-  const messages = useMessageActions({ socket, outbox, seal, typing, scrollToBottom });
   const groupActions = useGroupActions({ socket });
   const workspace = useWorkspaceActions({ socket });
   const profile = useProfileActions({ socket });
