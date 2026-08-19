@@ -1424,6 +1424,13 @@ app.prepare().then(async () => {
     // MLS delivery service (Phase 4, feature-flagged) — the server ORDERS
     // commits per group (single-accept-per-epoch), queues Welcomes, and serves
     // catch-up. Payloads stay opaque; see server/mls-ds.ts.
+    // A device that joined from the live relay no longer needs its queued copy.
+    // Scoped to the caller's own user, so one account can't drop another's mail.
+    socket.on("mls:welcomeConsumed", ({ groupId, deviceId, seq }) => {
+      if (typeof deviceId !== "string" || !deviceId) return;
+      if (typeof groupId !== "string" || !groupId) return;
+      mlsDs.dropWelcome(groupId, userId, deviceId, Number(seq) || 0);
+    });
     socket.on("mls:publishKeyPackage", ({ deviceId, keyPackage }) => {
       if (typeof deviceId !== "string" || !deviceId) return;
       mlsDs.publishKeyPackage(userId, deviceId, keyPackage);
@@ -1469,7 +1476,10 @@ app.prepare().then(async () => {
       ];
       for (const w of targeted) {
         if (!w.toUserId || !w.toDeviceId) continue;
-        mlsDs.queueWelcome(groupId, w.toUserId, w.toDeviceId, w.welcome, res.seq);
+        // Queued BEFORE the live relay: an online recipient can join and report
+        // it consumed before a background insert lands, and the delete would then
+        // miss a row that outlives it. See queueWelcome.
+        await mlsDs.queueWelcome(groupId, w.toUserId, w.toDeviceId, w.welcome, res.seq);
         socket.to("user:" + w.toUserId).emit("mls:welcome", {
           groupId,
           welcome: w.welcome,

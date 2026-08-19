@@ -489,6 +489,14 @@ export type MlsWelcomeRelay = {
 export type MlsFetchCommitsPayload = { groupId: string; sinceSeq: number };
 export type MlsFetchCommitsResult = { commits: { seq: number; commit: string }[] };
 // Drain THIS DEVICE's queued Welcomes on (re)connect (added while offline).
+/** "I joined from the live relay, so the copy you queued for me is spent." Lets
+ *  the server drop it now instead of waiting for this device's next connect —
+ *  which, for a device that never returns, would be never. */
+export type MlsWelcomeConsumedPayload = {
+  groupId: string;
+  deviceId: string;
+  seq: number;
+};
 export type MlsDrainWelcomesPayload = { deviceId: string };
 export type MlsDrainWelcomesResult = {
   welcomes: { groupId: string; welcome: string; seq: number }[];
@@ -754,6 +762,7 @@ export type ClientToServerEvents = {
     payload: MlsFetchCommitsPayload,
     ack: (res: MlsFetchCommitsResult) => void,
   ) => void;
+  "mls:welcomeConsumed": (payload: MlsWelcomeConsumedPayload) => void;
   "mls:drainWelcomes": (
     payload: MlsDrainWelcomesPayload,
     ack: (res: MlsDrainWelcomesResult) => void,

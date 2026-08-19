@@ -56,7 +56,14 @@ export async function init(): Promise<void> {
     console.error("[mls-ds] hydrate failed:", (e as Error).message);
   }
   await pruneExpired();
+  // Also on a timer: filtering on read keeps behaviour correct, but only the
+  // sweep reclaims bytes, and a process that runs for months would otherwise
+  // never do it. Unref'd so it never holds the process open.
+  setInterval(() => void pruneExpired(), PRUNE_INTERVAL_MS).unref();
 }
+
+/** How often to sweep expired packages and undeliverable welcomes. */
+const PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 /**
  * Drop what expiry has made dead weight: KeyPackages nobody may be added with
@@ -82,9 +89,19 @@ export async function pruneExpired(): Promise<void> {
       `DELETE FROM mls_welcome WHERE created_at < now() - ($1::bigint * interval '1 millisecond')`,
       [PACKAGE_TTL_MS * 2],
     );
-    if (kp.rowCount || w.rowCount) {
+    // Blobs outlive their pointers (a drain deletes only the pointer), so the
+    // bytes are only actually reclaimed here.
+    const b = await getPool().query(
+      `DELETE FROM mls_welcome_blob b
+        WHERE NOT EXISTS (
+          SELECT 1 FROM mls_welcome w
+           WHERE w.group_id = b.group_id AND w.seq = b.seq
+        )`,
+    );
+    if (kp.rowCount || w.rowCount || b.rowCount) {
       console.log(
-        `[mls-ds] pruned ${kp.rowCount ?? 0} expired key packages, ${w.rowCount ?? 0} undeliverable welcomes`,
+        `[mls-ds] pruned ${kp.rowCount ?? 0} expired key packages, ` +
+          `${w.rowCount ?? 0} undeliverable welcomes, ${b.rowCount ?? 0} orphaned blobs`,
       );
     }
   } catch (e) {
@@ -248,19 +265,67 @@ export function groupEpoch(groupId: string): number {
 
 // --- welcomes --------------------------------------------------------------
 
-export function queueWelcome(
+/**
+ * Queue a Welcome for one recipient device.
+ *
+ * The blob is stored ONCE per commit and pointed at, because one commit yields
+ * one Welcome however many devices it adds — so (groupId, seq) names it. Inlining
+ * it per device meant N copies of a payload that carries the whole ratchet tree,
+ * i.e. O(N²) bytes to admit N devices.
+ *
+ * `DO NOTHING` on the blob is safe because every caller for a given commit
+ * passes the same bytes: the client sends one blob with its target list, and the
+ * legacy per-device shape repeated an identical copy.
+ *
+ * AWAITABLE, and the caller must await it before relaying the Welcome live: an
+ * online recipient can join and report the copy consumed faster than a
+ * fire-and-forget insert completes, and a delete that arrives first matches
+ * nothing — leaving a row that is then written behind it and never collected.
+ */
+export async function queueWelcome(
   groupId: string,
   toUser: string,
   toDevice: string,
   welcome: string,
   seq: number,
+): Promise<void> {
+  try {
+    const pool = getPool();
+    await pool.query(
+      `INSERT INTO mls_welcome_blob (group_id, seq, welcome) VALUES ($1,$2,$3)
+       ON CONFLICT (group_id, seq) DO NOTHING`,
+      [groupId, seq, welcome],
+    );
+    await pool.query(
+      "INSERT INTO mls_welcome (group_id, to_user, to_device, seq) VALUES ($1,$2,$3,$4)",
+      [groupId, toUser, toDevice, seq],
+    );
+  } catch (e) {
+    console.error("[mls-ds] queueWelcome:", (e as Error).message);
+  }
+}
+
+/**
+ * Drop a device's queued Welcome for one commit, because it already joined from
+ * the live relay.
+ *
+ * Without this the row sits until that device's NEXT connect drains it — and if
+ * it never reconnects, forever. Called on the client's ack after a successful
+ * join, so it is only ever removed once it is provably not needed.
+ */
+export function dropWelcome(
+  groupId: string,
+  toUser: string,
+  toDevice: string,
+  seq: number,
 ): void {
   void getPool()
     .query(
-      "INSERT INTO mls_welcome (group_id, to_user, to_device, welcome, seq) VALUES ($1,$2,$3,$4,$5)",
-      [groupId, toUser, toDevice, welcome, seq],
+      `DELETE FROM mls_welcome
+        WHERE group_id=$1 AND to_user=$2 AND to_device=$3 AND seq=$4`,
+      [groupId, toUser, toDevice, seq],
     )
-    .catch((e) => console.error("[mls-ds] queueWelcome:", (e as Error).message));
+    .catch((e) => console.error("[mls-ds] dropWelcome:", (e as Error).message));
 }
 
 /** Fetch and remove all queued welcomes for one DEVICE (delivered on connect —
@@ -271,9 +336,21 @@ export async function drainWelcomes(
   toDevice: string,
 ): Promise<{ groupId: string; welcome: string; seq: number }[]> {
   try {
+    // Claim the pointers and read their blobs in ONE statement: a separate
+    // read-then-delete could drop a row queued in between without ever
+    // delivering it. The payload lives in the other table, so the delete's
+    // RETURNING feeds a join rather than carrying the blob itself.
     const { rows } = await getPool().query(
-      `DELETE FROM mls_welcome WHERE to_user=$1 AND to_device=$2
-       RETURNING group_id, welcome, seq`,
+      `WITH claimed AS (
+         DELETE FROM mls_welcome
+          WHERE to_user=$1 AND to_device=$2
+          RETURNING group_id, seq, id
+       )
+       SELECT c.group_id, c.seq, b.welcome
+         FROM claimed c
+         JOIN mls_welcome_blob b
+           ON b.group_id = c.group_id AND b.seq = c.seq
+        ORDER BY c.id`,
       [toUser, toDevice],
     );
     return rows.map((r) => ({

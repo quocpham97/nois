@@ -371,6 +371,41 @@ export function ensureSchema(): Promise<void> {
       await pool.query(
         `CREATE INDEX IF NOT EXISTS idx_mls_welcome_device ON mls_welcome(to_user, to_device, id)`,
       );
+      // A Welcome is stored ONCE, with a pointer row per recipient device.
+      //
+      // One commit yields one Welcome no matter how many devices it adds, so
+      // (group_id, seq) names it — the key is already in the data, no content
+      // hash needed. The old shape inlined a full copy of the blob in every
+      // per-device row, and a blob carries the whole ratchet tree, so admitting
+      // N devices wrote N copies of an O(N) payload. That is what put 446 MB in
+      // 3,710 rows here.
+      await pool.query(
+        `CREATE TABLE IF NOT EXISTS mls_welcome_blob (
+           group_id   text NOT NULL,
+           seq        bigint NOT NULL,
+           welcome    text NOT NULL,
+           created_at timestamptz NOT NULL DEFAULT now(),
+           PRIMARY KEY (group_id, seq)
+         )`,
+      );
+      // Migrate any inlined blobs across, then stop requiring the column. One
+      // row per (group_id, seq) — every pointer for a commit shares its blob.
+      const hasInline = await pool.query(
+        `SELECT 1 FROM information_schema.columns
+          WHERE table_name='mls_welcome' AND column_name='welcome'`,
+      );
+      if (hasInline.rowCount) {
+        await pool.query(
+          `INSERT INTO mls_welcome_blob (group_id, seq, welcome)
+           SELECT DISTINCT ON (group_id, seq) group_id, seq, welcome
+             FROM mls_welcome WHERE welcome IS NOT NULL
+             ORDER BY group_id, seq, id
+           ON CONFLICT (group_id, seq) DO NOTHING`,
+        );
+        // Dropped rather than left nullable: it is the column whose duplication
+        // this change exists to remove, and every row has been copied above.
+        await pool.query(`ALTER TABLE mls_welcome DROP COLUMN welcome`);
+      }
       // Idempotent migration (2026-07): DMs used a "dm-<key>" channel id; they
       // now share the flat "<key>" id space with groups (a channel's `type` —
       // 'group'|'dm' — is the sole discriminator, and 'channel' was renamed to

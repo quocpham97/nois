@@ -569,6 +569,15 @@ export function useMls({
           );
           await setSeq(groupId, seq); // resume catch-up after the commit that added us
           waitRef.current.delete(groupId);
+          // Joined from the live relay, so the copy the server queued for this
+          // device is spent — tell it, or the row waits for our next connect to
+          // drain it (and forever, for a device that never comes back). Only on
+          // success: a Welcome we couldn't process is left alone for the sweep.
+          socket.emit("mls:welcomeConsumed", {
+            groupId,
+            deviceId: secrets.deviceId,
+            seq,
+          });
           chat().bumpChainVersion();
           await applyCommitsSince(groupId); // apply any commits after our add
         } catch (err) {
