@@ -132,7 +132,7 @@ async function main() {
   await page.waitForSelector(`text=${outbound}`, { timeout: 20000 });
   await sleep(2500); // let the ack land and reconcile the optimistic row
 
-  const lockCount = await page.getByText("Unable to decrypt").count();
+  const lockCount = await page.locator("main").getByText("Unable to decrypt").count();
   check(lockCount === 0, "no 🔒 rows after our own send (outbox plaintext cache)");
 
   const stillThere = await page.getByText(outbound, { exact: false }).count();
@@ -191,7 +191,10 @@ async function main() {
 
   // A reload is the case that used to strand our own message as 🔒 if the
   // durable outgoing-body record was lost.
-  const afterReloadLocks = await page.getByText("Unable to decrypt").count();
+  const afterReloadLocks = await page
+    .locator("main")
+    .getByText("Unable to decrypt")
+    .count();
   check(afterReloadLocks === 0, "no 🔒 rows after a reload (durable sent-envelope cache)");
   check(
     (await page.getByText(outbound, { exact: false }).count()) > 0,

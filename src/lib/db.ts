@@ -128,6 +128,18 @@ export function ensureSchema(): Promise<void> {
       await pool.query(
         `CREATE INDEX IF NOT EXISTS message_group_seq ON message (group_id, seq)`,
       );
+      // The sender's own id for a message, used to make a re-send idempotent: a
+      // client that never saw its ack resends the same clientId on reconnect, and
+      // without this the server minted a second message with a second id — which
+      // the recipient cannot de-dupe, because it de-dupes on the SERVER id.
+      // Nullable + a partial index, because replayed/legacy rows have none.
+      await pool.query(
+        `ALTER TABLE message ADD COLUMN IF NOT EXISTS client_id text`,
+      );
+      await pool.query(
+        `CREATE UNIQUE INDEX IF NOT EXISTS message_client
+           ON message (group_id, client_id) WHERE client_id IS NOT NULL`,
+      );
       await pool.query(
         `CREATE INDEX IF NOT EXISTS message_parent ON message (parent_id)`,
       );

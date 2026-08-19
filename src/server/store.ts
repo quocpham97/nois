@@ -47,6 +47,22 @@ type GroupMeta = Omit<Group, "messages" | "pinned" | "pinIds">;
 const groups = new Map<string, GroupMeta>();
 const members = new Map<string, Set<string>>(); // groupId -> userIds
 const seqOf = new Map<string, number>(); // groupId -> last top-level seq
+/**
+ * `groupId|clientId` -> the message that send produced, so a RESEND of the same
+ * clientId resolves to the message already created rather than minting a second
+ * one. A client resends on reconnect for any message it never saw acked (see the
+ * reconnect resend in hooks/use-session-sync), and the recipient de-dupes on the
+ * SERVER id — so two ids for one send show up twice and stay twice.
+ *
+ * Bounded by `rememberClientId` and hydrated at boot from the `client_id` column,
+ * which is what makes the guarantee survive a restart: the durable backstop is a
+ * partial unique index on (group_id, client_id), so the table can never hold two
+ * rows for one send even if this cache misses.
+ */
+const sentByClient = new Map<string, Message>(); // groupId|clientId -> message
+/** How many recent (group, clientId) pairs to remember. A pending send is
+ *  resolved within seconds; this is sized for a pathological offline burst. */
+const SENT_CLIENT_MAX = 4096;
 const reads = new Map<string, Map<string, number>>(); // groupId -> userId -> lastReadSeq
 const pins = new Map<string, string[]>(); // groupId -> ordered msg ids
 const reactions = new Map<string, Map<string, Set<string>>>(); // msgId -> emoji -> userIds
@@ -146,12 +162,18 @@ function persistMessage(
   groupId: string,
   message: Message,
   parentId: string | null,
+  clientId?: string,
 ): void {
   bg(
     getPool().query(
-      `INSERT INTO message (id, group_id, seq, parent_id, ts, deleted, data)
-       VALUES ($1,$2,$3,$4,$5,false,$6)
-       ON CONFLICT (id) DO NOTHING`,
+      // Two conflict targets matter here. The primary key covers a replayed
+      // insert of the same message; `message_client` (partial unique on
+      // group_id, client_id) covers a resend that missed the in-memory index —
+      // e.g. one that arrives after a restart, before boot hydration ran. Both
+      // resolve to "the row is already there", which is exactly right.
+      `INSERT INTO message (id, group_id, seq, parent_id, ts, deleted, data, client_id)
+       VALUES ($1,$2,$3,$4,$5,false,$6,$7)
+       ON CONFLICT DO NOTHING`,
       [
         message.id,
         groupId,
@@ -159,6 +181,7 @@ function persistMessage(
         parentId,
         message.ts ?? null,
         JSON.stringify(message),
+        clientId ?? null,
       ],
     ),
   );
@@ -196,6 +219,21 @@ async function loadFromDb(): Promise<void> {
     "SELECT group_id, max(seq) AS maxseq FROM message WHERE parent_id IS NULL GROUP BY group_id",
   );
   for (const r of sq.rows) seqOf.set(r.group_id, Number(r.maxseq) || 0);
+
+  // Resume the client-id index so a resend that spans a restart still resolves
+  // to the message it already created (see sentByClient). Bounded to the most
+  // recent rows: a send is acked within seconds, so anything older cannot still
+  // be pending on a client.
+  const ci = await pool.query(
+    `SELECT group_id, client_id, data FROM message
+     WHERE client_id IS NOT NULL AND parent_id IS NULL
+     ORDER BY created_at DESC LIMIT $1`,
+    [SENT_CLIENT_MAX],
+  );
+  // Oldest first, so eviction order matches insertion order.
+  for (const r of ci.rows.reverse()) {
+    sentByClient.set(`${r.group_id}|${r.client_id}`, r.data as Message);
+  }
 
   // Reactions: msgId → emoji → Set<userId>.
   const rx = await pool.query("SELECT msg_id, emoji, user_id FROM reaction");
@@ -645,6 +683,17 @@ export function togglePin(
  * derives mentions. The body is returned for relay only — the server keeps no
  * copy. Returns null if the group doesn't exist.
  */
+/** Remember a send by its client id, evicting the oldest once over the cap. */
+function rememberClientId(groupId: string, clientId: string, message: Message): void {
+  const key = `${groupId}|${clientId}`;
+  sentByClient.set(key, message);
+  if (sentByClient.size > SENT_CLIENT_MAX) {
+    // Map iterates in insertion order, so the first key is the oldest.
+    const oldest = sentByClient.keys().next().value;
+    if (oldest !== undefined) sentByClient.delete(oldest);
+  }
+}
+
 export function addMessage(
   groupId: string,
   author: User,
@@ -654,8 +703,13 @@ export function addMessage(
   rich?: string,
   enc?: string,
 ): Message | null {
-  void clientId;
   if (!groupExists(groupId)) return null;
+  // A resend of a send we already handled is the SAME message, not a new one —
+  // hand back the original so the caller re-acks and re-broadcasts one id.
+  if (clientId) {
+    const already = sentByClient.get(`${groupId}|${clientId}`);
+    if (already) return already;
+  }
   const mentions = deriveMentions(text);
   const message: Message = {
     id: newId(),
@@ -670,7 +724,8 @@ export function addMessage(
     ...(rich ? { rich } : {}),
     ...(enc ? { enc } : {}),
   };
-  persistMessage(groupId, message, null);
+  if (clientId) rememberClientId(groupId, clientId, message);
+  persistMessage(groupId, message, null, clientId);
   return message;
 }
 

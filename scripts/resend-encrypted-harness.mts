@@ -159,30 +159,28 @@ async function main() {
   // The sender must still be able to read its own message (the outbox holds the
   // only copy of the body until the ack lands).
   check(
-    (await page.getByText(body, { exact: false }).count()) > 0,
+    (await page.locator("main").getByText(body, { exact: false }).count()) > 0,
     "the sender can still read its own resent message",
   );
-  check(
-    (await page.getByText("Unable to decrypt").count()) === 0,
-    "no 🔒 row after the resend",
-  );
+  // Scoped to the open conversation on purpose: this test user accumulates
+  // groups from earlier runs, and a fresh browser holds no sender keys for them,
+  // so their SIDEBAR previews legitimately read 🔒. Only this thread is the subject.
+  const locks = await page.locator("main").getByText("Unable to decrypt").count();
+  check(locks === 0, `no 🔒 row in the conversation after the resend (saw ${locks})`);
   check(
     (await page.getByText("Not sent", { exact: false }).count()) === 0,
     "the resend was not marked failed",
   );
-  // Reported, not asserted: this harness is about SEALING, and duplication is a
-  // separate, pre-existing defect. The server discards clientId (`void clientId`
-  // in server/store.ts addMessage), so a buffered emit that lands plus this
-  // resend become two messages with two ids — which the recipient cannot
-  // de-dupe. Printed loudly so it can't quietly become the accepted behaviour.
+  // A buffered emit that lands AND the reconnect resend both reach the server,
+  // so more than one relay is expected — but they must resolve to ONE message.
+  // The server keys a send on its clientId (store.addMessage + the partial unique
+  // index on message(group_id, client_id)); without that it minted a second id,
+  // which the recipient cannot de-dupe because it de-dupes on the server id.
   const ids = new Set(seen.map((m) => m.id));
-  if (ids.size > 1) {
-    console.log(
-      `\nNOTE  the send was delivered as ${ids.size} distinct messages from ` +
-        `${seen.length} relays — the server does not de-dupe by clientId, so a ` +
-        `reconnect resend duplicates. Separate fix, server-side.`,
-    );
-  }
+  check(
+    ids.size === 1,
+    `${seen.length} relays resolved to a single message id (saw ${ids.size})`,
+  );
   check(errors.length === 0, `no uncaught page errors (${errors.length})`);
   if (errors.length) errors.slice(0, 5).forEach((e) => console.log("   ERR:", e));
 
