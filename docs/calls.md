@@ -9,6 +9,9 @@ A DM call is a mesh of one peer — there is a single engine, not a 1:1 path plu
 group path. The sizing rules below and the reasoning behind them are in
 [group-calls-plan.md](./group-calls-plan.md).
 
+For a one-page summary of both the 1:1 and the group feature — layers, the
+rules that differ, and the current gaps — see [calls-overview.md](./calls-overview.md).
+
 | | |
 | --- | --- |
 | Client engine | `src/components/chat/call-context.tsx` (phases, roster, records) |
