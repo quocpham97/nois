@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld("desktop", {
       body: String(n?.body ?? ""),
       channelId: String(n?.channelId ?? ""),
     }),
+  setBadge: (count: number) => ipcRenderer.send("badge", Number(count) || 0),
   onOpenChannel: (cb: (channelId: string) => void) => {
     const handler = (_e: unknown, id: unknown) => cb(String(id));
     ipcRenderer.on("open-channel", handler);

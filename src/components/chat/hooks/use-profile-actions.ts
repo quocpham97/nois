@@ -8,6 +8,7 @@
  */
 import { useCallback, useEffect, useMemo } from "react";
 import { gradientFor, type UserProfile } from "@/lib/chat-data";
+import { withNotifDefaults } from "@/lib/notif-policy";
 import { EMPTY_IDS, chat, useChatStore } from "@/stores/chat-store";
 import type { TypedSocket } from "@/stores/session-store";
 
@@ -43,6 +44,23 @@ export function useProfileActions({ socket }: { socket: TypedSocket | null }) {
     },
     [updateProfile],
   );
+
+  // Quiet hours are enforced where the push is sent — on the server, for a
+  // device with no socket to ask — but "10 PM" means the USER's 10 PM, and the
+  // server has no other way to learn which one that is. So the browser's own
+  // UTC offset rides along in the saved preferences, refreshed while connected
+  // so travel and DST correct themselves. Without it the server falls back to
+  // its own clock (see notif-policy.ts).
+  const notifPrefs = useChatStore((s) => s.profile.notif);
+  // The server's copy of the profile arrives with `profileUser`; writing before
+  // it lands would push client defaults over preferences we haven't seen yet.
+  const profileLoaded = useChatStore((s) => s.profileUser !== null);
+  useEffect(() => {
+    if (!socket || !profileLoaded) return;
+    const tzOffset = -new Date().getTimezoneOffset();
+    if (notifPrefs?.tzOffset === tzOffset) return;
+    updateProfile({ notif: { ...withNotifDefaults(notifPrefs), tzOffset } });
+  }, [socket, profileLoaded, notifPrefs, updateProfile]);
 
   // The chat color drives the shared --sent-grad variable, so bubbles, the send
   // button, and the app logo all follow the chosen gradient.

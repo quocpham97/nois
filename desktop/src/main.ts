@@ -213,3 +213,10 @@ ipcMain.on(
     notification.show();
   },
 );
+
+// Unread count on the dock icon (macOS draws the number, Linux a dot). 0 clears
+// it, which is also what the app sends once everything has been read.
+ipcMain.on("badge", (e, count: unknown) => {
+  if (!fromApp(e.senderFrame?.url)) return;
+  app.setBadgeCount(Math.max(0, Math.trunc(Number(count) || 0)));
+});

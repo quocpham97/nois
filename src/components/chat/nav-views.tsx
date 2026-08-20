@@ -2,8 +2,9 @@
 
 import { AtSign, FileText, Trash2, X } from "lucide-react";
 import type { Group, Message } from "@/lib/chat-data";
-import { useSessionStore } from "@/stores/session-store";
+import { isMentioned } from "@/lib/mentions";
 import { useChatStore } from "@/stores/chat-store";
+import { useMyUser } from "@/stores/chat-selectors";
 import { useChatActions } from "./chat-actions";
 
 const groupLabel = (ch: Group) =>
@@ -103,15 +104,15 @@ function MessageRow({
 export function MentionsView() {
   const groups = useChatStore((s) => s.groups);
   const { selectGroup, jumpToMessage } = useChatActions();
-  const user = useSessionStore((s) => s.user);
-  const me = user.name;
+  // The profile-resolved name, because that's the one another member's composer
+  // inserts when it @s you — a renamed viewer stopped matching their own
+  // mentions while this read the raw session identity.
+  const me = useMyUser().name;
   const rows: { chId: string; ch: Group; msg: Message }[] = [];
   Object.entries(groups).forEach(([chId, ch]) => {
     ch.messages.forEach((m) => {
       if (m.snapshot) return; // sidebar preview line, not a real message
-      const mentioned =
-        m.mentions?.includes(me) || (m.text?.includes("@" + me) ?? false);
-      if (mentioned && !m.self) rows.push({ chId, ch, msg: m });
+      if (isMentioned(m, me) && !m.self) rows.push({ chId, ch, msg: m });
     });
   });
 

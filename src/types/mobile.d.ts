@@ -20,6 +20,19 @@ declare global {
       notify(n: { title: string; body: string; channelId: string }): void;
       /** Subscribe to notification/push-tap channel opens. Returns unsubscribe. */
       onOpenChannel(cb: (channelId: string) => void): () => void;
+      /** Reflect the unread count on the dock/taskbar icon; 0 clears it.
+       *  Optional: a shell binary built before this existed won't have it, so
+       *  every call site must optional-call it. */
+      setBadge?(count: number): void;
+      /** Native push (mobile only): the shell's own permission/registration
+       *  state, and the switch for it — so the settings toggle drives APNs/FCM
+       *  in a shell and Web Push in a browser through one call site
+       *  (src/lib/push.ts). The union mirrors PushState there. Optional: a
+       *  shell with no native push, or one built before this, won't have them. */
+      pushState?(): Promise<"unsupported" | "denied" | "enabled" | "disabled">;
+      setPushEnabled?(
+        on: boolean,
+      ): Promise<"unsupported" | "denied" | "enabled" | "disabled">;
       /** Native app version (from @capacitor/app getInfo). */
       version: string;
     };

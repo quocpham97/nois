@@ -20,7 +20,8 @@ runs only when `Capacitor.isNativePlatform()` is true, and installs
 | Google login handoff (system browser + PKCE) | ✅ | reuses `/api/desktop/*` + `messenger://` |
 | Local notifications + tap-to-open-channel | ✅ | `capacitor-bridge.ts` |
 | iOS safe-area insets | ✅ | `globals.css` `.mobile` |
-| **Background push (APNs/FCM)** | ⏳ follow-up | see "Push" below |
+| Background push (APNs/FCM) | ✅ code done, needs credentials | `capacitor-bridge.ts` + `src/server/mobile-push.ts`; see "Push" below |
+| **App icon badge** (unread count) | ⏳ needs a Badge plugin | `setBadge` calls `Plugins.Badge`, a no-op until `@capawesome/capacitor-badge` is installed |
 | **Message history persistence** if OPFS is unavailable | ⏳ follow-up | see "OPFS gate" |
 | WebRTC calls in background | ⏳ needs CallKit/ConnectionService | see calls memo |
 
@@ -147,20 +148,60 @@ history on device:
 WebCrypto non-extractable keys are well-supported in both WebViews; OPFS is the
 real risk.
 
-## Push (follow-up)
+## Push
 
-Foreground messaging works over the live Socket.IO connection. Background
-delivery needs native push:
+Foreground messaging rides the live Socket.IO connection; the page raises its own
+banner for a message that arrives while it is backgrounded (`src/lib/notify.ts`).
+Background delivery — app closed, no socket — is native push, and the code for it
+is in place:
 
-1. Add APNs key (iOS) + a Firebase project / `google-services.json` +
-   `GoogleService-Info.plist` (both platforms go through FCM via
-   `@capacitor/push-notifications`).
-2. In `capacitor-bridge.ts`, register for push, POST the device token to a new
-   `/api/mobile/push-token` route, and route `pushNotificationActionPerformed`
-   through the existing `emitOpenChannel()` fan-out (a stub already notes this).
-3. Server: send to those tokens alongside the existing web-push subscribers
-   (`src/lib/push.ts`). Keep payloads generic — the body may be an undecrypted
-   E2EE envelope, exactly like `public/sw.js`.
+- **Device registration**: `capacitor-bridge.ts` asks for permission from the
+  settings toggle (`window.mobile.setPushEnabled`, which `src/lib/push.ts` calls
+  in place of Web Push in a shell), then `register()`. The `registration`
+  listener POSTs the token to `/api/mobile/push-token` with its platform, and
+  re-registers on every launch, because tokens rotate while the app is closed.
+- **Taps**: `pushNotificationActionPerformed` → `emitOpenChannel()`, the same
+  fan-out a tapped local notification uses. There is deliberately no
+  `pushNotificationReceived` handler: a push that lands with the app open
+  duplicates what the socket already delivered.
+- **Sending**: `src/server/mobile-push.ts`, called from `maybePush` in server.ts
+  beside the Web Push fanout, under the same preferences (mute, quiet hours,
+  level) and the same 30s per-conversation coalescing. Payloads are generic —
+  "New message from Alice" — because the server cannot read the message.
+
+### What is still needed: credentials
+
+The transports are chosen per token, so each platform can be enabled alone.
+
+**Android (FCM).** Create a Firebase project, add the Android app, drop
+`google-services.json` into `android/app/`, then create a service account with
+the *Firebase Cloud Messaging API* scope and set on the server:
+
+```
+FCM_PROJECT_ID=your-project-id
+FCM_CLIENT_EMAIL=svc@your-project.iam.gserviceaccount.com
+FCM_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+```
+
+**iOS (APNs).** In the Apple developer portal: enable Push Notifications on the
+App ID, add the *Push Notifications* capability in Xcode, and create an APNs
+Auth Key (p8). Then:
+
+```
+APNS_KEY_ID=ABCD123456
+APNS_TEAM_ID=TEAM123456
+APNS_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+APNS_BUNDLE_ID=ae.silvertiger.messenger   # = appId in capacitor.config.ts
+APNS_HOST=api.sandbox.push.apple.com      # debug/TestFlight builds only
+```
+
+`@capacitor/push-notifications` registers a raw APNs token on iOS, which is why
+the server talks to APNs directly. If you would rather route iOS through
+Firebase too, add the Firebase iOS SDK plus `GoogleService-Info.plist` and the
+device will register an FCM token — no server change needed, since no "ios" rows
+will exist.
+
+Run `pnpm sync` after adding either platform file.
 
 ## Keeping in sync with desktop
 

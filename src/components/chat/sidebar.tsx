@@ -4,6 +4,7 @@ import { useCallback, useMemo, useState } from "react";
 import {
   Archive,
   ArchiveRestore,
+  BellOff,
   AtSign,
   Building2,
   FileText,
@@ -28,6 +29,7 @@ import { Avatar, GroupIcon, GroupAvatar } from "./bits";
 import { useShallow } from "zustand/react/shallow";
 import { useChatStore } from "@/stores/chat-store";
 import { useArchivedIds, useMyUser } from "@/stores/chat-selectors";
+import { isMuted } from "@/lib/notif-policy";
 import { useChatActions } from "./chat-actions";
 import type { ChatFilter, NavPanel } from "./lib/types";
 import {
@@ -563,6 +565,7 @@ export function Sidebar() {
           const ch = groups[id];
           const active = isActive(id);
           const unread = unreadByGroup[id] ?? 0;
+          const muted = isMuted(profile.notif, id);
           const preview = previewOf(ch);
           return (
             <div key={id} className="group relative">
@@ -602,6 +605,17 @@ export function Sidebar() {
                     )}
                   </span>
                 </span>
+                {/* The row still counts as unread when muted — the mute is about
+                    notifications, not about hiding the conversation — so say
+                    which it is rather than leaving the silence unexplained. */}
+                {muted && (
+                  <BellOff
+                    size={13}
+                    strokeWidth={1.8}
+                    aria-label="Muted"
+                    className="shrink-0 text-app-muted"
+                  />
+                )}
                 {unread > 0 && (
                   <span className="size-3 shrink-0 rounded-full bg-app-accent" />
                 )}

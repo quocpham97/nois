@@ -89,6 +89,81 @@ function emitOpenChannel(channelId: unknown): void {
   if (id) for (const cb of openChannelSubs) cb(id);
 }
 
+// --- native push (APNs / FCM) --------------------------------------------------
+
+/** Mirrors PushState in src/lib/push.ts, which is what the settings UI reads. */
+type PushState = "unsupported" | "denied" | "enabled" | "disabled";
+
+/** The token this device last registered, so it can be withdrawn on disable. */
+let deviceToken: string | null = null;
+
+async function postToken(token: string): Promise<void> {
+  deviceToken = token;
+  await fetch("/api/mobile/push-token", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    // iOS registers an APNs device token, Android an FCM registration token —
+    // the platform decides which transport the server sends over.
+    body: JSON.stringify({ token, platform: window.Capacitor?.getPlatform?.() }),
+  });
+}
+
+async function dropToken(): Promise<void> {
+  if (!deviceToken) return;
+  await fetch("/api/mobile/push-token", {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: deviceToken }),
+  });
+  deviceToken = null;
+}
+
+/** granted → "enabled"; denied → "denied"; never-asked → "disabled". */
+function stateFrom(receive: string | undefined): PushState {
+  if (receive === "granted") return "enabled";
+  if (receive === "denied") return "denied";
+  return "disabled";
+}
+
+async function pushPermission(): Promise<string | undefined> {
+  const res = (await plugin("PushNotifications")?.checkPermissions?.()) as
+    | { receive?: string }
+    | undefined;
+  return res?.receive;
+}
+
+async function nativePushState(): Promise<PushState> {
+  const Push = plugin("PushNotifications");
+  if (!Push) return "unsupported";
+  return stateFrom(await pushPermission());
+}
+
+/**
+ * Turn native push on or off for this device.
+ *
+ * "Off" can only mean "stop being reachable" — an OS permission can't be handed
+ * back, so the token is withdrawn from the server instead and the switch reads
+ * as off because nothing will be sent.
+ */
+async function setNativePushEnabled(on: boolean): Promise<PushState> {
+  const Push = plugin("PushNotifications");
+  if (!Push) return "unsupported";
+  if (!on) {
+    await dropToken();
+    return "disabled";
+  }
+  let receive = await pushPermission();
+  if (receive !== "granted") {
+    receive = ((await Push.requestPermissions?.()) as { receive?: string } | undefined)
+      ?.receive;
+  }
+  if (receive !== "granted") return stateFrom(receive);
+  // `register()` is what actually asks APNs/FCM for a token; the value arrives
+  // asynchronously on the 'registration' listener installed at setup.
+  await Push.register?.();
+  return "enabled";
+}
+
 // --- setup ---------------------------------------------------------------------
 
 let installed = false;
@@ -124,6 +199,15 @@ export async function setupMobileBridge(): Promise<void> {
         ],
       } as never);
     },
+    setBadge: (count) => {
+      // Badge support is a plugin (@capawesome/capacitor-badge) that the native
+      // projects don't ship yet — driven through the runtime global like every
+      // other plugin here, so it's a no-op until the plugin is installed rather
+      // than a build-time dependency.
+      void plugin("Badge")?.set?.({ count } as never);
+    },
+    pushState: () => nativePushState(),
+    setPushEnabled: (on) => setNativePushEnabled(on),
     onOpenChannel: (cb) => {
       openChannelSubs.add(cb);
       return () => openChannelSubs.delete(cb);
@@ -149,10 +233,36 @@ export async function setupMobileBridge(): Promise<void> {
       emitOpenChannel(evt?.notification?.extra?.channelId)) as never,
   );
 
-  // NOTE: background push (APNs/FCM) is a follow-up increment — see
-  // mobile/README.md. When added, PushNotifications 'pushNotification
-  // ActionPerformed' routes through emitOpenChannel() too, and the device token
-  // registers to a server endpoint alongside the existing web-push subscribers.
+  // --- background push ---------------------------------------------------
+  const Push = plugin("PushNotifications");
+
+  // The token is handed over asynchronously after register(), and is also
+  // re-issued by the OS on its own schedule — so this listener, not the
+  // register() call, is what keeps the server's copy current.
+  await Push?.addListener?.("registration", ((token: { value?: string }) => {
+    if (token?.value) void postToken(token.value);
+  }) as never);
+
+  await Push?.addListener?.("registrationError", ((err: unknown) => {
+    console.warn("[push] native registration failed", err);
+  }) as never);
+
+  // A tapped push opens its conversation, exactly like a tapped local
+  // notification. channelId rides in FCM `data` and beside APNs `aps`; both
+  // surface here as `notification.data`.
+  await Push?.addListener?.("pushNotificationActionPerformed", ((evt: {
+    notification?: { data?: { channelId?: string } };
+  }) => emitOpenChannel(evt?.notification?.data?.channelId)) as never);
+
+  // Deliberately NO handler for 'pushNotificationReceived': a push that lands
+  // while the app is open is a duplicate of what the live socket already
+  // delivered, and the page raises its own banner for that (src/lib/notify.ts).
+
+  // Re-register on every launch when permission is already granted: tokens
+  // rotate, rows get lost, and a device that switched accounts must rebind to
+  // the user signed in now. This never prompts — the prompt is the settings
+  // toggle's job.
+  if ((await pushPermission()) === "granted") await Push?.register?.();
 }
 
 // djb2 → signed 31-bit int (Android LocalNotifications ids must fit in an int).

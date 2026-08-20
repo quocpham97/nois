@@ -29,6 +29,8 @@ import {
   CHAT_GRADIENTS,
 } from "./src/lib/chat-data";
 import { dmIdFor } from "./src/lib/dm-id";
+import { notifAllowed } from "./src/lib/notif-policy";
+import { messageNotifCopy } from "./src/lib/notif-copy";
 import * as store from "./src/server/store";
 import * as keyStore from "./src/server/key-store";
 import * as mlsDs from "./src/server/mls-ds";
@@ -40,8 +42,12 @@ import {
   getPool,
   listPushSubscriptions,
   deletePushSubscription,
+  listMobilePushTokens,
+  deleteMobilePushToken,
   type PushSub,
+  type MobileToken,
 } from "./src/lib/db";
+import { mobilePushReady, sendMobilePush } from "./src/server/mobile-push";
 
 const dev = process.env.NODE_ENV !== "production";
 const port = Number(process.env.PORT) || 4000;
@@ -422,13 +428,18 @@ app.prepare().then(async () => {
   const groupAudience = (groupId: string, rooms = memberRooms(groupId)) =>
     rooms.length ? io.to(rooms) : null;
 
-  // --- Web Push (Phase 6) ----------------------------------------------------
-  const pushReady = !!(
+  // --- Push to devices with no live socket -----------------------------------
+  // Two transports, independently configured: Web Push (VAPID) for browsers and
+  // the desktop shell, and APNs/FCM for the mobile shell (src/server/
+  // mobile-push.ts). A deployment can have either, both, or neither.
+  const webPushReady = !!(
     process.env.VAPID_PUBLIC_KEY &&
     process.env.VAPID_PRIVATE_KEY &&
     process.env.VAPID_SUBJECT
   );
-  if (pushReady) {
+  const nativePushReady = mobilePushReady();
+  const pushReady = webPushReady || nativePushReady;
+  if (webPushReady) {
     webpush.setVapidDetails(
       process.env.VAPID_SUBJECT!,
       process.env.VAPID_PUBLIC_KEY!,
@@ -437,22 +448,37 @@ app.prepare().then(async () => {
   }
 
   // Should this recipient get a push for a message in `groupId` right now?
-  // E2EE means the server can't read content, so prefs are honored only for
-  // what it CAN know: quiet hours, and group type (DM vs group). At level 1
-  // ("DMs & mentions") it can't detect a mention in an encrypted group, so it
-  // pushes DMs only. Level 0 = everything; level 2 = nothing.
-  const wantsPush = (uid: string, isDm: boolean): boolean => {
-    const prefs = (store.getProfile(uid).notif ?? { level: 1, dnd: true }) as {
-      level?: number;
-      dnd?: boolean;
-    };
-    const level = prefs.level ?? 1;
-    if (level === 2) return false;
-    if (prefs.dnd) {
-      const h = new Date().getHours(); // server-local quiet hours 22:00–07:00
-      if (h >= 22 || h < 7) return false;
+  // The rule itself lives in src/lib/notif-policy.ts because the page applies
+  // the SAME preferences to the banners it raises for a backgrounded tab
+  // (src/lib/notify.ts) — while there were two copies the page's side ignored
+  // them entirely. E2EE bounds what can be honored here to what the server can
+  // actually see: quiet hours and DM-vs-group, never content.
+  const wantsPush = (uid: string, isDm: boolean, groupId: string): boolean =>
+    notifAllowed(store.getProfile(uid).notif, { isDm, groupId });
+
+  // One push per recipient per conversation per window. maybePush runs on EVERY
+  // message, so a ten-message burst was ten device wakeups — for a single
+  // notification, since the banners collapse onto a shared tag anyway. The
+  // claim is atomic in Redis (so it holds across nodes) and per-process
+  // otherwise, which is the same trade the presence map makes.
+  const PUSH_COOLDOWN_MS = 30_000;
+  const pushedAt = new Map<string, number>();
+  const claimPush = async (uid: string, groupId: string): Promise<boolean> => {
+    const key = `push:${uid}|${groupId}`;
+    if (redis) {
+      return (await redis.set(key, "1", { NX: true, PX: PUSH_COOLDOWN_MS })) === "OK";
     }
-    if (level === 1 && !isDm) return false;
+    const now = Date.now();
+    const last = pushedAt.get(key);
+    if (last !== undefined && now - last < PUSH_COOLDOWN_MS) return false;
+    pushedAt.set(key, now);
+    // Only ever holds one window's worth of conversations; sweep if a burst of
+    // distinct pairs pushes it past a sane size.
+    if (pushedAt.size > 5000) {
+      for (const [k, t] of pushedAt) {
+        if (now - t >= PUSH_COOLDOWN_MS) pushedAt.delete(k);
+      }
+    }
     return true;
   };
 
@@ -467,7 +493,7 @@ app.prepare().then(async () => {
       const groupName = isDm ? undefined : store.getGroupName(groupId);
       const recipients = store
         .listMemberIds(groupId)
-        .filter((id) => id !== senderId && !online.has(id) && wantsPush(id, isDm));
+        .filter((id) => id !== senderId && !online.has(id) && wantsPush(id, isDm, groupId));
       const payload = JSON.stringify({
         type: "message",
         // Deep-link routing keys the service worker (public/sw.js) reads; kept
@@ -478,7 +504,28 @@ app.prepare().then(async () => {
         senderId,
         senderName,
       });
+      // The OS renders a native push itself, so its text is composed here —
+      // from the same generic copy the page and the service worker use.
+      const copy = messageNotifCopy({ senderName, groupName });
       for (const uid of recipients) {
+        if (!(await claimPush(uid, groupId))) continue;
+        // Mobile devices of this user (APNs/FCM). Separate registry from the
+        // browser endpoints below; a user can easily have both.
+        if (nativePushReady) {
+          void (async () => {
+            let tokens: MobileToken[] = [];
+            try {
+              tokens = await listMobilePushTokens(uid);
+            } catch {
+              return;
+            }
+            if (!tokens.length) return;
+            await sendMobilePush(tokens, copy, groupId, (dead) => {
+              void deleteMobilePushToken(dead);
+            });
+          })();
+        }
+        if (!webPushReady) continue;
         let subs: PushSub[] = [];
         try {
           subs = await listPushSubscriptions(uid);
@@ -489,10 +536,19 @@ app.prepare().then(async () => {
           webpush
             .sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, payload)
             .catch((err: { statusCode?: number }) => {
-              // 404/410 → the subscription is dead; prune it.
+              // 404/410 mean this endpoint is gone for good — prune the row.
               if (err?.statusCode === 404 || err?.statusCode === 410) {
                 void deletePushSubscription(sub.endpoint);
+                return;
               }
+              // Anything else is about US, not the subscription: 401/403 is a
+              // VAPID key mismatch, 413 too large, 429 throttled. Deliberately
+              // NOT pruned — deleting on a server misconfiguration would
+              // silently unsubscribe every device at once, and only each user
+              // can undo that. Logged instead, so it's visible.
+              console.warn(
+                `[push] send failed (${err?.statusCode ?? "?"}) user=${uid} group=${groupId}`,
+              );
             });
         }
       }
@@ -707,6 +763,9 @@ app.prepare().then(async () => {
         threadCount: res.threadCount,
         threadLastTime: res.threadLastTime,
       });
+      // Same as a top-level message: an offline member has no other way to hear
+      // about it. (The page's own banner path already covered thread replies.)
+      maybePush(groupId, userId, me.name);
     });
 
     // Reaction toggle: the sender's reaction is recorded per-user; the

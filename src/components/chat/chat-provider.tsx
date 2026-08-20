@@ -32,6 +32,8 @@ import { useKeyEvents } from "./hooks/use-key-events";
 import { useTyping } from "./hooks/use-typing";
 import { useSessionSync } from "./hooks/use-session-sync";
 import { useChatRouting } from "./hooks/use-chat-routing";
+import { useAppBadge } from "./hooks/use-app-badge";
+import { usePushSync } from "./hooks/use-push-sync";
 import { useRosterCache } from "./hooks/use-roster-cache";
 import { useDrafts } from "./hooks/use-drafts";
 import { useMessageActions } from "./hooks/use-message-actions";
@@ -96,6 +98,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   useChatRouting();
   useRosterCache({ userId });
   useDrafts({ userId });
+  useAppBadge();
+  usePushSync();
 
   const groupActions = useGroupActions({ socket });
   const workspace = useWorkspaceActions({ socket });

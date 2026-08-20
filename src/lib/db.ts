@@ -277,6 +277,21 @@ export function ensureSchema(): Promise<void> {
       await pool.query(
         `CREATE INDEX IF NOT EXISTS idx_push_user ON push_subscription(user_id)`,
       );
+      // Native mobile push tokens (APNs on iOS, FCM on Android). The token is
+      // the primary key — the same property the web endpoint has, so a device
+      // re-registering rebinds itself to whoever is signed in NOW rather than
+      // leaving a second row delivering to the previous account.
+      await pool.query(
+        `CREATE TABLE IF NOT EXISTS mobile_push_token (
+           token      text PRIMARY KEY,
+           user_id    text NOT NULL,
+           platform   text NOT NULL,
+           created_at timestamptz NOT NULL DEFAULT now()
+         )`,
+      );
+      await pool.query(
+        `CREATE INDEX IF NOT EXISTS idx_mobile_push_user ON mobile_push_token(user_id)`,
+      );
       // Public device key directory (see server/key-store.ts). Only PUBLIC key
       // material — the server can't decrypt anything. Persisted so a server
       // restart doesn't blank the directory until every client reconnects.
@@ -454,6 +469,40 @@ export async function savePushSubscription(
 /** Remove a subscription (on unsubscribe, or when a push returns 404/410). */
 export async function deletePushSubscription(endpoint: string): Promise<void> {
   await getPool().query("DELETE FROM push_subscription WHERE endpoint=$1", [endpoint]);
+}
+
+export type MobilePlatform = "ios" | "android";
+export type MobileToken = { token: string; platform: MobilePlatform };
+
+/** Upsert a device's native push token (idempotent, and rebinds the device). */
+export async function saveMobilePushToken(
+  userId: string,
+  token: string,
+  platform: MobilePlatform,
+): Promise<void> {
+  await getPool().query(
+    `INSERT INTO mobile_push_token (token, user_id, platform)
+     VALUES ($1,$2,$3)
+     ON CONFLICT (token) DO UPDATE SET user_id=EXCLUDED.user_id, platform=EXCLUDED.platform`,
+    [token, userId, platform],
+  );
+}
+
+/** Remove a token (user turned push off, or the service reported it dead). */
+export async function deleteMobilePushToken(token: string): Promise<void> {
+  await getPool().query("DELETE FROM mobile_push_token WHERE token=$1", [token]);
+}
+
+/** Every native token for a user (phone + tablet + a reinstall or two). */
+export async function listMobilePushTokens(userId: string): Promise<MobileToken[]> {
+  const { rows } = await getPool().query(
+    "SELECT token, platform FROM mobile_push_token WHERE user_id=$1",
+    [userId],
+  );
+  return rows.map((r) => ({
+    token: r.token as string,
+    platform: r.platform as MobilePlatform,
+  }));
 }
 
 /** All push endpoints for a user (a user may have several devices/browsers). */

@@ -41,6 +41,27 @@ services:
         sync: false
       - key: VAPID_SUBJECT
         sync: false
+      # Native mobile push (mobile/README.md). Each platform is independent —
+      # configure only the one(s) you ship. Android goes through FCM (a service
+      # account with the Firebase Cloud Messaging scope); iOS goes straight to
+      # APNs with a p8 key. Both private keys may carry \n-escaped newlines.
+      - key: FCM_PROJECT_ID
+        sync: false
+      - key: FCM_CLIENT_EMAIL
+        sync: false
+      - key: FCM_PRIVATE_KEY
+        sync: false
+      - key: APNS_KEY_ID
+        sync: false
+      - key: APNS_TEAM_ID
+        sync: false
+      - key: APNS_PRIVATE_KEY
+        sync: false
+      - key: APNS_BUNDLE_ID
+        sync: false
+      # api.sandbox.push.apple.com for a debug/TestFlight build; unset = prod.
+      - key: APNS_HOST
+        sync: false
       # TURN relay for calls (docs/calls-production.md). Without TURN, calls
       # fall back to STUN only and fail on symmetric NATs — a production
       # blocker, more so for group calls, where a mesh multiplies the NAT

@@ -5,6 +5,7 @@ import { useTheme } from "next-themes";
 import { ChevronDown } from "lucide-react";
 import { useMounted } from "@/lib/use-mounted";
 import { CHAT_GRADIENTS, type NotifPrefs } from "@/lib/chat-data";
+import { withNotifDefaults } from "@/lib/notif-policy";
 import {
   currentPushState,
   disablePush,
@@ -497,9 +498,9 @@ function PrivacyPanel() {
   );
 }
 
-const NOTIF_DEFAULTS: NotifPrefs = { level: 1, sound: false, dnd: true };
-
-// "Enable on this device" — the real Web Push permission + subscribe flow.
+// "Enable on this device" — the real Web Push permission + subscribe flow. The
+// same grant is what lets the page raise its own banner while a tab is merely
+// backgrounded (src/lib/notify.ts), so this one switch covers both.
 // Tri-state so a blocked permission is explained rather than silently failing.
 function PushToggle() {
   const [state, setState] = useState<PushState | "loading" | "working">("loading");
@@ -509,12 +510,12 @@ function PushToggle() {
 
   const label =
     state === "unsupported"
-      ? "Push notifications aren’t supported in this browser."
+      ? "Notifications aren’t supported in this browser."
       : state === "denied"
         ? "Blocked in your browser settings — re-allow notifications for this site."
         : state === "enabled"
-          ? "Push notifications are on for this device."
-          : "Get notified on this device when the app is closed.";
+          ? "Notifications are on for this device."
+          : "Get notified on this device when a message arrives and the app is closed or in the background.";
 
   const busy = state === "loading" || state === "working";
   const toggle = async () => {
@@ -525,7 +526,7 @@ function PushToggle() {
   return (
     <div className="mb-4 flex items-center gap-3 rounded-xl border border-app-border bg-panel px-4 py-3">
       <div className="flex-1">
-        <div className="text-[14px] font-medium">Push on this device</div>
+        <div className="text-[14px] font-medium">Notifications on this device</div>
         <div className="text-[12.5px] text-app-muted">{label}</div>
       </div>
       <button
@@ -550,7 +551,7 @@ function PushToggle() {
 function NotificationsPanel() {
   const profile = useChatStore((s) => s.profile);
   const { updateProfile } = useChatActions();
-  const prefs: NotifPrefs = { ...NOTIF_DEFAULTS, ...(profile.notif ?? {}) };
+  const prefs = withNotifDefaults(profile.notif);
   const set = (patch: Partial<NotifPrefs>) =>
     updateProfile({ notif: { ...prefs, ...patch } });
 
@@ -589,18 +590,22 @@ function NotificationsPanel() {
       ))}
       {prefs.level === 1 && (
         <p className="mt-1 px-3 text-[12px] text-app-muted">
-          Mentions in end-to-end encrypted groups can’t be detected by the
-          server, so at this level only direct messages notify you.
+          A mention in an end-to-end encrypted group is found by your own
+          device, as it opens the message — so mentions reach you while the app
+          is running. A notification sent while you’re fully offline can only
+          carry direct messages: the server can’t read the group message to
+          find your name in it.
         </p>
       )}
       <ToggleRow
         label="Sound on every message"
+        sub="A short ping for messages from other people, here and in the background"
         checked={prefs.sound}
         onCheckedChange={(v) => set({ sound: v })}
       />
       <ToggleRow
         label="Do not disturb · 10:00 PM – 7:00 AM"
-        sub="Pause push notifications overnight"
+        sub="Pauses notifications overnight, in your own timezone"
         checked={prefs.dnd}
         onCheckedChange={(v) => set({ dnd: v })}
       />

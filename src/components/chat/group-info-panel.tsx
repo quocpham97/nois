@@ -28,12 +28,46 @@ import { useDecryptedImage } from "./message";
 import { useShallow } from "zustand/react/shallow";
 import { useChatStore } from "@/stores/chat-store";
 import { useLikeEmoji, useMyUser } from "@/stores/chat-selectors";
+import { isMuted, withNotifDefaults } from "@/lib/notif-policy";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useChatActions } from "./chat-actions";
 
 /** Stable id for a member/user — the server-provided uid (email for real
  * users, seeded key otherwise). Falls back to the first name only for legacy
  * Users that predate the id field. */
 const memberId = (u: User) => u.id ?? u.name.split(" ")[0].toLowerCase();
+
+/**
+ * The next `muted` map: this conversation set (or cleared), with any mute that
+ * has already expired dropped — writing one is the natural moment to tidy the
+ * rest out of the saved profile.
+ */
+function nextMuted(
+  current: Record<string, number | true> | undefined,
+  groupId: string,
+  until: number | true | null,
+): Record<string, number | true> {
+  const now = Date.now();
+  const next: Record<string, number | true> = {};
+  for (const [id, v] of Object.entries(current ?? {})) {
+    if (id !== groupId && (v === true || v > now)) next[id] = v;
+  }
+  if (until !== null) next[groupId] = until;
+  return next;
+}
+
+/** How long "Mute" mutes for. `ms: null` = until the user lifts it. */
+const MUTE_CHOICES: { label: string; ms: number | null }[] = [
+  { label: "For 15 minutes", ms: 15 * 60_000 },
+  { label: "For 1 hour", ms: 60 * 60_000 },
+  { label: "For 8 hours", ms: 8 * 60 * 60_000 },
+  { label: "Until I turn it back on", ms: null },
+];
 
 function Section({
   label,
@@ -97,6 +131,7 @@ export function GroupInfoPanel() {
   );
   const me = useMyUser();
   const likeEmoji = useLikeEmoji();
+  const notif = useChatStore((s) => s.profile.notif);
   const {
     closeGroupInfo,
     updateGroup,
@@ -106,6 +141,7 @@ export function GroupInfoPanel() {
     setGroupTheme,
     setLikeEmoji,
     openSearch,
+    updateProfile,
   } = useChatActions();
 
   const [editing, setEditing] = useState(false);
@@ -113,7 +149,6 @@ export function GroupInfoPanel() {
   const [editTopic, setEditTopic] = useState("");
   const [adding, setAdding] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [muted, setMuted] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -143,6 +178,25 @@ export function GroupInfoPanel() {
     updateGroup(ch.id, { name: editName, topic: editTopic }, setError);
     setEditing(false);
   };
+
+  // Mute lives in the viewer's profile, not in component state: the server reads
+  // it to decide whether to push (notif-policy.ts), and it has to outlive this
+  // panel being closed.
+  const mutedUntil = notif?.muted?.[ch.id];
+  const muted = isMuted(notif, ch.id);
+  const setMute = (until: number | true | null) =>
+    updateProfile({
+      notif: { ...withNotifDefaults(notif), muted: nextMuted(notif?.muted, ch.id, until) },
+    });
+  const mutedLabel =
+    mutedUntil === true
+      ? "Muted until you turn it back on"
+      : typeof mutedUntil === "number"
+        ? `Muted until ${new Date(mutedUntil).toLocaleTimeString([], {
+            hour: "numeric",
+            minute: "2-digit",
+          })}`
+        : null;
 
   const circleAction = (
     icon: React.ReactNode,
@@ -202,14 +256,31 @@ export function GroupInfoPanel() {
                 "Edit",
                 startEdit,
               )}
-          {circleAction(
-            muted ? (
-              <BellOff size={18} strokeWidth={1.8} />
-            ) : (
-              <Bell size={18} strokeWidth={1.8} />
-            ),
-            muted ? "Unmute" : "Mute",
-            () => setMuted((m) => !m),
+          {muted ? (
+            circleAction(
+              <BellOff size={18} strokeWidth={1.8} />,
+              "Unmute",
+              () => setMute(null),
+            )
+          ) : (
+            <div className="flex flex-col items-center gap-1.5 text-app-text">
+              <DropdownMenu>
+                <DropdownMenuTrigger className="flex size-10 items-center justify-center rounded-full bg-panel outline-none hover:bg-panel-hover">
+                  <Bell size={18} strokeWidth={1.8} />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="center" sideOffset={6} className="w-56">
+                  {MUTE_CHOICES.map(({ label, ms }) => (
+                    <DropdownMenuItem
+                      key={label}
+                      onClick={() => setMute(ms === null ? true : Date.now() + ms)}
+                    >
+                      {label}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <span className="text-[11.5px] font-medium text-app-muted">Mute</span>
+            </div>
           )}
           {circleAction(
             <Search size={18} strokeWidth={1.8} />,
@@ -217,6 +288,11 @@ export function GroupInfoPanel() {
             openSearch,
           )}
         </div>
+        {mutedLabel && (
+          <div className="-mt-3 mb-4 text-center text-[12px] text-app-muted">
+            {mutedLabel}
+          </div>
+        )}
 
         {/* Customize chat */}
         <Section label="Customize chat">

@@ -13,10 +13,11 @@
  */
 import { useEffect } from "react";
 import * as msgdb from "@/lib/message-db";
-import { getShellBridge } from "@/lib/shell";
+import { isMentioned } from "@/lib/mentions";
+import { notifyIncoming } from "@/lib/notify";
 import type { Message } from "@/lib/chat-data";
 import { chat } from "@/stores/chat-store";
-import { withSelf } from "@/stores/chat-selectors";
+import { myUser, withSelf } from "@/stores/chat-selectors";
 import type { TypedSocket } from "@/stores/session-store";
 import type { History } from "./use-history";
 import type { Outbox } from "./use-outbox";
@@ -135,26 +136,21 @@ export function useMessageEvents({
         socket.emit("group:read", { groupId });
         scheduleReceipt(groupId);
       }
-      // Native shell (Electron desktop or Capacitor mobile): OS notification for
-      // messages arriving outside the focused group (Web Push doesn't apply in a
-      // native shell — src/lib/push.ts reports unsupported there; mobile uses
-      // local/native notifications). Copy mirrors public/sw.js and stays generic:
-      // the payload may still be an undecrypted E2EE envelope here.
-      const shell = getShellBridge();
-      if (
-        shell &&
-        message.author.id !== userId &&
-        (groupId !== state.currentGroupId || document.hidden || !document.hasFocus())
-      ) {
-        const ch = state.groups[groupId];
-        const dm = ch?.type === "dm";
-        shell.notify({
-          title: dm
-            ? `New message from ${message.author.name}`
-            : `New message in #${ch?.name ?? "a group"}`,
-          body: dm ? "Tap to read" : `${message.author.name} sent a message`,
-          // Native bridge (desktop/src/preload.ts) reads n.channelId; keep the key.
-          channelId: groupId,
+      // Someone else's message: notify unless the user is already looking at it.
+      // src/lib/notify.ts owns the whole decision (preferences, which tab shows
+      // it) and the delivery (native shell bridge, or the browser's own
+      // Notification — Web Push covers only a device with no socket at all, so
+      // it never fires for a backgrounded tab).
+      if (message.author.id !== userId) {
+        notifyIncoming({
+          msgId: message.id,
+          groupId,
+          authorName: message.author.name,
+          // A sealed envelope can't say whether it mentions us, so leave the
+          // question open — use-decrypt re-asks it once the body is readable.
+          mentioned: message.enc
+            ? undefined
+            : isMentioned(message, myUser().name),
         });
       }
     };
@@ -191,6 +187,17 @@ export function useMessageEvents({
         });
         return { ...s, [groupId]: { ...ch, messages: msgs } };
       });
+      // A reply is an incoming message too. The gate is the conversation, not
+      // the thread: someone focused on this group is close enough to it that a
+      // banner would be noise, even with the thread panel closed.
+      if (reply.author.id !== userId) {
+        notifyIncoming({
+          msgId: reply.id,
+          groupId,
+          authorName: reply.author.name,
+          mentioned: reply.enc ? undefined : isMentioned(reply, myUser().name),
+        });
+      }
     };
 
     // Server broadcasts aggregated reactions (with reactor ids); derive our own

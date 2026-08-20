@@ -33,6 +33,16 @@ services:
       VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY}
       VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY}
       VAPID_SUBJECT: ${VAPID_SUBJECT}
+      # Native mobile push (APNs/FCM) — see mobile/README.md. Each platform is
+      # independent; leave a set empty and that platform simply isn't sent to.
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID}
+      FCM_CLIENT_EMAIL: ${FCM_CLIENT_EMAIL}
+      FCM_PRIVATE_KEY: ${FCM_PRIVATE_KEY}
+      APNS_KEY_ID: ${APNS_KEY_ID}
+      APNS_TEAM_ID: ${APNS_TEAM_ID}
+      APNS_PRIVATE_KEY: ${APNS_PRIVATE_KEY}
+      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID}
+      APNS_HOST: ${APNS_HOST}
       # Inlined into the client bundle at BUILD time — see calls-production.md.
       NEXT_PUBLIC_TURN_URL: ${NEXT_PUBLIC_TURN_URL}
       NEXT_PUBLIC_TURN_USERNAME: ${NEXT_PUBLIC_TURN_USERNAME}

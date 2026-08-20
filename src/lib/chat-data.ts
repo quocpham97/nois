@@ -293,14 +293,33 @@ export type UserProfile = {
   notif?: NotifPrefs;
 };
 
-/** Push preferences. `level`: 0=all, 1=direct messages & mentions, 2=none.
- *  E2EE caveat: the server can't detect mentions in encrypted group groups,
- *  so at level 1 it pushes DMs only (documented in the settings copy). */
+/** Notification preferences. `level`: 0=all, 1=direct messages & mentions,
+ *  2=none. E2EE shapes level 1: a mention is invisible to the server and to a
+ *  still-sealed message, so it is found on the recipient's own device as it
+ *  decrypts (src/lib/mentions.ts) — which means mentions notify while the app
+ *  runs, and an offline push can only ever carry a direct message. The rule
+ *  itself lives in src/lib/notif-policy.ts, shared by the server's push hook
+ *  and the page. */
 export type NotifPrefs = {
   level: 0 | 1 | 2;
   sound: boolean;
-  /** Quiet hours 10pm–7am (server-enforced for push). */
+  /** Quiet hours (22:00–07:00), evaluated in the user's own timezone. */
   dnd: boolean;
+  /**
+   * Minutes EAST of UTC (`-getTimezoneOffset()`), refreshed by the client while
+   * connected. The server needs it because "10pm" means the *user's* 10pm, not
+   * the datacenter's — and a push goes out precisely when they have no socket
+   * to ask. Absent on profiles saved before this existed.
+   */
+  tzOffset?: number;
+  /**
+   * Per-conversation mute: group id → when it lifts (epoch ms), or `true` for
+   * "until I turn it back on". A muted conversation raises nothing — no push,
+   * no banner, no ping, not even for a mention — and is left out of the app
+   * badge. Server-visible for the same reason the rest of this is: the push
+   * hook has to honor it.
+   */
+  muted?: Record<string, number | true>;
 };
 
 // Messenger-style chat colors: the sent-bubble gradient (also used for the

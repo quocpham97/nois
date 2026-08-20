@@ -34,8 +34,10 @@ import {
   type SenderKeyWire,
 } from "@/lib/crypto/group";
 import type { Message } from "@/lib/chat-data";
+import { isMentioned, mentionedNames } from "@/lib/mentions";
+import { notifyDecrypted } from "@/lib/notify";
 import { chat, useChatStore } from "@/stores/chat-store";
-import { dmPeerId, isDm } from "@/stores/chat-selectors";
+import { dmPeerId, isDm, myUser } from "@/stores/chat-selectors";
 import type { TypedSocket } from "@/stores/session-store";
 import { loadMls } from "../lib/mls-directory";
 import { KEY_WAIT_MS, REHEAL_WAIT_MS } from "../lib/types";
@@ -342,6 +344,10 @@ export function useDecrypt({
     let cancelled = false;
     void (async () => {
       const secrets = await getSecrets();
+      // Mention candidates: the roster's names, which is what a composer inserts
+      // when it @s someone (the same list the server matches against).
+      const memberNames = chat().workspaceMembers.map((m) => m.name);
+      const selfName = myUser().name;
       for (const { groupId, id, enc, parentId } of pending) {
         if (cancelled) return;
         // Mirrors decryptInbound rather than restating its shape, so the
@@ -372,6 +378,16 @@ export function useDecrypt({
                 attachment: { ...existing.attachment, key: att.key, iv: att.iv },
               }
             : msgPatch;
+        // Mentions can only be derived HERE. The server runs the same rule, but
+        // over the empty string an E2EE send leaves it, so its list is always
+        // empty — this is the pass that fills it, for the mentions panel and for
+        // the level-1 notification rule below.
+        const mentions = patch.locked
+          ? []
+          : mentionedNames(patch.text, memberNames);
+        const resolved: Partial<Message> = mentions.length
+          ? { ...patch, mentions }
+          : patch;
         // Persist the decrypted plaintext (+ attachment key) so revisiting this
         // group reloads cleartext from IndexedDB instead of re-decrypting the
         // ciphertext — a group message's sender-key ratchet only moves forward
@@ -380,7 +396,7 @@ export function useDecrypt({
         // decrypt". Only successful decrypts are stored; a transient lock
         // (secrets not loaded yet) keeps `enc` so it retries.
         if (!patch.locked) {
-          void msgdb.patchMessage(id, patch);
+          void msgdb.patchMessage(id, resolved);
           scheduleBackup(); // decrypted plaintext cached → refresh the backup so
           // this message survives device loss even if its one-time prekey is spent
         } else if (permanent) {
@@ -401,18 +417,30 @@ export function useDecrypt({
             if (!parentId) {
               if (m.id !== id || !m.enc) return m;
               found = true;
-              return { ...m, ...patch };
+              return { ...m, ...resolved };
             }
             if (m.id !== parentId) return m;
             const threadReplies = (m.threadReplies || []).map((r) => {
               if (r.id !== id || !r.enc) return r;
               found = true;
-              return { ...r, ...patch };
+              return { ...r, ...resolved };
             });
             return found ? { ...m, threadReplies } : m;
           });
           return found ? { ...s, [groupId]: { ...ch, messages } } : s;
         });
+        // A live message that arrived sealed had its notification parked: only
+        // now can "was I mentioned?" be answered. notifyDecrypted no-ops for
+        // anything the arrival path didn't park — which is what keeps the
+        // history this same loop decrypts on load from raising a banner apiece.
+        if (!patch.locked && existing && existing.author.id !== userId) {
+          notifyDecrypted({
+            msgId: id,
+            groupId,
+            authorName: existing.author.name,
+            mentioned: isMentioned({ text: patch.text, mentions }, selfName),
+          });
+        }
       }
     })();
     return () => {
@@ -425,6 +453,7 @@ export function useDecrypt({
     getSecrets,
     decryptInbound,
     scheduleBackup,
+    userId,
   ]);
 
   // Memoised so the object identity is stable: it lands in other hooks'
