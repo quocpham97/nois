@@ -350,6 +350,17 @@ export function presenceLabel(p?: Presence): string {
 }
 
 /**
+ * A group's name when nobody typed one: its members, combined. Groups are
+ * created straight from a picker now (no name field), so the roster IS the
+ * name — kept short for the sidebar, which truncates anyway.
+ */
+export function groupNameFrom(members: User[]): string {
+  const names = members.map((u) => u.name.trim()).filter(Boolean);
+  if (names.length <= 3) return names.join(", ");
+  return `${names.slice(0, 3).join(", ")} & ${names.length - 3} more`;
+}
+
+/**
  * The members we can actually see in a group: everyone who has posted in the
  * loaded history, plus the viewer (and the partner for a DM). Public groups
  * aren't membership-tracked server-side, so this is the truthful participant

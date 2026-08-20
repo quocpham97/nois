@@ -40,7 +40,7 @@ function ActionCard({
 
 /** Main pane when no conversation is selected (no group matches the URL). */
 export function EmptyChatView() {
-  const { openCompose } = useChatActions();
+  const { openNewChat } = useChatActions();
 
   return (
     <div className="flex flex-1 flex-col items-center justify-center p-10 text-center">
@@ -62,13 +62,13 @@ export function EmptyChatView() {
           title="New message"
           sub="Start a 1-on-1 chat"
           grad
-          onClick={openCompose}
+          onClick={openNewChat}
         />
         <ActionCard
           icon={<Users size={22} strokeWidth={1.9} />}
           title="New group"
           sub="Chat with several people"
-          onClick={openCompose}
+          onClick={openNewChat}
         />
       </div>
     </div>

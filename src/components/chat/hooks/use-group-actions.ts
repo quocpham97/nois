@@ -34,7 +34,7 @@ export function useGroupActions({ socket }: { socket: TypedSocket | null }) {
         { name: trimmed, topic: topic.trim() || undefined, memberIds },
         (res) => {
           if (res.ok) {
-            chat().setCreateGroupOpen(false);
+            chat().setNewChatOpen(false);
             chat().selectGroup(res.groupId);
           } else {
             onError?.(res.error);

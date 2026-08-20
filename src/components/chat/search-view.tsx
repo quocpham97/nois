@@ -170,8 +170,7 @@ export function SearchView() {
     closeSearch,
     selectGroup,
     jumpToMessage,
-    openCompose,
-    addRecipient,
+    openDmWith,
   } = useChatActions();
   const q = searchQ.trim();
 
@@ -289,16 +288,8 @@ export function SearchView() {
 
   const openPerson = (person: User) => {
     pushRecent(person.name);
-    const dmId = dmOrder.find((chId) => {
-      const u = groups[chId]?.user;
-      return u && (u.id ? u.id === person.id : u.name === person.name);
-    });
     closeSearch();
-    if (dmId) selectGroup(dmId);
-    else {
-      openCompose();
-      addRecipient(person.name);
-    }
+    openDmWith(person);
   };
   const openHit = (groupId: string, msgId: string, parentId: string | null) => {
     pushRecent(q);

@@ -47,15 +47,14 @@ function PresenceAvatar({
 }
 
 export function PeopleScreen() {
-  const { workspaceMembers, groups, dmOrder } = useChatStore(
+  const { workspaceMembers, groups } = useChatStore(
     useShallow((s) => ({
       workspaceMembers: s.workspaceMembers,
       groups: s.groups,
-      dmOrder: s.dmOrder,
     })),
   );
   const myUser = useMyUser();
-  const { selectGroup, openCompose, addRecipient } = useChatActions();
+  const { openDmWith } = useChatActions();
   const [q, setQ] = useState("");
 
   const presenceOf = useMemo(() => {
@@ -67,21 +66,6 @@ export function PeopleScreen() {
     });
     return (u: User) => (u.id ? map[u.id] : undefined);
   }, [groups]);
-
-  const dmFor = (name: string, id?: string) =>
-    dmOrder.find((chId) => {
-      const u = groups[chId]?.user;
-      return u && (u.id ? u.id === id : u.name === name);
-    });
-
-  const openPerson = (p: User) => {
-    const dmId = dmFor(p.name, p.id);
-    if (dmId) selectGroup(dmId);
-    else {
-      openCompose();
-      addRecipient(p.name);
-    }
-  };
 
   const people = useMemo(() => {
     const meId = myUser.id ?? myUser.name;
@@ -133,7 +117,7 @@ export function PeopleScreen() {
                   {activeNow.map((p) => (
                     <button
                       key={p.id ?? p.name}
-                      onClick={() => openPerson(p)}
+                      onClick={() => openDmWith(p)}
                       className="flex w-[60px] shrink-0 flex-col items-center gap-1.5"
                     >
                       <PresenceAvatar user={p} presence="active" size={56} />
@@ -154,7 +138,7 @@ export function PeopleScreen() {
                   className="flex items-center gap-3 rounded-2xl px-2.5 py-2"
                 >
                   <button
-                    onClick={() => openPerson(p)}
+                    onClick={() => openDmWith(p)}
                     className="flex min-w-0 flex-1 items-center gap-3 text-left"
                   >
                     <PresenceAvatar user={p} presence={presence} size={50} />
@@ -172,7 +156,7 @@ export function PeopleScreen() {
                     </span>
                   </button>
                   <button
-                    onClick={() => openPerson(p)}
+                    onClick={() => openDmWith(p)}
                     aria-label={`Message ${p.name}`}
                     className="flex size-10 shrink-0 items-center justify-center rounded-full bg-app-accent-soft text-app-accent"
                   >

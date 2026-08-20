@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { ComposeView } from "../chat/compose-view";
+import { NewChatView } from "../chat/new-chat-view";
 import { SettingsView } from "../chat/settings-view";
 import { MentionsView, DraftsView } from "../chat/nav-views";
 import { ForwardModal } from "../chat/forward-modal";
@@ -34,6 +35,7 @@ export function MobileApp() {
     groups,
     currentGroupId,
     composeOpen,
+    newChatOpen,
     settingsOpen,
     activePanel,
     statusOpen,
@@ -43,6 +45,7 @@ export function MobileApp() {
       groups: s.groups,
       currentGroupId: s.currentGroupId,
       composeOpen: s.composeOpen,
+      newChatOpen: s.newChatOpen,
       settingsOpen: s.settingsOpen,
       activePanel: s.activePanel,
       statusOpen: s.statusOpen,
@@ -72,7 +75,10 @@ export function MobileApp() {
   // Full-screen takeovers (their own headers/close controls).
   let body: React.ReactNode;
   let showTabbar = true;
-  if (composeOpen) {
+  if (newChatOpen) {
+    body = <NewChatView />;
+    showTabbar = false;
+  } else if (composeOpen) {
     body = <ComposeView />;
     showTabbar = false;
   } else if (settingsOpen) {

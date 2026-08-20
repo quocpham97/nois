@@ -9,7 +9,6 @@ import {
   FileText,
   MessageCircle,
   MoreHorizontal,
-  Plus,
   Search,
   Smile,
   SquarePen,
@@ -179,7 +178,7 @@ function PeopleSidebarBody() {
     })),
   );
   const myUser = useMyUser();
-  const { selectGroup, openCompose, addRecipient } = useChatActions();
+  const { openDmWith } = useChatActions();
   const [q, setQ] = useState("");
 
   // Presence is tracked per DM group, keyed by the partner's id; fold those
@@ -194,20 +193,13 @@ function PeopleSidebarBody() {
     return (u: User) => (u.id ? map[u.id] : undefined);
   }, [groups]);
 
+  // Label only — whether a thread already exists ("Chat" vs "Start a chat");
+  // opening one is `openDmWith`'s job.
   const dmFor = (name: string, id?: string) =>
     dmOrder.find((chId) => {
       const u = groups[chId]?.user;
       return u && (u.id ? u.id === id : u.name === name);
     });
-
-  const openPerson = (p: User) => {
-    const dmId = dmFor(p.name, p.id);
-    if (dmId) selectGroup(dmId);
-    else {
-      openCompose();
-      addRecipient(p.name);
-    }
-  };
 
   // Everyone but the viewer (matched by stable id), alphabetical, filtered.
   const people = useMemo(() => {
@@ -254,7 +246,7 @@ function PeopleSidebarBody() {
                   {activeNow.map((p) => (
                     <button
                       key={p.id ?? p.name}
-                      onClick={() => openPerson(p)}
+                      onClick={() => openDmWith(p)}
                       title={p.name}
                       className="flex w-[60px] shrink-0 flex-col items-center gap-1.5"
                     >
@@ -279,7 +271,7 @@ function PeopleSidebarBody() {
                   className="flex items-center gap-3 rounded-xl px-2.5 py-2 hover:bg-app-hover"
                 >
                   <button
-                    onClick={() => openPerson(p)}
+                    onClick={() => openDmWith(p)}
                     className="flex min-w-0 flex-1 items-center gap-3 text-left"
                   >
                     <PresenceAvatar user={p} presence={presence} size={46} />
@@ -303,7 +295,7 @@ function PeopleSidebarBody() {
                     </span>
                   </button>
                   <button
-                    onClick={() => openPerson(p)}
+                    onClick={() => openDmWith(p)}
                     title="Message"
                     className="flex size-[38px] shrink-0 items-center justify-center rounded-full bg-panel text-app-accent hover:bg-app-accent-soft"
                   >
@@ -396,7 +388,7 @@ export function Sidebar() {
     groupOrder,
     rosterLoaded,
     activePanel,
-    createGroupOpen,
+    newChatOpen,
     drafts,
     workspaceName,
     unreadByGroup,
@@ -412,7 +404,7 @@ export function Sidebar() {
       groupOrder: s.groupOrder,
       rosterLoaded: s.rosterLoaded,
       activePanel: s.activePanel,
-      createGroupOpen: s.createGroupOpen,
+      newChatOpen: s.newChatOpen,
       drafts: s.drafts,
       workspaceName: s.workspaceName,
       unreadByGroup: s.unreadByGroup,
@@ -428,9 +420,8 @@ export function Sidebar() {
   );
   const {
     selectGroup,
-    openCompose,
     openSearch,
-    openCreateGroup,
+    openNewChat,
     openPanel,
     openWorkspace,
     openStatus,
@@ -465,7 +456,7 @@ export function Sidebar() {
     !settingsOpen &&
     !composeOpen &&
     !activePanel &&
-    !createGroupOpen;
+    !newChatOpen;
 
   // One Messenger-style list: groups + DMs together, newest activity first,
   // archived chats hidden (they live under the rail's Archived view).
@@ -514,10 +505,6 @@ export function Sidebar() {
                 </DropdownMenuItem>
               ))}
               <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={openCreateGroup}>
-                <Plus />
-                Create a group
-              </DropdownMenuItem>
               <DropdownMenuItem onClick={openWorkspace}>
                 <Building2 />
                 {workspaceName} settings
@@ -525,7 +512,7 @@ export function Sidebar() {
             </DropdownMenuContent>
           </DropdownMenu>
           <button
-            onClick={openCompose}
+            onClick={openNewChat}
             title="New message"
             className="flex size-9 items-center justify-center rounded-full bg-panel text-app-text hover:bg-panel-hover"
           >

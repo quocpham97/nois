@@ -14,7 +14,7 @@ import { SearchView } from "./search-view";
 import { ComposeView } from "./compose-view";
 import { SettingsView } from "./settings-view";
 import { EmptyChatView } from "./empty-chat-view";
-import { CreateGroupView } from "./create-group-view";
+import { NewChatView } from "./new-chat-view";
 import { WorkspaceView } from "./workspace-view";
 import { ForwardModal } from "./forward-modal";
 import { StatusModal } from "./status-modal";
@@ -30,12 +30,12 @@ import { useMobileLayout } from "../mobile/use-mobile-layout";
 import { MobileApp } from "../mobile/mobile-app";
 
 function MainView() {
-  const { composeOpen, settingsOpen, createGroupOpen, activePanel, groupId } =
+  const { composeOpen, settingsOpen, newChatOpen, activePanel, groupId } =
     useChatStore(
       useShallow((s) => ({
         composeOpen: s.composeOpen,
         settingsOpen: s.settingsOpen,
-        createGroupOpen: s.createGroupOpen,
+        newChatOpen: s.newChatOpen,
         activePanel: s.activePanel,
         // The id only — GroupView subscribes to the conversation itself, so a
         // new message doesn't re-render this switch.
@@ -45,7 +45,7 @@ function MainView() {
 
   if (composeOpen) return <ComposeView />;
   if (settingsOpen) return <SettingsView />;
-  if (createGroupOpen) return <CreateGroupView />;
+  if (newChatOpen) return <NewChatView />;
   if (activePanel === "mentions") return <MentionsView />;
   if (activePanel === "drafts") return <DraftsView />;
   // "people" / "archived" take over the sidebar column (see Sidebar), leaving
@@ -60,7 +60,7 @@ function Shell() {
     searchOpen,
     composeOpen,
     settingsOpen,
-    createGroupOpen,
+    newChatOpen,
     workspaceOpen,
     statusOpen,
     activePanel,
@@ -70,7 +70,7 @@ function Shell() {
       searchOpen: s.searchOpen,
       composeOpen: s.composeOpen,
       settingsOpen: s.settingsOpen,
-      createGroupOpen: s.createGroupOpen,
+      newChatOpen: s.newChatOpen,
       workspaceOpen: s.workspaceOpen,
       statusOpen: s.statusOpen,
       activePanel: s.activePanel,
@@ -81,7 +81,7 @@ function Shell() {
   const groupActive =
     !composeOpen &&
     !settingsOpen &&
-    !createGroupOpen &&
+    !newChatOpen &&
     !workspaceOpen &&
     !activePanel;
   return (

@@ -796,7 +796,10 @@ export function toggleReaction(
 }
 
 /**
- * Create a new group. The id is an opaque hash; the slug is the display name.
+ * Create a new group. The id is an opaque hash, so the name is a display name
+ * and nothing else — kept verbatim (it used to be slugified, which turned the
+ * member-derived names groups are created with into "sarah-chen-marcus-webb").
+ * Non-empty is the whole bar, the same one `updateGroup` holds a rename to.
  *
  * The roster is the group's visibility (see `canAccess`), so it is seeded here:
  * the creator plus whoever they picked. `private` is set on every group as a
@@ -807,12 +810,8 @@ export function createGroup(
   name: string,
   opts: { topic?: string; creatorId?: string; memberIds?: string[] } = {},
 ): Group | null {
-  const slug = name
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  if (!slug) return null;
+  const display = name.trim();
+  if (!display) return null;
 
   let id = newGroupId();
   while (groupExists(id)) id = newGroupId();
@@ -820,7 +819,7 @@ export function createGroup(
   const meta: GroupMeta = {
     id,
     type: "group",
-    name: slug,
+    name: display,
     icon: "hash",
     ...(opts.topic?.trim() ? { topic: opts.topic.trim() } : {}),
     private: true,

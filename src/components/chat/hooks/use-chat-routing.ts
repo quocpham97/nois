@@ -37,7 +37,7 @@ export function useChatRouting() {
     s.setSearchOpen(false);
     s.setComposeOpen(false);
     s.setSettingsOpen(isSettings);
-    s.setCreateGroupOpen(false);
+    s.setNewChatOpen(false);
     s.setWorkspaceOpen(false);
     // A quoted reply is scoped to the conversation it was started in — drop it
     // when the routed view changes so it can't carry into another group.

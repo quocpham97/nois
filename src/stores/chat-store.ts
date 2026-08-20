@@ -103,7 +103,7 @@ type ChatData = {
 
   searchOpen: boolean;
   searchQ: string;
-  createGroupOpen: boolean;
+  newChatOpen: boolean;
   /** Which sidebar nav panel (Mentions/Drafts/People/Archived) owns the pane. */
   activePanel: NavPanel | null;
   chatFilter: ChatFilter;
@@ -152,8 +152,11 @@ export type ChatStoreActions = {
   closeSettings: () => void;
   openCompose: () => void;
   closeCompose: () => void;
-  openCreateGroup: () => void;
-  closeCreateGroup: () => void;
+  /** Land in a 1:1 with someone: their existing DM if there is one, otherwise
+   *  compose pre-addressed to them (the DM is created by the first message). */
+  openDmWith: (user: User) => void;
+  openNewChat: () => void;
+  closeNewChat: () => void;
   openWorkspace: () => void;
   closeWorkspace: () => void;
   openSearch: () => void;
@@ -237,7 +240,7 @@ const CLOSED = {
   threadFor: null,
   searchOpen: false,
   composeOpen: false,
-  createGroupOpen: false,
+  newChatOpen: false,
   workspaceOpen: false,
 } as const;
 
@@ -295,7 +298,7 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     searchOpen: false,
     searchQ: "",
-    createGroupOpen: false,
+    newChatOpen: false,
     activePanel: null,
     chatFilter: "inbox",
 
@@ -347,7 +350,7 @@ export const useChatStore = create<ChatState>((set, get) => {
     setComposeRecipients: setter("composeRecipients"),
     setSearchOpen: setter("searchOpen"),
     setSearchQ: setter("searchQ"),
-    setCreateGroupOpen: setter("createGroupOpen"),
+    setNewChatOpen: setter("newChatOpen"),
     setActivePanel: setter("activePanel"),
     setChatFilter: setter("chatFilter"),
     setWorkspaceName: setter("workspaceName"),
@@ -384,7 +387,7 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     openSettings: () => {
       pushPath("/settings");
-      set({ settingsOpen: true, activePanel: null, createGroupOpen: false, workspaceOpen: false });
+      set({ settingsOpen: true, activePanel: null, newChatOpen: false, workspaceOpen: false });
     },
     closeSettings: () => {
       pushPath(idToPath(get().currentGroupId));
@@ -399,19 +402,36 @@ export const useChatStore = create<ChatState>((set, get) => {
         composeRecipients: [],
         activePanel: null,
         workspaceOpen: false,
+        newChatOpen: false,
       }),
     closeCompose: () => set({ composeOpen: false }),
 
-    openCreateGroup: () =>
+    // Matched by stable uid where we have one, display name for legacy rows —
+    // the same pairing rule the roster lists use.
+    openDmWith: (user) => {
+      const s = get();
+      const dmId = s.dmOrder.find((id) => {
+        const u = s.groups[id]?.user;
+        return u && (u.id ? u.id === user.id : u.name === user.name);
+      });
+      if (dmId) {
+        s.selectGroup(dmId);
+        return;
+      }
+      s.openCompose();
+      s.addRecipient(user.name);
+    },
+
+    openNewChat: () =>
       set({
-        createGroupOpen: true,
+        newChatOpen: true,
         settingsOpen: false,
         composeOpen: false,
         searchOpen: false,
         activePanel: null,
         workspaceOpen: false,
       }),
-    closeCreateGroup: () => set({ createGroupOpen: false }),
+    closeNewChat: () => set({ newChatOpen: false }),
 
     openWorkspace: () =>
       set({
@@ -419,7 +439,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         settingsOpen: false,
         composeOpen: false,
         searchOpen: false,
-        createGroupOpen: false,
+        newChatOpen: false,
         activePanel: null,
       }),
     closeWorkspace: () => set({ workspaceOpen: false }),
@@ -428,7 +448,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       set({
         searchOpen: true,
         activePanel: null,
-        createGroupOpen: false,
+        newChatOpen: false,
         workspaceOpen: false,
       }),
     closeSearch: () => set({ searchOpen: false }),

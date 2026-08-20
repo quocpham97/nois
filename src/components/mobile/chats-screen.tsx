@@ -33,7 +33,7 @@ export function ChatsScreen() {
     (id: string) => archivedIds.includes(id),
     [archivedIds],
   );
-  const { selectGroup, openCompose, openSearch } = useChatActions();
+  const { selectGroup, openNewChat, openSearch } = useChatActions();
 
   const rows = useMemo(() => {
     const ids = [...groupOrder, ...dmOrder].filter(
@@ -61,7 +61,7 @@ export function ChatsScreen() {
           Chats
         </h1>
         <button
-          onClick={openCompose}
+          onClick={openNewChat}
           aria-label="New message"
           className="flex size-[38px] items-center justify-center rounded-full bg-panel text-app-text active:bg-app-hover"
         >
