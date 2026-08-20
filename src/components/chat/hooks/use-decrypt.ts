@@ -439,6 +439,9 @@ export function useDecrypt({
             groupId,
             authorName: existing.author.name,
             mentioned: isMentioned({ text: patch.text, mentions }, selfName),
+            // Only reached when the decrypt succeeded (`!patch.locked`), so this
+            // is real plaintext — never the 🔒 placeholder.
+            text: patch.text,
           });
         }
       }

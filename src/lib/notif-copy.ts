@@ -32,8 +32,60 @@ export function messageNotifCopy({
     : { title: `New message from ${sender}`, body: "Tap to read" };
 }
 
+/** A preview is trimmed, not wrapped: a notification shows two lines at most. */
+const MAX_PREVIEW = 140;
+
+/**
+ * The same notification WITH the message in it, for the one caller that can
+ * have it: the page, after this device decrypted the body. Opt-in per user
+ * (NotifPrefs.preview) because it shows on a lock screen.
+ */
+export function messagePreviewCopy({
+  senderName,
+  groupName,
+  text,
+}: {
+  senderName: string;
+  groupName?: string;
+  text: string;
+}): NotifCopy {
+  const body = text.length > MAX_PREVIEW ? text.slice(0, MAX_PREVIEW - 1) + "…" : text;
+  // In a DM the sender IS the conversation, so they title it; in a group the
+  // conversation titles it and the sender prefixes the line.
+  return groupName
+    ? { title: groupName, body: `${senderName || "Someone"}: ${body}` }
+    : { title: senderName || "Someone", body };
+}
+
+/**
+ * A call that started while this person was away. Composed by the server (the
+ * only party that knows a call began) and shown by every transport.
+ */
+export function callNotifCopy({
+  callerName,
+  groupName,
+  video,
+}: {
+  callerName: string;
+  /** Absent for a DM. */
+  groupName?: string;
+  video: boolean;
+}): NotifCopy {
+  const caller = callerName || "Someone";
+  const kind = video ? "video call" : "call";
+  return groupName
+    ? { title: `${kind === "call" ? "Call" : "Video call"} in ${groupName}`, body: `${caller} started it — tap to join` }
+    : { title: `Incoming ${kind} from ${caller}`, body: "Tap to answer" };
+}
+
 /** Collapse key: one live notification per conversation, on every transport
  *  (Web Push `tag`, FCM `tag`/collapse_key, APNs `apns-collapse-id`). */
 export function conversationTag(groupId: string): string {
   return "ch:" + groupId;
+}
+
+/** Calls collapse separately: a ringing call must not replace — or be replaced
+ *  by — the message banner for the same conversation. */
+export function callTag(groupId: string): string {
+  return "call:" + groupId;
 }

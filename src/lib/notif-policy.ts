@@ -65,6 +65,14 @@ export function isMuted(
 export type NotifDecision = "notify" | "skip" | "defer";
 
 /**
+ * What is being announced. A call is somebody trying to reach this person right
+ * now, not conversation to catch up on, so it clears the level that filters
+ * chatter — while still yielding to the two settings that say "not now at all":
+ * mute, and "Nothing".
+ */
+export type NotifKind = "message" | "call";
+
+/**
  * Should this user be notified about a message in a DM (or a group) right now?
  *
  * `mentioned` is undefined when the body hasn't been opened yet, which is the
@@ -78,8 +86,15 @@ export function notifDecision(
     isDm,
     groupId,
     mentioned,
+    kind = "message",
     now = Date.now(),
-  }: { isDm: boolean; groupId: string; mentioned?: boolean; now?: number },
+  }: {
+    isDm: boolean;
+    groupId: string;
+    mentioned?: boolean;
+    kind?: NotifKind;
+    now?: number;
+  },
 ): NotifDecision {
   const p = withNotifDefaults(prefs);
   // Mute is the most specific thing the user can say, so nothing outranks it —
@@ -87,6 +102,9 @@ export function notifDecision(
   if (isMuted(p, groupId, now)) return "skip";
   if (p.level === 2) return "skip";
   if (p.dnd && inQuietHours(p, now)) return "skip";
+  // A ringing call has no "mentions" question to ask and no quieter tier to
+  // fall to: either it reaches them or it doesn't happen.
+  if (kind === "call") return "notify";
   if (p.level === 0 || isDm) return "notify";
   if (mentioned === undefined) return "defer";
   return mentioned ? "notify" : "skip";
@@ -99,7 +117,13 @@ export function notifDecision(
  */
 export function notifAllowed(
   prefs: NotifPrefs | undefined,
-  opts: { isDm: boolean; groupId: string; mentioned?: boolean; now?: number },
+  opts: {
+    isDm: boolean;
+    groupId: string;
+    mentioned?: boolean;
+    kind?: NotifKind;
+    now?: number;
+  },
 ): boolean {
   return notifDecision(prefs, opts) === "notify";
 }

@@ -21,7 +21,7 @@ runs only when `Capacitor.isNativePlatform()` is true, and installs
 | Local notifications + tap-to-open-channel | ✅ | `capacitor-bridge.ts` |
 | iOS safe-area insets | ✅ | `globals.css` `.mobile` |
 | Background push (APNs/FCM) | ✅ code done, needs credentials | `capacitor-bridge.ts` + `src/server/mobile-push.ts`; see "Push" below |
-| **App icon badge** (unread count) | ⏳ needs a Badge plugin | `setBadge` calls `Plugins.Badge`, a no-op until `@capawesome/capacitor-badge` is installed |
+| App icon badge (unread count) | ✅ | `@capawesome/capacitor-badge` via `setBadge` in `capacitor-bridge.ts` |
 | **Message history persistence** if OPFS is unavailable | ⏳ follow-up | see "OPFS gate" |
 | WebRTC calls in background | ⏳ needs CallKit/ConnectionService | see calls memo |
 
@@ -164,6 +164,10 @@ is in place:
   fan-out a tapped local notification uses. There is deliberately no
   `pushNotificationReceived` handler: a push that lands with the app open
   duplicates what the socket already delivered.
+- **Calls too**: `call:start` pushes members it can't ring over the wire, and the
+  app learns about the live call on connect so the ring is answerable. It arrives
+  as a normal alert, not a system call screen — CallKit/ConnectionService and a
+  VoIP push type would be the next step there.
 - **Sending**: `src/server/mobile-push.ts`, called from `maybePush` in server.ts
   beside the Web Push fanout, under the same preferences (mute, quiet hours,
   level) and the same 30s per-conversation coalescing. Payloads are generic —

@@ -30,7 +30,7 @@ import {
 } from "./src/lib/chat-data";
 import { dmIdFor } from "./src/lib/dm-id";
 import { notifAllowed } from "./src/lib/notif-policy";
-import { messageNotifCopy } from "./src/lib/notif-copy";
+import { callNotifCopy, messageNotifCopy } from "./src/lib/notif-copy";
 import * as store from "./src/server/store";
 import * as keyStore from "./src/server/key-store";
 import * as mlsDs from "./src/server/mls-ds";
@@ -44,6 +44,7 @@ import {
   deletePushSubscription,
   listMobilePushTokens,
   deleteMobilePushToken,
+  hasPushTarget,
   type PushSub,
   type MobileToken,
 } from "./src/lib/db";
@@ -463,8 +464,10 @@ app.prepare().then(async () => {
   // otherwise, which is the same trade the presence map makes.
   const PUSH_COOLDOWN_MS = 30_000;
   const pushedAt = new Map<string, number>();
-  const claimPush = async (uid: string, groupId: string): Promise<boolean> => {
-    const key = `push:${uid}|${groupId}`;
+  // `scope` separates windows that shouldn't gate each other: messages coalesce
+  // per conversation, a ringing call per call.
+  const claimPush = async (uid: string, scope: string): Promise<boolean> => {
+    const key = `push:${uid}|${scope}`;
     if (redis) {
       return (await redis.set(key, "1", { NX: true, PX: PUSH_COOLDOWN_MS })) === "OK";
     }
@@ -481,6 +484,97 @@ app.prepare().then(async () => {
     }
     return true;
   };
+
+  /**
+   * Deliver one already-composed notification to every device a user has, over
+   * whichever transports are configured. Web Push carries routing metadata and
+   * lets public/sw.js compose the text (it has to: the payload is all the
+   * service worker gets), while a native push carries the text itself.
+   */
+  const pushToUser = async (
+    uid: string,
+    copy: { title: string; body: string },
+    webPayload: string,
+  ): Promise<void> => {
+    if (nativePushReady) {
+      void (async () => {
+        let tokens: MobileToken[] = [];
+        try {
+          tokens = await listMobilePushTokens(uid);
+        } catch {
+          return;
+        }
+        if (!tokens.length) return;
+        const channelId = (JSON.parse(webPayload) as { channelId: string }).channelId;
+        await sendMobilePush(tokens, copy, channelId, (dead) => {
+          void deleteMobilePushToken(dead);
+        });
+      })();
+    }
+    if (!webPushReady) return;
+    let subs: PushSub[] = [];
+    try {
+      subs = await listPushSubscriptions(uid);
+    } catch {
+      return;
+    }
+    for (const sub of subs) {
+      webpush
+        .sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, webPayload)
+        .catch((err: { statusCode?: number }) => {
+          // 404/410 mean this endpoint is gone for good — prune the row.
+          if (err?.statusCode === 404 || err?.statusCode === 410) {
+            void deletePushSubscription(sub.endpoint);
+            return;
+          }
+          // Anything else is about US, not the subscription: 401/403 is a
+          // VAPID key mismatch, 413 too large, 429 throttled. Deliberately
+          // NOT pruned — deleting on a server misconfiguration would
+          // silently unsubscribe every device at once, and only each user
+          // can undo that. Logged instead, so it's visible.
+          console.warn(
+            `[push] send failed (${err?.statusCode ?? "?"}) user=${uid}`,
+          );
+        });
+    }
+  };
+
+  // Room name for a call's participants. Shared with the connect path (which
+  // checks whether a remembered call is still occupied), so it lives out here
+  // rather than inside the per-socket call block.
+  const callRoom = (groupId: string, callId: string) => `call:${groupId}:${callId}`;
+
+  // Which conversations have a call in progress. A ring only ever reaches
+  // sockets that exist at the time, so without this a device woken by a call
+  // push opens the app and finds nothing to join — the push would be a
+  // notification about something unreachable. Redis when configured so it holds
+  // across nodes, in-memory otherwise: the same trade presence makes.
+  type LiveCall = { callId: string; video: boolean; starterId: string };
+  const memCalls = new Map<string, LiveCall>();
+  const liveCalls = redis
+    ? {
+        async set(groupId: string, call: LiveCall) {
+          await redis!.hSet("calls", groupId, JSON.stringify(call));
+        },
+        async clear(groupId: string) {
+          await redis!.hDel("calls", groupId);
+        },
+        async get(groupId: string): Promise<LiveCall | null> {
+          const raw = await redis!.hGet("calls", groupId);
+          return raw ? (JSON.parse(raw) as LiveCall) : null;
+        },
+      }
+    : {
+        async set(groupId: string, call: LiveCall) {
+          memCalls.set(groupId, call);
+        },
+        async clear(groupId: string) {
+          memCalls.delete(groupId);
+        },
+        async get(groupId: string) {
+          return memCalls.get(groupId) ?? null;
+        },
+      };
 
   // Fire-and-forget contentless pushes to a group's OFFLINE members (no live
   // socket). Payload carries only server-known routing metadata — never message
@@ -509,48 +603,42 @@ app.prepare().then(async () => {
       const copy = messageNotifCopy({ senderName, groupName });
       for (const uid of recipients) {
         if (!(await claimPush(uid, groupId))) continue;
-        // Mobile devices of this user (APNs/FCM). Separate registry from the
-        // browser endpoints below; a user can easily have both.
-        if (nativePushReady) {
-          void (async () => {
-            let tokens: MobileToken[] = [];
-            try {
-              tokens = await listMobilePushTokens(uid);
-            } catch {
-              return;
-            }
-            if (!tokens.length) return;
-            await sendMobilePush(tokens, copy, groupId, (dead) => {
-              void deleteMobilePushToken(dead);
-            });
-          })();
-        }
-        if (!webPushReady) continue;
-        let subs: PushSub[] = [];
-        try {
-          subs = await listPushSubscriptions(uid);
-        } catch {
-          continue;
-        }
-        for (const sub of subs) {
-          webpush
-            .sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, payload)
-            .catch((err: { statusCode?: number }) => {
-              // 404/410 mean this endpoint is gone for good — prune the row.
-              if (err?.statusCode === 404 || err?.statusCode === 410) {
-                void deletePushSubscription(sub.endpoint);
-                return;
-              }
-              // Anything else is about US, not the subscription: 401/403 is a
-              // VAPID key mismatch, 413 too large, 429 throttled. Deliberately
-              // NOT pruned — deleting on a server misconfiguration would
-              // silently unsubscribe every device at once, and only each user
-              // can undo that. Logged instead, so it's visible.
-              console.warn(
-                `[push] send failed (${err?.statusCode ?? "?"}) user=${uid} group=${groupId}`,
-              );
-            });
-        }
+        await pushToUser(uid, copy, payload);
+      }
+    })();
+  };
+
+  /**
+   * Ring the devices of members who have no socket to ring — the call-shaped
+   * counterpart of maybePush. Coalesced per CALL rather than per conversation,
+   * so a message push a moment earlier can't swallow the ring.
+   */
+  const maybeCallPush = (
+    groupId: string,
+    starterName: string,
+    callId: string,
+    video: boolean,
+    offline: string[],
+  ) => {
+    if (!pushReady || offline.length === 0) return;
+    void (async () => {
+      const isDm = store.isDm(groupId);
+      const groupName = isDm ? undefined : store.getGroupName(groupId);
+      const copy = callNotifCopy({ callerName: starterName, groupName, video });
+      const payload = JSON.stringify({
+        type: "call",
+        channelId: groupId,
+        channelName: groupName,
+        senderName: starterName,
+        video,
+      });
+      for (const uid of offline) {
+        // A call clears the level that filters chatter, but not mute, "Nothing",
+        // or quiet hours (see notif-policy.ts).
+        const prefs = store.getProfile(uid).notif;
+        if (!notifAllowed(prefs, { isDm, groupId, kind: "call" })) continue;
+        if (!(await claimPush(uid, "call:" + callId))) continue;
+        await pushToUser(uid, copy, payload);
       }
     })();
   };
@@ -1111,9 +1199,6 @@ app.prepare().then(async () => {
     // `call:start` and `call:join` are the server-validated steps (they create
     // UI out of nothing); everything after is dropped client-side for callIds a
     // client doesn't recognize.
-    const callRoom = (groupId: string, callId: string) =>
-      `call:${groupId}:${callId}`;
-
     // Who may be rung: the members who are ONLINE right now, provided they'd all
     // fit in the call. Ringing is about reaching people who can actually answer,
     // and a roster is a poor proxy for that — a 40-person group with three
@@ -1161,6 +1246,9 @@ app.prepare().then(async () => {
       groupId: string,
       payload: { callId: string; video: boolean; starterId: string },
     ) => {
+      // Remembered for whoever connects mid-call (including a device the push
+      // below just woke).
+      void liveCalls.set(groupId, payload);
       if (compactGroup(groupId)) {
         for (const id of store.listMemberIds(groupId)) {
           io.to("user:" + id).emit("call:ongoing", { groupId, ...payload });
@@ -1170,6 +1258,7 @@ app.prepare().then(async () => {
       }
     };
     const notifyCallOver = (groupId: string, callId: string) => {
+      void liveCalls.clear(groupId);
       if (compactGroup(groupId)) {
         for (const id of store.listMemberIds(groupId)) {
           io.to("user:" + id).emit("call:over", { groupId, callId });
@@ -1197,12 +1286,31 @@ app.prepare().then(async () => {
       const online = presence.filter((id): id is string => id !== null);
       const effectiveVideo = !!video && videoEligible(online);
       const callId = newCallId(effectiveVideo);
-      // A 1:1 call with nobody on the other end has failed; a GROUP call with
-      // nobody online is a huddle you can legitimately sit in and wait.
+      // A GROUP call with nobody online is a huddle you can legitimately sit in
+      // and wait. A 1:1 call used to fail outright — there was nothing to ring.
+      // Now there is: if the other side has a device we can push to, their phone
+      // rings and the call sits waiting, exactly as it would if they were slow
+      // to pick up. Refuse only when they genuinely cannot be reached, so the
+      // caller is never left listening to a phone that will not buzz.
+      // True when the only thing ringing is a pushed device — which still
+      // counts as ringing, so the caller's UI rings out and records a missed
+      // call instead of waiting forever the way a huddle legitimately does.
+      let pushRinging = false;
       if (store.isDm(groupId) && online.length === 0) {
-        return reply({ ok: false, reason: "offline" });
+        const callee = others[0];
+        const reachable =
+          pushReady &&
+          !!callee &&
+          notifAllowed(store.getProfile(callee).notif, {
+            isDm: true,
+            groupId,
+            kind: "call",
+          }) &&
+          (await hasPushTarget(callee).catch(() => false));
+        if (!reachable) return reply({ ok: false, reason: "offline" });
+        pushRinging = true;
       }
-      const ringing = ringEligible(online);
+      const ringing = ringEligible(online) || pushRinging;
       socket.join(callRoom(groupId, callId));
       if (ringing) {
         // Only the people who can pick up. Ringing a device that isn't there
@@ -1222,6 +1330,15 @@ app.prepare().then(async () => {
         video: effectiveVideo,
         starterId: userId,
       });
+      // The members a socket-borne ring cannot reach. Their device rings
+      // instead, and the connect path hands them the live call to join.
+      maybeCallPush(
+        groupId,
+        me.name,
+        callId,
+        effectiveVideo,
+        others.filter((id) => !online.includes(id)),
+      );
       reply({ ok: true, callId, video: effectiveVideo, ringing });
     });
 
@@ -1836,6 +1953,25 @@ app.prepare().then(async () => {
       // Baseline read cursors (first connect = caught up), then send unread.
       store.initUserReads(userId);
       socket.emit("unread:state", { counts: store.unreadState(userId) });
+      // Any call already in progress in one of this user's conversations. The
+      // ring went out to the sockets that existed when it started, so without
+      // this a device woken by a call push — or any tab opened mid-call — has
+      // nothing to join.
+      void (async () => {
+        for (const ch of store.listGroupsForUser(userId)) {
+          const call = await liveCalls.get(ch.id);
+          if (!call) continue;
+          // Trust the room, not the record: a process that died mid-call leaves
+          // an entry behind, and offering a dead call to join is worse than
+          // saying nothing.
+          const present = await io.in(callRoom(ch.id, call.callId)).fetchSockets();
+          if (present.length === 0) {
+            void liveCalls.clear(ch.id);
+            continue;
+          }
+          socket.emit("call:ongoing", { groupId: ch.id, ...call });
+        }
+      })();
       // Catch-up: replay missed messages + sender keys for ALL the user's
       // groups (not just the one they open), so an offline gap is recovered
       // everywhere. Runs once per connect; the client backfills only what's

@@ -146,11 +146,12 @@ export function useMessageEvents({
           msgId: message.id,
           groupId,
           authorName: message.author.name,
-          // A sealed envelope can't say whether it mentions us, so leave the
-          // question open — use-decrypt re-asks it once the body is readable.
+          // A sealed envelope can't say whether it mentions us, or what it
+          // says — both stay open until use-decrypt opens it and re-asks.
           mentioned: message.enc
             ? undefined
             : isMentioned(message, myUser().name),
+          text: message.enc ? undefined : message.text,
         });
       }
     };
@@ -196,6 +197,7 @@ export function useMessageEvents({
           groupId,
           authorName: reply.author.name,
           mentioned: reply.enc ? undefined : isMentioned(reply, myUser().name),
+          text: reply.enc ? undefined : reply.text,
         });
       }
     };

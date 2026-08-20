@@ -598,6 +598,12 @@ function NotificationsPanel() {
         </p>
       )}
       <ToggleRow
+        label="Show message text"
+        sub="Off by default — a preview shows on your lock screen. Only possible while the app is running; a notification sent to a closed app stays generic."
+        checked={!!prefs.preview}
+        onCheckedChange={(v) => set({ preview: v })}
+      />
+      <ToggleRow
         label="Sound on every message"
         sub="A short ping for messages from other people, here and in the background"
         checked={prefs.sound}

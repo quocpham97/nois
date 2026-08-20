@@ -320,6 +320,16 @@ export type NotifPrefs = {
    * hook has to honor it.
    */
   muted?: Record<string, number | true>;
+  /**
+   * Show the message text in a notification rather than "New message from X".
+   * OFF by default, and deliberately: a preview lands on a lock screen, where
+   * anyone holding the phone reads it.
+   *
+   * Only the page can honor this — it is the only place a body is ever
+   * decrypted — so a notification raised while the app is closed (Web Push, or
+   * APNs/FCM) stays generic no matter what this says.
+   */
+  preview?: boolean;
 };
 
 // Messenger-style chat colors: the sent-bubble gradient (also used for the

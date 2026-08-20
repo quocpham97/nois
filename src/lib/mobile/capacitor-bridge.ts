@@ -200,11 +200,13 @@ export async function setupMobileBridge(): Promise<void> {
       } as never);
     },
     setBadge: (count) => {
-      // Badge support is a plugin (@capawesome/capacitor-badge) that the native
-      // projects don't ship yet — driven through the runtime global like every
-      // other plugin here, so it's a no-op until the plugin is installed rather
-      // than a build-time dependency.
-      void plugin("Badge")?.set?.({ count } as never);
+      // @capawesome/capacitor-badge, reached through the runtime global like
+      // every other plugin here (the web bundle carries no Capacitor imports).
+      // iOS grants badge permission as part of the push permission request.
+      const Badge = plugin("Badge");
+      // clear() rather than set({count:0}): Android's launcher keeps drawing a
+      // dot for a zero-count badge on some OEM skins.
+      void (count > 0 ? Badge?.set?.({ count } as never) : Badge?.clear?.());
     },
     pushState: () => nativePushState(),
     setPushEnabled: (on) => setNativePushEnabled(on),

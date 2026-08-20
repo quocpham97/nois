@@ -19,14 +19,33 @@ self.addEventListener("push", (event) => {
   }
   const sender = data.senderName || "Someone";
   const inChannel = data.channelName ? ` in ${data.channelName}` : "";
-  const title = data.channelName ? `New message${inChannel}` : `New message from ${sender}`;
-  const body = data.channelName ? `${sender} sent a message` : "Tap to read";
+  const call = data.type === "call";
+  // Mirrors callNotifCopy / messageNotifCopy in src/lib/notif-copy.ts.
+  const kind = data.video ? "video call" : "call";
+  const title = call
+    ? data.channelName
+      ? `${data.video ? "Video call" : "Call"}${inChannel}`
+      : `Incoming ${kind} from ${sender}`
+    : data.channelName
+      ? `New message${inChannel}`
+      : `New message from ${sender}`;
+  const body = call
+    ? data.channelName
+      ? `${sender} started it — tap to join`
+      : "Tap to answer"
+    : data.channelName
+      ? `${sender} sent a message`
+      : "Tap to read";
   event.waitUntil(
     self.registration.showNotification(title, {
       body,
-      // Collapse repeated pushes for the same channel into one notification.
-      tag: data.channelId ? "ch:" + data.channelId : undefined,
+      // Collapse repeated pushes for the same conversation into one
+      // notification — but a ringing call keeps its own lane, so it neither
+      // replaces nor is replaced by that conversation's message banner.
+      tag: data.channelId ? (call ? "call:" : "ch:") + data.channelId : undefined,
       renotify: !!data.channelId,
+      // A ring stays up until it's dealt with; a message banner may fade.
+      requireInteraction: call,
       data: { channelId: data.channelId || null },
     }),
   );

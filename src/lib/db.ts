@@ -505,6 +505,24 @@ export async function listMobilePushTokens(userId: string): Promise<MobileToken[
   }));
 }
 
+/**
+ * Does this user have ANY device we could push to — browser or mobile?
+ *
+ * Asked before ringing someone with no live socket: a call to a device that
+ * cannot be reached is a caller waiting for a phone that never buzzes, so the
+ * call is refused instead (see call:start in server.ts).
+ */
+export async function hasPushTarget(userId: string): Promise<boolean> {
+  const { rows } = await getPool().query(
+    `SELECT 1 FROM push_subscription WHERE user_id=$1
+     UNION ALL
+     SELECT 1 FROM mobile_push_token WHERE user_id=$1
+     LIMIT 1`,
+    [userId],
+  );
+  return rows.length > 0;
+}
+
 /** All push endpoints for a user (a user may have several devices/browsers). */
 export async function listPushSubscriptions(userId: string): Promise<PushSub[]> {
   const { rows } = await getPool().query(

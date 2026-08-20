@@ -26,8 +26,13 @@
 import { chat } from "@/stores/chat-store";
 import { isDm as groupIsDm } from "@/stores/chat-selectors";
 import { getShellBridge } from "./shell";
+import type { NotifPrefs } from "./chat-data";
 import { notifDecision, withNotifDefaults } from "./notif-policy";
-import { conversationTag, messageNotifCopy } from "./notif-copy";
+import {
+  conversationTag,
+  messageNotifCopy,
+  messagePreviewCopy,
+} from "./notif-copy";
 
 /** `renotify` (re-alert rather than silently replace a same-tag banner) is real
  *  on the service-worker path but missing from lib.dom's NotificationOptions. */
@@ -40,6 +45,8 @@ const DECIDE_MS = 150;
 const SEEN_MAX = 300;
 /** A burst of messages is one ping, not one per message. */
 const PING_GAP_MS = 3000;
+/** How long a preview-wanting notification waits for its plaintext. */
+const PREVIEW_WAIT_MS = 1200;
 
 /** This tab's identity — used only to break the "who shows it" tie. */
 const tabId =
@@ -211,7 +218,19 @@ type Incoming = {
   /** Was the viewer @-mentioned? `undefined` = not knowable yet (the body is
    *  still sealed), which parks the decision rather than answering it. */
   mentioned?: boolean;
+  /** The decrypted body, where there is one. Absent for a sealed message —
+   *  which is what a preview has to wait for. */
+  text?: string;
 };
+
+/** A decided notification held back for its text (see the preview wait below). */
+type PendingPreview = {
+  timer: ReturnType<typeof setTimeout>;
+  msg: Incoming;
+  prefs: NotifPrefs;
+  dm: boolean;
+};
+const previewWait = new Map<string, PendingPreview>();
 
 /**
  * Announce a message that just arrived from someone else. A no-op unless the
@@ -223,28 +242,43 @@ export function notifyIncoming(msg: Incoming): void {
 }
 
 /**
- * Re-ask for a message whose decision was parked, now that its body is open.
- * This is what makes level 1 ("direct messages & mentions") true for an
- * encrypted group: the mention is only visible once this device decrypts.
- * A no-op for anything the arrival path didn't park — including the replayed
- * history that decrypts on load.
+ * The same message, now that this device has opened it. Two things wait on
+ * this, both of which are only knowable from plaintext:
+ *
+ *   * the mention question, for level 1 in a group — which is what makes
+ *     "direct messages & mentions" true for an encrypted conversation;
+ *   * the preview text, when the viewer asked for previews.
+ *
+ * A no-op for anything the arrival path didn't hold, so the replayed history
+ * this same decrypt loop grinds through on load raises nothing.
  */
 export function notifyDecrypted(msg: Incoming): void {
-  void run(msg, true);
+  void (async () => {
+    try {
+      // Already decided, and only waiting to be able to say what it says.
+      const waiting = previewWait.get(msg.msgId);
+      if (waiting) {
+        clearTimeout(waiting.timer);
+        previewWait.delete(msg.msgId);
+        await deliver(msg, waiting.prefs, waiting.dm);
+        return;
+      }
+      await run(msg, true);
+    } catch (err) {
+      console.warn("[notify] could not announce decrypted message", err);
+    }
+  })();
 }
 
-async function run(
-  { msgId, groupId, authorName, mentioned }: Incoming,
-  escalated: boolean,
-): Promise<void> {
+async function run(msg: Incoming, escalated: boolean): Promise<void> {
+  const { msgId, groupId, text } = msg;
   try {
     // Arrival gets one shot per message. An escalation must claim the parked
     // entry (delete = claim), so two decrypt passes can't both announce.
     if (escalated ? !deferred.delete(msgId) : seen.has(msgId)) return;
-    const state = chat();
     const dm = groupIsDm(groupId);
-    const prefs = withNotifDefaults(state.profile.notif);
-    const decision = notifDecision(prefs, { isDm: dm, groupId, mentioned });
+    const prefs = withNotifDefaults(chat().profile.notif);
+    const decision = notifDecision(prefs, { isDm: dm, groupId, mentioned: msg.mentioned });
     if (decision === "defer") {
       push(deferred, msgId);
       return;
@@ -253,27 +287,50 @@ async function run(
     push(seen, msgId);
     if (decision === "skip") return;
 
-    const viewing = isViewing(groupId);
-    // Bid before returning either way: sibling tabs need to hear that a focused
-    // tab has this conversation on screen.
-    const placedAt = Date.now();
-    announce(msgId, viewing);
-    if (viewing) {
-      // On screen already — the ping is the whole notification.
-      if (prefs.sound) ping();
+    // Notifying, but perhaps not yet: with previews on there is nothing to
+    // preview until this device decrypts. Hold it briefly rather than firing a
+    // generic banner that a preview would immediately replace — and only
+    // briefly, because a message whose keys never arrive would otherwise be
+    // announced not at all, which is worse than announcing it vaguely.
+    if (prefs.preview && !escalated && !text) {
+      const timer = setTimeout(() => {
+        const held = previewWait.get(msgId);
+        previewWait.delete(msgId);
+        // No text after all — say the generic thing.
+        if (held) void deliver(held.msg, held.prefs, held.dm);
+      }, PREVIEW_WAIT_MS);
+      previewWait.set(msgId, { timer, msg, prefs, dm });
       return;
     }
-    if (!(await winsBanner(msgId, placedAt))) return;
-    if (prefs.sound) ping();
-    const { title, body } = messageNotifCopy({
-      senderName: authorName,
-      groupName: dm ? undefined : (state.groups[groupId]?.name ?? "a group"),
-    });
-    await show(groupId, title, body);
+    await deliver(msg, prefs, dm);
   } catch (err) {
     // A banner that won't show is not a reason to lose the message: this runs
     // inside the message:new handler, and an unhandled rejection here would
     // surface as a page error over a cosmetic failure.
     console.warn("[notify] could not announce message", err);
   }
+}
+
+/** Everything after the decision: who shows it, the ping, the banner. */
+async function deliver(msg: Incoming, prefs: NotifPrefs, dm: boolean): Promise<void> {
+  const { msgId, groupId, authorName, text } = msg;
+  const viewing = isViewing(groupId);
+  // Bid before returning either way: sibling tabs need to hear that a focused
+  // tab has this conversation on screen.
+  const placedAt = Date.now();
+  announce(msgId, viewing);
+  if (viewing) {
+    // On screen already — the ping is the whole notification.
+    if (prefs.sound) ping();
+    return;
+  }
+  if (!(await winsBanner(msgId, placedAt))) return;
+  if (prefs.sound) ping();
+  const groupName = dm ? undefined : (chat().groups[groupId]?.name ?? "a group");
+  const body = text?.trim();
+  const { title, body: line } =
+    prefs.preview && body
+      ? messagePreviewCopy({ senderName: authorName, groupName, text: body })
+      : messageNotifCopy({ senderName: authorName, groupName });
+  await show(groupId, title, line);
 }

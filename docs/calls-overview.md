@@ -28,7 +28,7 @@ a second implementation.
 
 | | DM | Group |
 | --- | --- | --- |
-| Who rings | the peer's devices; nobody online **fast-fails `offline`** | the online members, if they'd all fit (≤5 others); nobody online is a legitimate huddle you can sit in |
+| Who rings | the peer's devices; nobody online → their devices are **pushed** if reachable, else fast-fails `offline` | the online members, if they'd all fit (≤5 others); absent members are pushed too, and nobody online is a legitimate huddle you can sit in |
 | No ring case | — | more online members than fit → silent "Ongoing call · Join" bar in the conversation |
 | Video offered | always | server offers it when the online members fit under the video cap (≤3 others); the cap then holds at **join**, refusing the 5th rather than degrading everyone |
 | Call layout | the comp's centred single-peer surface | 4:3 tile grid from two peers up, name labels per tile |
@@ -59,6 +59,30 @@ tracks are fixed at setup and **no renegotiation ever happens** on the mesh.
 Outcomes recorded: `answered` (media connected), `declined` (declined, capture
 failed, or busy), `unanswered` (rang out, cancelled, or accepted-but-never-
 connected). A call that never reached anyone records nothing.
+
+## Ringing an absent device
+
+A ring only reaches sockets that exist, so a closed app used to be unreachable —
+and a 1:1 call to it failed immediately with `offline`. Two pieces changed that
+(2026-08-20):
+
+- **The push.** `call:start` pushes every member it could not ring over the wire,
+  through the same transports messages use (Web Push, APNs/FCM). It obeys mute,
+  "Nothing", and quiet hours, but not the tier that filters chatter — a call is
+  somebody trying to reach you now, so level 1 rings in a group where a message
+  would stay silent (`notifDecision(..., { kind: "call" })`). Coalesced per CALL,
+  so a message push a moment earlier can't swallow the ring.
+- **The registry.** A pushed device that opens the app needs something to join,
+  and `call:ongoing` had only ever been emitted at start time. Live calls are now
+  remembered per conversation (Redis when configured, in-memory otherwise) and
+  replayed on connect — validated against the call room's occupancy first, so a
+  process that died mid-call can't offer a dead call to join.
+
+A 1:1 call therefore refuses `offline` only when the callee genuinely cannot be
+reached: no push registration, or preferences that silence it. When it does
+proceed, the ack says `ringing: true` even though nobody was rung over a socket,
+so the caller's UI rings out normally and records a missed call rather than
+waiting forever the way a huddle does.
 
 ## Layers
 
@@ -216,10 +240,15 @@ Ordered by how likely they are to bite.
 3. **Signaling isn't E2EE-sealed** — the remaining hole in the mesh's otherwise
    end-to-end story. The fix is to seal `call:signal` blobs in the existing
    envelope crypto.
-4. **No push/wake for incoming calls.** A closed or backgrounded app can't be
-   rung at all: `call:invite` fast-fails `offline` and sends no web push.
-5. **Huddle discovery is start-time only** for groups too big to fan out to
-   (>6 members) — opening such a group after a huddle starts shows no Join bar.
+4. **A pushed ring is an alert, not a system call screen.** A device with no
+   socket is now rung by push (see "Ringing an absent device"), but it arrives as
+   an ordinary notification — no CallKit on iOS, no full-screen intent on
+   Android, so it doesn't ring like a phone call and iOS may batch it. Making it
+   ring properly needs a VoIP push type plus CallKit/ConnectionService.
+5. **Huddle discovery was start-time only** for groups too big to fan out to
+   (>6 members). The live-call registry now replays `call:ongoing` on connect,
+   so opening such a group shows the Join bar — but only on CONNECT, so a tab
+   already open when the huddle starts still learns nothing until it reconnects.
 6. **Past 6 participants needs an SFU.** Capacity refusals are counted
    server-side (`[call] capacity reject …`) as the agreed trigger.
 7. **The mobile Calls tab is a contact list, not history** — the rows now exist
