@@ -158,10 +158,11 @@ export function useDecrypt({
       // sends/commits: decryption advances the receiver chains.
       if (parsed && (parsed as { t?: string }).t === "mls") {
         return mls.withMlsLock(groupId, async () => {
-          // Already decrypted this session (overlapping passes) → replay the
-          // cached plaintext instead of re-ratcheting (which would throw).
-          const cached = msgId && mls.plainRef.current.get(msgId);
-          if (cached) return cached;
+          // Already decrypted — by an overlapping pass here, or by ANOTHER TAB of
+          // this device, which consumed the one shot at this envelope. Either way
+          // replay the plaintext instead of re-ratcheting (which would throw).
+          const cached = msgId ? await mls.recallPlain(groupId, msgId) : undefined;
+          if (cached) return { ...cached, enc: undefined };
           // Same envelope, already known unopenable → don't re-derive the verdict.
           const deadKey = msgId ?? (parsed as { w: string }).w;
           if (mls.deadRef.current.has(deadKey)) return { ...locked, permanent: true };
@@ -191,7 +192,10 @@ export function useDecrypt({
               enc: undefined,
               att: res.att ?? undefined,
             };
-            if (msgId) mls.plainRef.current.set(msgId, patch);
+            // Publish it for this device's other tabs before releasing the lock:
+            // they can't open the envelope themselves any more (this decrypt
+            // consumed its generation), so the plaintext is what they read.
+            if (msgId) await mls.rememberPlain(groupId, msgId, patch);
             return patch;
           } catch (err) {
             // ts-mls throws on a message we can't process (wrong epoch, our own

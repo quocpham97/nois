@@ -85,10 +85,16 @@ export function useMessageActions({
             return rest;
           })()
         : undefined;
-      const sendEnc = (enc: string) => {
+      const sendEnc = async (enc: string) => {
         // Durable copy of what we just sealed, so a reload before the ack can't
         // strand our own message as 🔒.
-        void rememberSent(clientId, enc, {
+        //
+        // AWAITED before the emit, not fire-and-forget: this record is also how
+        // this device's OTHER TABS read the message. They can't open the envelope
+        // themselves (sealing it consumed that generation of our leaf's ratchet),
+        // so if the server echo reached them before this write landed, they'd
+        // resolve it to a permanent 🔒. Writing first closes that window.
+        await rememberSent(clientId, enc, {
           text,
           rich,
           preview,
@@ -315,14 +321,28 @@ export function useMessageActions({
         call: msg.call,
       };
       sealFor(groupId, content)
-        .then((enc) => {
+        .then(async (enc) => {
           if (!enc) return revert();
+          // Same reason as a first send: our other tabs can only read this
+          // re-sealed body from the outbox, so record it before the echo can
+          // reach them (keyed by the envelope, so the msgId is just provenance).
+          // `MessageContent` spells "absent" as null, a message patch as
+          // undefined, hence the normalising.
+          await rememberSent(msgId, enc, {
+            text: content.text,
+            rich: content.rich ?? undefined,
+            att: content.att ?? undefined,
+            preview: content.preview ?? undefined,
+            replyTo: content.replyTo ?? undefined,
+            forwarded: content.forwarded ?? undefined,
+            call: content.call ?? undefined,
+          });
           editTimersRef.current.set(msgId, setTimeout(revert, SEND_TIMEOUT_MS));
           socket.emit("message:edit", { groupId, msgId, parentId, enc });
         })
         .catch(revert);
     },
-    [socket, sealFor, sentEditRef, editTimersRef],
+    [socket, sealFor, rememberSent, sentEditRef, editTimersRef],
   );
 
   /** Forward to any number of conversations. Each target gets its own optimistic

@@ -16,21 +16,54 @@
  * the lock (buildMlsEnc, the decrypt branch, the commit/welcome handlers, the
  * connect drain); the inner helpers (ensureMlsGroup, applyCommitsSince,
  * syncMembership) must be called with it already held.
+ *
+ * That mutex spans TABS, not just this one. A device is ONE MLS leaf — deviceId
+ * lives in IndexedDB, so every tab of a login shares it — and the group state
+ * lives in one IndexedDB record they all write. Two tabs each ratcheting their
+ * own in-memory copy fork that leaf: two messages go out claiming the same
+ * generation, and every other member rejects the second for good ("Desired gen
+ * in the past" → a permanent 🔒 for the whole group, not just for the tab that
+ * drifted). So the lock is a cross-tab Web Lock, and the state is READ THROUGH
+ * IndexedDB inside it (`loadState`) instead of trusted from memory — ordering
+ * the writers is only half of it; a stale copy written back under a good lock
+ * forks the leaf just the same.
+ *
+ * The flip side of one authoritative state: an envelope now opens EXACTLY ONCE
+ * per device, because whichever tab wins the lock consumes that generation. The
+ * winner therefore hands the plaintext on through `rememberPlain`/`recallPlain`
+ * (a per-group window in the same store), which is what keeps a second tab
+ * readable rather than showing 🔒 on messages the first tab already opened.
  */
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { groupGet, groupPut, type DeviceSecrets } from "@/lib/crypto/identity";
 import type { ClientState as MlsClientState, KeyPackage as MlsKeyPackage } from "ts-mls";
 import type { MlsKeyPair, StoredMlsKeyPair } from "@/lib/crypto/mls";
 import type { MessageContent } from "@/lib/crypto/types";
+import type { Message } from "@/lib/chat-data";
 import type { MlsCommitAck, MlsFetchGroupResult } from "@/lib/socket-events";
 import { chat } from "@/stores/chat-store";
 import { isDm } from "@/stores/chat-selectors";
 import type { TypedSocket } from "@/stores/session-store";
+import { withTabLock } from "@/lib/tab-lock";
 import { MLS_ENABLED, loadMls, mlsAddCandidates } from "../lib/mls-directory";
 
 /** Ceiling on leaf removals folded into one membership commit — see the note at
  *  the removal pass in syncMembership. */
 const MAX_EVICTIONS_PER_COMMIT = 32;
+
+/** How many decrypted messages per group stay in the hand-off window
+ *  (`mlspt:<groupId>`). It exists so a SECOND TAB can read a message this
+ *  device's other tab already opened — MLS decrypt consumes the generation, so
+ *  the plaintext is the only thing left to share. Sized as a live window, not a
+ *  history store (durable history is message-db's job, and that store is
+ *  single-tab by construction), and kept small because the record is rewritten
+ *  on every decrypt. */
+const MLS_PLAIN_WINDOW = 64;
+
+/** One decrypted message in that window. */
+type PlainEntry = { id: string; patch: MlsPlain };
+
+type MlsPlain = Partial<Message> & { att?: { key: string; iv: string } };
 
 export type Mls = ReturnType<typeof useMls>;
 
@@ -49,10 +82,12 @@ export function useMls({
    *  this DEVICE's long-lived KeyPackage keypair (persisted as `mlskp` so a
    *  Welcome sealed to it survives reconnects). */
   const statesRef = useRef<Map<string, MlsClientState>>(new Map());
+  /** The serialized bytes each cached state was read from (or last written as).
+   *  A cached ClientState is only good while the stored record still holds those
+   *  bytes — anything else means another tab moved the leaf on, and this copy
+   *  must not be ratcheted from. */
+  const stateRawRef = useRef<Map<string, string>>(new Map());
   const kpRef = useRef<MlsKeyPair | null>(null);
-  /** Last commit `seq` applied per group (persisted as `mls2seq:<id>`), so the
-   *  delivery service's ordered commits apply exactly once, in order. */
-  const seqRef = useRef<Map<string, number>>(new Map());
   /** Per-group throttle for membership drift syncs (see syncMembership). */
   const syncedAtRef = useRef<Map<string, number>>(new Map());
   /** First time we saw an MLS message for a group we hold no state for — after a
@@ -62,10 +97,9 @@ export function useMls({
    *  SINGLE-SHOT (it advances the receiver ratchet — a re-decrypt throws "gen in
    *  the past"), unlike the idempotent sender-keys/DM paths, so when overlapping
    *  decrypt passes process the same message the second one must return the
-   *  cached plaintext rather than a spurious 🔒. */
-  const plainRef = useRef<
-    Map<string, Partial<import("@/lib/chat-data").Message> & { att?: { key: string; iv: string } }>
-  >(new Map());
+   *  cached plaintext rather than a spurious 🔒. Its durable, cross-tab twin is
+   *  the `mlspt:<groupId>` window (see rememberPlain). */
+  const plainRef = useRef<Map<string, MlsPlain>>(new Map());
   /** The flip side of plainRef: envelopes this session has already proven
    *  unopenable, so several in-flight passes don't each pay a decrypt and log. */
   const deadRef = useRef<Set<string>>(new Set());
@@ -74,12 +108,19 @@ export function useMls({
   const withMlsLock = useCallback(
     <T,>(groupId: string, fn: () => Promise<T>): Promise<T> => {
       const locks = locksRef.current;
+      // Two layers, because there are two ways to fork one leaf's ratchet:
+      //   * interleaved awaits inside THIS tab → the promise chain below
+      //   * another TAB of this device (one deviceId → one leaf → one shared
+      //     IndexedDB record) → the cross-tab Web Lock
+      // The chain stays on the outside so a queue of local operations costs one
+      // cross-tab acquisition each and keeps its FIFO order.
+      const run = () => withTabLock(`mls:${userId}:${groupId}`, fn);
       const prev = locks.get(groupId) ?? Promise.resolve();
-      const next = prev.then(fn, fn);
+      const next = prev.then(run, run);
       locks.set(groupId, next.then(() => undefined, () => undefined));
       return next;
     },
-    [],
+    [userId],
   );
 
   // Storage keys are VERSIONED (`mls2:` / `mls2seq:`): v1 states from the
@@ -87,13 +128,24 @@ export function useMls({
   // unusable under the multi-device protocol — so they're simply orphaned.
   const loadState = useCallback(
     async (groupId: string): Promise<MlsClientState | null> => {
-      const cached = statesRef.current.get(groupId);
-      if (cached) return cached;
+      // READ THROUGH, always — never straight from statesRef. The record is
+      // shared with every other tab of this login, all of them advancing the same
+      // leaf, so an in-memory copy is a guess about what the leaf's position is.
+      // The cached ClientState is reused only while the stored bytes are still
+      // the ones it came from, which keeps the (costly) deserialize off the hot
+      // path in the single-tab case without ever ratcheting from a stale copy.
       const b64 = await groupGet<string>(userId, `mls2:${groupId}`);
-      if (!b64) return null;
+      if (!b64) {
+        statesRef.current.delete(groupId);
+        stateRawRef.current.delete(groupId);
+        return null;
+      }
+      const cached = statesRef.current.get(groupId);
+      if (cached && stateRawRef.current.get(groupId) === b64) return cached;
       try {
         const state = (await loadMls()).mlsDeserializeState(b64);
         statesRef.current.set(groupId, state);
+        stateRawRef.current.set(groupId, b64);
         return state;
       } catch (err) {
         // A state we can't read is worse than no state at all: every send would
@@ -101,6 +153,8 @@ export function useMls({
         // absent above) so ensureGroup can re-establish, or re-join when a
         // Welcome arrives.
         console.warn("[mls] discarding unreadable state", groupId, err);
+        statesRef.current.delete(groupId);
+        stateRawRef.current.delete(groupId);
         await groupPut(userId, `mls2:${groupId}`, "");
         return null;
       }
@@ -110,12 +164,50 @@ export function useMls({
 
   const saveState = useCallback(
     async (groupId: string, state: MlsClientState) => {
+      const b64 = (await loadMls()).mlsSerializeState(state);
       statesRef.current.set(groupId, state);
-      await groupPut(
-        userId,
-        `mls2:${groupId}`,
-        (await loadMls()).mlsSerializeState(state),
-      );
+      // Stamp the bytes we're about to store, so the next loadState recognises
+      // this write as ours and a write by ANOTHER tab as a reason to re-read.
+      stateRawRef.current.set(groupId, b64);
+      await groupPut(userId, `mls2:${groupId}`, b64);
+    },
+    [userId],
+  );
+
+  /**
+   * Plaintext hand-off between tabs (call with the group lock held).
+   *
+   * One authoritative state means one shot at each envelope: the tab that wins
+   * the lock consumes that generation, so a sibling tab asking afterwards gets
+   * "gen in the past" — permanently. Publishing the plaintext into a capped
+   * per-group record turns that from a 🔒 into a read, whichever tab got there
+   * first. Held under the group lock, so a decrypt either finds the plaintext
+   * already published or is itself the one that opens the envelope.
+   *
+   * The plaintext sits in IndexedDB unencrypted, exactly as our own sent bodies
+   * (`sentpending`) and the local message store already do — this is a window on
+   * recent traffic, not a second copy of history.
+   */
+  const recallPlain = useCallback(
+    async (groupId: string, msgId: string): Promise<MlsPlain | undefined> => {
+      const mem = plainRef.current.get(msgId);
+      if (mem) return mem;
+      const recent = (await groupGet<PlainEntry[]>(userId, `mlspt:${groupId}`)) ?? [];
+      // Warm the whole window, not just the hit: one read then answers every
+      // other message this decrypt pass is about to ask about.
+      for (const e of recent) plainRef.current.set(e.id, e.patch);
+      return plainRef.current.get(msgId);
+    },
+    [userId],
+  );
+
+  const rememberPlain = useCallback(
+    async (groupId: string, msgId: string, patch: MlsPlain) => {
+      plainRef.current.set(msgId, patch);
+      const key = `mlspt:${groupId}`;
+      const recent = (await groupGet<PlainEntry[]>(userId, key)) ?? [];
+      const next = [...recent.filter((e) => e.id !== msgId), { id: msgId, patch }];
+      await groupPut(userId, key, next.slice(-MLS_PLAIN_WINDOW));
     },
     [userId],
   );
@@ -146,18 +238,26 @@ export function useMls({
       );
     };
     if (kpRef.current && fits(kpRef.current)) return kpRef.current;
-    const stored = await groupGet<StoredMlsKeyPair>(userId, "mlskp");
-    if (stored) {
-      const kp = mls.mlsImportKeyPair(stored);
-      if (kp && fits(kp)) {
-        kpRef.current = kp;
-        return kp;
+    // Generating it is a read-modify-write of one record, so it takes a cross-tab
+    // lock and re-reads inside it: two tabs opening a fresh login otherwise each
+    // generate a pair and publish it, and the loser's directory row names a
+    // signature key its own state doesn't hold — so Welcomes sealed to it can
+    // never be joined. (A different lock name from the group locks, and nothing
+    // under it asks for one, so it can't deadlock against them.)
+    return withTabLock(`mlskp:${userId}`, async () => {
+      const stored = await groupGet<StoredMlsKeyPair>(userId, "mlskp");
+      if (stored) {
+        const kp = mls.mlsImportKeyPair(stored);
+        if (kp && fits(kp)) {
+          kpRef.current = kp;
+          return kp;
+        }
       }
-    }
-    const kp = await mls.mlsGenerateKeyPackage(userId, secrets.deviceId);
-    kpRef.current = kp;
-    await groupPut(userId, "mlskp", mls.mlsExportKeyPair(kp));
-    return kp;
+      const kp = await mls.mlsGenerateKeyPackage(userId, secrets.deviceId);
+      kpRef.current = kp;
+      await groupPut(userId, "mlskp", mls.mlsExportKeyPair(kp));
+      return kp;
+    });
   }, [userId, getSecrets]);
 
   const fetchGroup = useCallback(
@@ -210,20 +310,20 @@ export function useMls({
     [socket],
   );
 
+  /** Last commit `seq` applied per group (persisted as `mls2seq:<id>`), so the
+   *  delivery service's ordered commits apply exactly once, in order. Read
+   *  through for the same reason the state is: it describes how far the ONE
+   *  shared state has been advanced, so a per-tab memo of it would have this tab
+   *  re-applying commits another tab already folded in (which throws, stalling
+   *  catch-up) or skipping ones it hasn't. */
   const getSeq = useCallback(
-    async (groupId: string): Promise<number> => {
-      const cached = seqRef.current.get(groupId);
-      if (cached != null) return cached;
-      const stored = (await groupGet<number>(userId, `mls2seq:${groupId}`)) ?? 0;
-      seqRef.current.set(groupId, stored);
-      return stored;
-    },
+    async (groupId: string): Promise<number> =>
+      (await groupGet<number>(userId, `mls2seq:${groupId}`)) ?? 0,
     [userId],
   );
 
   const setSeq = useCallback(
     async (groupId: string, seq: number) => {
-      seqRef.current.set(groupId, seq);
       await groupPut(userId, `mls2seq:${groupId}`, seq);
     },
     [userId],
@@ -667,15 +767,26 @@ export function useMls({
   // dependency arrays, and a fresh one each render would re-run their effects.
   return useMemo(
     () => ({
-      plainRef,
       deadRef,
       waitRef,
       withMlsLock,
       loadState,
       saveState,
+      recallPlain,
+      rememberPlain,
       buildEnc,
       exportCallKey,
     }),
-    [plainRef, deadRef, waitRef, withMlsLock, loadState, saveState, buildEnc, exportCallKey],
+    [
+      deadRef,
+      waitRef,
+      withMlsLock,
+      loadState,
+      saveState,
+      recallPlain,
+      rememberPlain,
+      buildEnc,
+      exportCallKey,
+    ],
   );
 }

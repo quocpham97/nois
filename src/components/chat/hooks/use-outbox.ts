@@ -15,6 +15,7 @@ import { useCallback, useMemo, useRef } from "react";
 import { groupGet, groupPut } from "@/lib/crypto/identity";
 import type { CallEvent, LinkPreview, Message, ReplyRef } from "@/lib/chat-data";
 import { chat } from "@/stores/chat-store";
+import { withTabLock } from "@/lib/tab-lock";
 import { SENT_PENDING_MAX, SEND_TIMEOUT_MS, type SentEnvelope } from "../lib/types";
 
 /** The body fields we cache for one of our own in-flight messages. */
@@ -58,27 +59,45 @@ export function useOutbox(userId: string) {
   /** Per-message fail timers: a send that isn't acked in time is marked failed. */
   const failTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
-  const loadSentEnvelopes = useCallback(async (): Promise<SentEnvelope[]> => {
-    if (!sentEnvelopesRef.current) {
-      sentEnvelopesRef.current =
-        (await groupGet<SentEnvelope[]>(userId, "sentpending")) ?? [];
-    }
-    return sentEnvelopesRef.current;
-  }, [userId]);
+  const loadSentEnvelopes = useCallback(
+    async (fresh = false): Promise<SentEnvelope[]> => {
+      if (fresh || !sentEnvelopesRef.current) {
+        sentEnvelopesRef.current =
+          (await groupGet<SentEnvelope[]>(userId, "sentpending")) ?? [];
+      }
+      return sentEnvelopesRef.current;
+    },
+    [userId],
+  );
 
   const rememberSent = useCallback(
     async (clientId: string, enc: string, body: SentEnvelope["body"]) => {
-      const list = await loadSentEnvelopes();
-      const next = [...list.filter((e) => e.enc !== enc), { clientId, enc, body }];
-      sentEnvelopesRef.current = next.slice(-SENT_PENDING_MAX);
-      await groupPut(userId, "sentpending", sentEnvelopesRef.current);
+      // Read-modify-write under a cross-tab lock, re-reading inside it: the whole
+      // list lives in ONE IndexedDB record, so a plain put from two tabs drops
+      // every entry the loser hadn't seen — and each dropped entry is one of that
+      // tab's own messages that the other tab can then only render as 🔒.
+      await withTabLock(`sentpending:${userId}`, async () => {
+        const list = await loadSentEnvelopes(true);
+        const next = [...list.filter((e) => e.enc !== enc), { clientId, enc, body }];
+        sentEnvelopesRef.current = next.slice(-SENT_PENDING_MAX);
+        await groupPut(userId, "sentpending", sentEnvelopesRef.current);
+      });
     },
     [loadSentEnvelopes, userId],
   );
 
   const sentBodyFor = useCallback(
-    async (enc: string): Promise<SentEnvelope["body"] | undefined> =>
-      (await loadSentEnvelopes()).find((e) => e.enc === enc)?.body,
+    async (enc: string): Promise<SentEnvelope["body"] | undefined> => {
+      const find = (list: SentEnvelope[]) => list.find((e) => e.enc === enc)?.body;
+      const hit = find(await loadSentEnvelopes());
+      if (hit) return hit;
+      // A miss may only mean our listing is stale: a message sent from ANOTHER
+      // TAB of this device lands here through IndexedDB, and this record is the
+      // only place its plaintext exists — no scheme can open an envelope our own
+      // leaf sealed once its ratchet moved on. So re-read before concluding the
+      // envelope is someone else's and handing it to the decrypt path.
+      return find(await loadSentEnvelopes(true));
+    },
     [loadSentEnvelopes],
   );
 
